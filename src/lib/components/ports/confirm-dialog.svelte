@@ -2,9 +2,9 @@
 	import * as AlertDialog from "$lib/components/ui/alert-dialog";
 	import { Checkbox } from "$lib/components/ui/checkbox";
 	import * as Field from "$lib/components/ui/field";
+	import { serverProcessId } from "$lib/ports/format";
 	import type { PortsStore } from "$lib/ports/ports-store.svelte";
 	import { preferences } from "$lib/ports/preferences.svelte";
-	import type { Server } from "$lib/ports/types";
 
 	let { store }: { store: PortsStore } = $props();
 
@@ -12,34 +12,38 @@
 	let dontAskAgain = $state(false);
 
 	// Keeps the text in place while the dialog animates out.
-	let last: Server | null = null;
-	const server = $derived.by(() => (last = store.pendingStop ?? last));
+	let last: PortsStore["pending"] = null;
+	const pending = $derived.by(() => (last = store.pending ?? last));
 
 	function confirm() {
-		if (!store.pendingStop) return;
-		if (dontAskAgain) preferences.confirmStop.current = false;
+		if (dontAskAgain) preferences.confirmActions.current = false;
 		dontAskAgain = false;
-		store.stop(store.pendingStop);
+		store.confirm();
 	}
 </script>
 
 <AlertDialog.Root
 	bind:open={
-		() => store.pendingStop !== null,
+		() => store.pending !== null,
 		(open) => {
 			if (open) return;
-			store.pendingStop = null;
+			store.pending = null;
 			dontAskAgain = false;
 		}
 	}
 >
 	<AlertDialog.Content size="sm">
-		{#if server}
+		{#if pending}
+			{@const { action, server } = pending}
 			<AlertDialog.Header>
-				<AlertDialog.Title>Stop {server.name}?</AlertDialog.Title>
+				<AlertDialog.Title>{action === "stop" ? "Stop" : "Restart"} {server.name}?</AlertDialog.Title>
 				<AlertDialog.Description>
-					This ends {server.process} (PID {server.pid}) and frees :{server.port}.
-					{#if server.protected}It is marked as protected.{/if}
+					{#if action === "stop"}
+						This ends {server.process} ({serverProcessId(server)}) and frees :{server.port}.
+						{#if server.protected}It is marked as protected.{/if}
+					{:else}
+						This stops {server.process} ({serverProcessId(server)}) and starts it again on :{server.port}.
+					{/if}
 				</AlertDialog.Description>
 			</AlertDialog.Header>
 			<Field.Field orientation="horizontal" class="justify-center">
@@ -48,7 +52,9 @@
 			</Field.Field>
 			<AlertDialog.Footer>
 				<AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
-				<AlertDialog.Action variant="destructive" onclick={confirm}>Stop</AlertDialog.Action>
+				<AlertDialog.Action variant={action === "stop" ? "destructive" : "default"} onclick={confirm}>
+					{action === "stop" ? "Stop" : "Restart"}
+				</AlertDialog.Action>
 			</AlertDialog.Footer>
 		{/if}
 	</AlertDialog.Content>

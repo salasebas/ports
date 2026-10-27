@@ -38,6 +38,18 @@ export function serverActivity(server: Server, now = Date.now()): string {
 	return `up ${formatDuration(now - server.startedAt)}`;
 }
 
+/** `PID 4821`, the container, or who owns the process when Ports can't see it. */
+export function serverProcessId(server: Server): string {
+	if (server.pid !== undefined) return `PID ${server.pid}`;
+	if (server.container) return `container ${server.container.id.slice(0, 12)}`;
+	return `owned by ${server.owner}`;
+}
+
+/** Memory and CPU are measured for processes Ports can see, not for containers or other users' processes. */
+export const isMeasured = (server: Server) => server.pid !== undefined;
+
+export const canStop = (server: Server) => server.pid !== undefined || server.container !== undefined;
+
 export function serverUrl(port: number): string {
 	return `http://localhost:${port}`;
 }

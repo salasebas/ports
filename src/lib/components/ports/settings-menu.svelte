@@ -16,7 +16,8 @@
 	import { Switch } from "$lib/components/ui/switch";
 	import * as ToggleGroup from "$lib/components/ui/toggle-group";
 	import { popoverShortcut } from "$lib/platform";
-	import { editors, preferences } from "$lib/ports/preferences.svelte";
+	import { setRefreshInterval } from "$lib/ports/ports-store.svelte";
+	import { editors, preferences, refreshIntervals } from "$lib/ports/preferences.svelte";
 
 	type Mode = "light" | "dark" | "system";
 
@@ -91,11 +92,24 @@
 				</NativeSelect.Root>
 			</Field.Field>
 			<Field.Field orientation="horizontal">
+				<Field.Label for="{id}-refresh">Refresh</Field.Label>
+				<NativeSelect.Root
+					id="{id}-refresh"
+					size="sm"
+					class="w-32"
+					bind:value={() => String(preferences.refreshInterval.current), (value) => setRefreshInterval(Number(value))}
+				>
+					{#each refreshIntervals as interval (interval.value)}
+						<NativeSelect.Option value={String(interval.value)}>{interval.label}</NativeSelect.Option>
+					{/each}
+				</NativeSelect.Root>
+			</Field.Field>
+			<Field.Field orientation="horizontal">
 				<Field.Content>
-					<Field.Label for="{id}-confirm-stop">Confirm before stopping</Field.Label>
-					<Field.Description>Ask before ending a server.</Field.Description>
+					<Field.Label for="{id}-confirm">Confirm actions</Field.Label>
+					<Field.Description>Stop and restart.</Field.Description>
 				</Field.Content>
-				<Switch id="{id}-confirm-stop" bind:checked={preferences.confirmStop.current} />
+				<Switch id="{id}-confirm" bind:checked={preferences.confirmActions.current} />
 			</Field.Field>
 			<Field.Field orientation="horizontal">
 				<Field.Label for="{id}-open-at-login">Open at login</Field.Label>

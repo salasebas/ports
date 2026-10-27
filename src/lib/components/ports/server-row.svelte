@@ -2,7 +2,7 @@
 	import ArrowUpRightIcon from "@lucide/svelte/icons/arrow-up-right";
 	import SquareIcon from "@lucide/svelte/icons/square";
 	import { Button } from "$lib/components/ui/button";
-	import { formatBytes, serverActivity } from "$lib/ports/format";
+	import { canStop, formatBytes, isMeasured, serverActivity } from "$lib/ports/format";
 	import type { PortsStore } from "$lib/ports/ports-store.svelte";
 	import { preferences } from "$lib/ports/preferences.svelte";
 	import type { Server } from "$lib/ports/types";
@@ -13,9 +13,10 @@
 	let { server, store }: { server: Server; store: PortsStore } = $props();
 
 	const cpu = $derived(preferences.metric.current === "cpu");
-	const reading = $derived(
-		cpu ? { value: String(Math.round(server.cpuPercent)), unit: "%" } : formatBytes(server.memoryBytes),
-	);
+	const reading = $derived.by(() => {
+		if (!isMeasured(server)) return { value: "–", unit: "" };
+		return cpu ? { value: String(Math.round(server.cpuPercent)), unit: "%" } : formatBytes(server.memoryBytes);
+	});
 	const attention = $derived(server.status === "attention");
 	const detail = $derived(server.branch ?? server.framework ?? server.process);
 </script>
@@ -67,9 +68,17 @@
 			>
 				<ArrowUpRightIcon />
 			</Button>
-			<Button variant="ghost" size="icon-sm" aria-label="Stop {server.name}" onclick={() => store.requestStop(server)}>
-				<SquareIcon class="fill-current" />
-			</Button>
+			{#if canStop(server)}
+				<Button
+					variant="ghost"
+					size="icon-sm"
+					aria-label="Stop {server.name}"
+					disabled={store.isBusy(server, "control")}
+					onclick={() => store.request("stop", server)}
+				>
+					<SquareIcon class="fill-current" />
+				</Button>
+			{/if}
 		</div>
 	</div>
 

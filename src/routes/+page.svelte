@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { Component } from "svelte";
+	import { onMount, type Component } from "svelte";
 	import { flip } from "svelte/animate";
 	import { cubicOut } from "svelte/easing";
 	import { prefersReducedMotion } from "svelte/motion";
@@ -29,12 +29,13 @@
 	import NoResults from "$lib/components/ports/no-results.svelte";
 	import PortLabel from "$lib/components/ports/port-label.svelte";
 	import ServerDetails from "$lib/components/ports/server-details.svelte";
+	import ServerFilter from "$lib/components/ports/server-filter.svelte";
 	import ServerSearch from "$lib/components/ports/server-search.svelte";
 	import SettingsMenu from "$lib/components/ports/settings-menu.svelte";
 	import Sparkline from "$lib/components/ports/sparkline.svelte";
-	import StopDialog from "$lib/components/ports/stop-dialog.svelte";
+	import ConfirmDialog from "$lib/components/ports/confirm-dialog.svelte";
 	import UsageSummary from "$lib/components/ports/usage-summary.svelte";
-	import { formatBytesText, serverActivity } from "$lib/ports/format";
+	import { canStop, formatBytesText, isMeasured, serverActivity, serverProcessId } from "$lib/ports/format";
 	import { fileManagerName } from "$lib/platform";
 	import { PortsStore } from "$lib/ports/ports-store.svelte";
 	import { editorLabel, preferences } from "$lib/ports/preferences.svelte";
@@ -42,6 +43,7 @@
 	import { cn } from "$lib/utils";
 
 	const store = new PortsStore();
+	onMount(store.connect);
 
 	let scrollY = $state(0);
 	let tableHeight = $state(0);
@@ -64,7 +66,7 @@
 	}
 </script>
 
-{#snippet action(label: string, Icon: Component, onclick: () => void)}
+{#snippet action(label: string, Icon: Component, onclick: () => void, disabled = false)}
 	<Tooltip.Root>
 		<Tooltip.Trigger>
 			{#snippet child({ props })}
@@ -73,6 +75,7 @@
 					variant="ghost"
 					size="icon-sm"
 					aria-label={label}
+					{disabled}
 					onclick={(event: MouseEvent) => {
 						event.stopPropagation();
 						onclick();
@@ -103,15 +106,15 @@
 		</DropdownMenu.Trigger>
 		<DropdownMenu.Content align="end" class="w-48">
 			{#if server.folder}
-				<DropdownMenu.Item onSelect={() => store.openInEditor(server)}>
+				<DropdownMenu.Item disabled={store.isBusy(server, "editor")} onSelect={() => store.openInEditor(server)}>
 					<CodeIcon />
 					Open in {editorLabel(preferences.editor.current)}
 				</DropdownMenu.Item>
-				<DropdownMenu.Item onSelect={() => store.openInTerminal(server)}>
+				<DropdownMenu.Item disabled={store.isBusy(server, "terminal")} onSelect={() => store.openInTerminal(server)}>
 					<SquareTerminalIcon />
 					Open in Terminal
 				</DropdownMenu.Item>
-				<DropdownMenu.Item onSelect={() => store.revealFolder(server)}>
+				<DropdownMenu.Item disabled={store.isBusy(server, "folder")} onSelect={() => store.revealFolder(server)}>
 					<FolderOpenIcon />
 					Show in {fileManagerName}
 				</DropdownMenu.Item>
@@ -149,10 +152,11 @@
 	>
 		<div class="flex items-center gap-2">
 			<h1 class="text-lg font-semibold tracking-tight">Ports</h1>
-			<Badge variant="secondary">{store.servers.length}</Badge>
+			<Badge variant="secondary">{store.shown.length}</Badge>
 		</div>
 		<div class="ml-auto flex items-center gap-2">
 			<ServerSearch bind:value={store.query} class="w-64" />
+			<ServerFilter {store} />
 			{@render action("Refresh", RefreshCwIcon, store.refresh)}
 			<SettingsMenu />
 		</div>
@@ -215,30 +219,42 @@
 									<Table.Cell>
 										<div class="flex flex-col gap-0.5">
 											<span>{server.framework ?? server.process}</span>
-											<span class="font-mono text-xs text-muted-foreground">PID {server.pid}</span>
+											<span class="font-mono text-xs text-muted-foreground">{serverProcessId(server)}</span>
 										</div>
 									</Table.Cell>
-									<Table.Cell class="text-right font-mono tabular-nums">
-										{Math.round(server.cpuPercent)}%
-									</Table.Cell>
-									<Table.Cell>
-										<div class="flex items-center justify-end gap-3">
-											<Sparkline
-												values={server.memoryHistory}
-												class={cn("h-4 w-14", attention ? "text-warning" : "text-muted-foreground")}
-											/>
-											<span class={cn("w-16 text-right font-mono tabular-nums", attention && "text-warning")}>
-												{formatBytesText(server.memoryBytes)}
-											</span>
-										</div>
-									</Table.Cell>
+									{#if !isMeasured(server)}
+										<Table.Cell class="text-right text-muted-foreground">–</Table.Cell>
+										<Table.Cell class="text-right text-muted-foreground">–</Table.Cell>
+									{:else}
+										<Table.Cell class="text-right font-mono tabular-nums">
+											{Math.round(server.cpuPercent)}%
+										</Table.Cell>
+										<Table.Cell>
+											<div class="flex items-center justify-end gap-3">
+												<Sparkline
+													values={server.memoryHistory}
+													class={cn("h-4 w-14", attention ? "text-warning" : "text-muted-foreground")}
+												/>
+												<span class={cn("w-16 text-right font-mono tabular-nums", attention && "text-warning")}>
+													{formatBytesText(server.memoryBytes)}
+												</span>
+											</div>
+										</Table.Cell>
+									{/if}
 									<Table.Cell class="pr-5">
 										<div
 											class="flex justify-end gap-0.5 opacity-0 transition-opacity duration-150 will-change-[opacity] group-hover/row:opacity-100 focus-within:opacity-100 has-data-[state=open]:opacity-100"
 										>
 											{@render action(`Open localhost:${server.port}`, ArrowUpRightIcon, () => store.open(server))}
 											{@render more(server)}
-											{@render action(`Stop ${server.name}`, SquareIcon, () => store.requestStop(server))}
+											{#if canStop(server)}
+												{@render action(
+													`Stop ${server.name}`,
+													SquareIcon,
+													() => store.request("stop", server),
+													store.isBusy(server, "control"),
+												)}
+											{/if}
 										</div>
 									</Table.Cell>
 								</tr>
@@ -282,4 +298,4 @@
 	</Drawer.Content>
 </Drawer.Root>
 
-<StopDialog {store} />
+<ConfirmDialog {store} />

@@ -1,4 +1,4 @@
-import type { Server, SystemUsage } from "./types";
+import type { Server, Snapshot, SystemUsage } from "./types";
 
 const MB = 1024 ** 2;
 const GB = 1024 ** 3;
@@ -37,6 +37,7 @@ export function mockServers(now = Date.now()): Server[] {
 			kind: "dev",
 			status: "running",
 			protected: false,
+			restartable: true,
 			startedAt: now - 3 * HOUR - 12 * MINUTE,
 			lastActiveAt: now - MINUTE,
 			memoryBytes: 1.21 * GB,
@@ -56,6 +57,7 @@ export function mockServers(now = Date.now()): Server[] {
 			kind: "dev",
 			status: "running",
 			protected: false,
+			restartable: true,
 			startedAt: now - 26 * HOUR,
 			lastActiveAt: now - 4 * MINUTE,
 			memoryBytes: 612 * MB,
@@ -75,6 +77,7 @@ export function mockServers(now = Date.now()): Server[] {
 			kind: "dev",
 			status: "idle",
 			protected: false,
+			restartable: true,
 			startedAt: now - 9 * HOUR,
 			lastActiveAt: now - 5 * HOUR,
 			memoryBytes: 184 * MB,
@@ -94,6 +97,7 @@ export function mockServers(now = Date.now()): Server[] {
 			kind: "dev",
 			status: "attention",
 			protected: false,
+			restartable: true,
 			startedAt: now - 2 * HOUR - 40 * MINUTE,
 			lastActiveAt: now,
 			memoryBytes: 2.74 * GB,
@@ -111,6 +115,7 @@ export function mockServers(now = Date.now()): Server[] {
 			kind: "database",
 			status: "running",
 			protected: true,
+			restartable: false,
 			startedAt: now - 4 * 24 * HOUR,
 			lastActiveAt: now - 2 * MINUTE,
 			memoryBytes: 96 * MB,
@@ -128,6 +133,7 @@ export function mockServers(now = Date.now()): Server[] {
 			kind: "database",
 			status: "running",
 			protected: true,
+			restartable: false,
 			startedAt: now - 4 * 24 * HOUR,
 			lastActiveAt: now - 30 * MINUTE,
 			memoryBytes: 14 * MB,
@@ -139,8 +145,21 @@ export function mockServers(now = Date.now()): Server[] {
 	return servers.toSorted((a, b) => a.port - b.port);
 }
 
-export const mockSystemUsage: SystemUsage = {
-	totalBytes: 16 * GB,
-	otherAppsBytes: 7 * GB,
-	otherAppsCpuPercent: 14,
-};
+export function mockSnapshot(now = Date.now()): Snapshot {
+	const servers = mockServers(now);
+	const kinds: SystemUsage["kinds"] = {};
+	for (const server of servers) {
+		const usage = (kinds[server.kind] ??= { memoryBytes: 0, cpuPercent: 0 });
+		usage.memoryBytes += server.memoryBytes;
+		usage.cpuPercent += server.cpuPercent;
+	}
+	return {
+		servers,
+		system: {
+			totalBytes: 16 * GB,
+			kinds,
+			otherAppsBytes: 7 * GB,
+			otherAppsCpuPercent: 14,
+		},
+	};
+}

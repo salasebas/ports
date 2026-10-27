@@ -7,6 +7,7 @@ use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_positioner::{Position, WindowExt};
 
 mod folders;
+mod ports;
 
 const MAIN_WINDOW: &str = "main";
 const TRAY_WINDOW: &str = "tray";
@@ -95,6 +96,9 @@ pub fn run() {
             #[cfg(desktop)]
             register_popover_shortcut(app)?;
 
+            app.manage(ports::Monitor::new(app.path().home_dir()?));
+            ports::start(app.handle())?;
+
             let quick_view =
                 MenuItem::with_id(app, "quick-view", "Quick View", true, None::<&str>)?;
             let open = MenuItem::with_id(app, "open", "Open Ports", true, None::<&str>)?;
@@ -132,6 +136,8 @@ pub fn run() {
             (TRAY_WINDOW, WindowEvent::Focused(false)) => {
                 let _ = window.hide();
             }
+            // Polling pauses while every window is hidden; catch up as one appears.
+            (_, WindowEvent::Focused(true)) => window.state::<ports::Monitor>().window_shown(),
             (MAIN_WINDOW, WindowEvent::CloseRequested { api, .. }) => {
                 // Keep running in the menu bar; quitting happens from the tray.
                 api.prevent_close();
@@ -145,6 +151,11 @@ pub fn run() {
             folders::open_in_editor,
             folders::open_in_terminal,
             folders::reveal_folder,
+            ports::snapshot,
+            ports::refresh,
+            ports::set_refresh_interval,
+            ports::stop_server,
+            ports::restart_server,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

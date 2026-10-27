@@ -10,7 +10,14 @@
 	import { Badge } from "$lib/components/ui/badge";
 	import { Button } from "$lib/components/ui/button";
 	import { Separator } from "$lib/components/ui/separator";
-	import { formatBytes, formatBytesText, formatDuration } from "$lib/ports/format";
+	import {
+		canStop,
+		formatBytes,
+		formatBytesText,
+		formatDuration,
+		isMeasured,
+		serverProcessId,
+	} from "$lib/ports/format";
 	import { fileManagerName } from "$lib/platform";
 	import type { PortsStore } from "$lib/ports/ports-store.svelte";
 	import { editorLabel, preferences } from "$lib/ports/preferences.svelte";
@@ -34,7 +41,7 @@
 
 	const facts = $derived(
 		[
-			["Process", `${server.process} · PID ${server.pid}`],
+			["Process", `${server.process} · ${serverProcessId(server)}`],
 			["Framework", server.framework],
 			["Branch", server.branch],
 			["Folder", server.folder],
@@ -60,12 +67,28 @@
 					{server.status === "idle" ? "Idle for" : "Running for"}
 					{formatDuration(Date.now() - (server.status === "idle" ? server.lastActiveAt : server.startedAt))}
 				</span>
-				<Button variant="secondary" size="icon-sm" aria-label="Restart" onclick={() => store.restart(server)}>
-					<RotateCwIcon />
-				</Button>
-				<Button variant="destructive" size="icon-sm" aria-label="Stop" onclick={() => store.requestStop(server)}>
-					<SquareIcon class="fill-current" />
-				</Button>
+				{#if server.restartable}
+					<Button
+						variant="secondary"
+						size="icon-sm"
+						aria-label="Restart"
+						disabled={store.isBusy(server, "control")}
+						onclick={() => store.request("restart", server)}
+					>
+						<RotateCwIcon />
+					</Button>
+				{/if}
+				{#if canStop(server)}
+					<Button
+						variant="destructive"
+						size="icon-sm"
+						aria-label="Stop"
+						disabled={store.isBusy(server, "control")}
+						onclick={() => store.request("stop", server)}
+					>
+						<SquareIcon class="fill-current" />
+					</Button>
+				{/if}
 			</div>
 		</div>
 	</header>
@@ -81,15 +104,30 @@
 		</div>
 		{#if server.folder}
 			<div class="grid grid-cols-3 gap-2">
-				<Button variant="secondary" size="sm" onclick={() => store.openInEditor(server)}>
+				<Button
+					variant="secondary"
+					size="sm"
+					disabled={store.isBusy(server, "editor")}
+					onclick={() => store.openInEditor(server)}
+				>
 					<CodeIcon data-icon="inline-start" />
 					{editorLabel(preferences.editor.current)}
 				</Button>
-				<Button variant="secondary" size="sm" onclick={() => store.openInTerminal(server)}>
+				<Button
+					variant="secondary"
+					size="sm"
+					disabled={store.isBusy(server, "terminal")}
+					onclick={() => store.openInTerminal(server)}
+				>
 					<SquareTerminalIcon data-icon="inline-start" />
 					Terminal
 				</Button>
-				<Button variant="secondary" size="sm" onclick={() => store.revealFolder(server)}>
+				<Button
+					variant="secondary"
+					size="sm"
+					disabled={store.isBusy(server, "folder")}
+					onclick={() => store.revealFolder(server)}
+				>
 					<FolderOpenIcon data-icon="inline-start" />
 					{fileManagerName}
 				</Button>
@@ -110,35 +148,37 @@
 		{/if}
 	</dl>
 
-	<Separator />
+	{#if isMeasured(server)}
+		<Separator />
 
-	<section class="flex flex-col gap-2" aria-label="Memory">
-		<div class="flex items-baseline justify-between">
-			<p class="text-sm text-muted-foreground">
-				Memory
-				<span class={cn("font-mono text-foreground tabular-nums", attention && "text-warning")}>
-					{memory.value}
-					{memory.unit}
-				</span>
+		<section class="flex flex-col gap-2" aria-label="Memory">
+			<div class="flex items-baseline justify-between">
+				<p class="text-sm text-muted-foreground">
+					Memory
+					<span class={cn("font-mono text-foreground tabular-nums", attention && "text-warning")}>
+						{memory.value}
+						{memory.unit}
+					</span>
+				</p>
+				<span class="font-mono text-xs text-muted-foreground">10 min</span>
+			</div>
+			<Sparkline
+				values={server.memoryHistory}
+				fromZero
+				area
+				threshold={LEAK_THRESHOLD_BYTES}
+				class={cn("h-20 w-full", attention ? "text-warning" : "text-foreground")}
+			/>
+			<p class="text-xs text-muted-foreground">
+				Warns above {formatBytesText(LEAK_THRESHOLD_BYTES)}
 			</p>
-			<span class="font-mono text-xs text-muted-foreground">10 min</span>
-		</div>
-		<Sparkline
-			values={server.memoryHistory}
-			fromZero
-			area
-			threshold={LEAK_THRESHOLD_BYTES}
-			class={cn("h-20 w-full", attention ? "text-warning" : "text-foreground")}
-		/>
-		<p class="text-xs text-muted-foreground">
-			Warns above {formatBytesText(LEAK_THRESHOLD_BYTES)}
-		</p>
-	</section>
+		</section>
 
-	<section class="flex flex-col gap-2" aria-label="CPU">
-		<p class="text-sm text-muted-foreground">
-			CPU <span class="font-mono text-foreground tabular-nums">{Math.round(server.cpuPercent)}%</span>
-		</p>
-		<CpuBars values={server.cpuHistory} class="h-14 w-full" />
-	</section>
+		<section class="flex flex-col gap-2" aria-label="CPU">
+			<p class="text-sm text-muted-foreground">
+				CPU <span class="font-mono text-foreground tabular-nums">{Math.round(server.cpuPercent)}%</span>
+			</p>
+			<CpuBars values={server.cpuHistory} class="h-14 w-full" />
+		</section>
+	{/if}
 </article>

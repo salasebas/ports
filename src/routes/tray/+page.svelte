@@ -4,6 +4,7 @@
 	import { invoke } from "@tauri-apps/api/core";
 	import { getCurrentWindow } from "@tauri-apps/api/window";
 	import { prefersReducedMotion } from "svelte/motion";
+	import { onMount } from "svelte";
 	import { fly } from "svelte/transition";
 	import { cubicOut } from "svelte/easing";
 	import { Button } from "$lib/components/ui/button";
@@ -11,14 +12,16 @@
 	import { Separator } from "$lib/components/ui/separator";
 	import NoResults from "$lib/components/ports/no-results.svelte";
 	import ServerDetails from "$lib/components/ports/server-details.svelte";
+	import ServerFilter from "$lib/components/ports/server-filter.svelte";
 	import ServerRow from "$lib/components/ports/server-row.svelte";
 	import ServerSearch from "$lib/components/ports/server-search.svelte";
 	import SettingsMenu from "$lib/components/ports/settings-menu.svelte";
-	import StopDialog from "$lib/components/ports/stop-dialog.svelte";
+	import ConfirmDialog from "$lib/components/ports/confirm-dialog.svelte";
 	import UsageSummary from "$lib/components/ports/usage-summary.svelte";
 	import { PortsStore } from "$lib/ports/ports-store.svelte";
 
 	const store = new PortsStore();
+	onMount(store.connect);
 
 	/** Details push in from the right and return the same way. */
 	const slide = (direction: 1 | -1) => ({
@@ -52,7 +55,10 @@
 			<header class="flex flex-col gap-4 px-4 pt-3 pb-4">
 				<h1 class="text-center text-sm font-semibold">Ports</h1>
 				<UsageSummary {store} />
-				<ServerSearch bind:value={store.query} />
+				<div class="flex items-center gap-1">
+					<ServerSearch bind:value={store.query} class="flex-1" />
+					<ServerFilter {store} />
+				</div>
 			</header>
 
 			<Separator />
@@ -87,4 +93,4 @@
 	{/if}
 </div>
 
-<StopDialog {store} />
+<ConfirmDialog {store} />
