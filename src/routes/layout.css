@@ -17,8 +17,11 @@
 	--primary-foreground: #ffffff;
 	--secondary: #f0efed;
 	--secondary-foreground: #2c2c2b;
-	--muted: #f4f3f3;
+	/* Fills are translucent so they stay visible on any surface and stack, e.g. a button on a hovered row.
+	   On white these match Notion's button hover (#efefee) and pressed (#dfdfde). */
+	--muted: rgb(55 53 47 / 8%);
 	--muted-foreground: #7d7a75;
+	--selected: rgb(55 53 47 / 16%);
 	--accent: #f0efed;
 	--accent-foreground: #2c2c2b;
 	--destructive: #cd3c3a;
@@ -62,8 +65,11 @@
 	--primary-foreground: #ffffff;
 	--secondary: #2f2f2f;
 	--secondary-foreground: #f0efed;
-	--muted: #262626;
+	/* On #191919 the hover fill matches Notion's dark hover (#2f2f2f). The selected fill sits a step above
+	   Notion's pressed (#383836) so selected and hovered segments stay apart on the popover. */
+	--muted: rgb(255 255 255 / 9.5%);
 	--muted-foreground: #ada9a3;
+	--selected: rgb(255 255 255 / 16%);
 	--accent: #2f2f2f;
 	--accent-foreground: #f0efed;
 	--destructive: #e56458;
@@ -103,6 +109,7 @@
 
 @theme inline {
 	--font-sans: system-ui, -apple-system, "Inter Variable", sans-serif;
+	--color-selected: var(--selected);
 	--color-success: var(--success);
 	--color-warning: var(--warning);
 	--color-surface-translucent: var(--surface-translucent);
