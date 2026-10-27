@@ -13,17 +13,23 @@ mod settings;
 mod shortcut;
 
 const MAIN_WINDOW: &str = "main";
+const SETTINGS_WINDOW: &str = "settings";
 const TRAY_WINDOW: &str = "tray";
 
-fn show_main(app: &AppHandle) {
+/// Brings a window to the front, closing the popover it may come from.
+fn show_window(app: &AppHandle, label: &str) {
     if let Some(window) = app.get_webview_window(TRAY_WINDOW) {
         let _ = window.hide();
     }
-    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+    if let Some(window) = app.get_webview_window(label) {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
     }
+}
+
+fn show_main(app: &AppHandle) {
+    show_window(app, MAIN_WINDOW);
 }
 
 fn toggle_tray_window(app: &AppHandle) {
@@ -48,6 +54,11 @@ fn toggle_tray_window(app: &AppHandle) {
 #[tauri::command]
 fn open_main_window(app: AppHandle) {
     show_main(&app);
+}
+
+#[tauri::command]
+fn open_settings(app: AppHandle) {
+    show_window(&app, SETTINGS_WINDOW);
 }
 
 #[tauri::command]
@@ -116,7 +127,7 @@ pub fn run() {
             }
             // Polling pauses while every window is hidden; catch up as one appears.
             (_, WindowEvent::Focused(true)) => window.state::<ports::Monitor>().window_shown(),
-            (MAIN_WINDOW, WindowEvent::CloseRequested { api, .. }) => {
+            (MAIN_WINDOW | SETTINGS_WINDOW, WindowEvent::CloseRequested { api, .. }) => {
                 // Keep running in the menu bar; quitting happens from the tray.
                 api.prevent_close();
                 let _ = window.hide();
@@ -125,6 +136,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             open_main_window,
+            open_settings,
             quit_app,
             folders::open_in_editor,
             folders::open_in_terminal,

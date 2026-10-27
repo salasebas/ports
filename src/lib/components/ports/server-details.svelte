@@ -18,7 +18,15 @@
 	import * as Field from "$lib/components/ui/field";
 	import { Separator } from "$lib/components/ui/separator";
 	import { Switch } from "$lib/components/ui/switch";
-	import { canStop, exposeFlag, formatBytes, formatDuration, isMeasured, serverProcessId } from "$lib/ports/format";
+	import {
+		canStop,
+		exposeFlag,
+		formatBytes,
+		formatBytesText,
+		formatDuration,
+		isMeasured,
+		serverProcessId,
+	} from "$lib/ports/format";
 	import { fileManagerName } from "$lib/platform";
 	import { hiddenPort, hiddenProcess, type PortsStore } from "$lib/ports/ports-store.svelte";
 	import { editorLabel, preferences } from "$lib/ports/preferences.svelte";
@@ -43,6 +51,15 @@
 	const leaking = $derived(server.status === "attention" && server.responding);
 	const lanUrl = $derived(server.lanUrl?.replace(/^http:\/\//, ""));
 	const idle = $derived(server.status === "idle");
+	const alerts = $derived(settings.current.alerts);
+	/** What the memory alerts watch for on this server; desktop apps get none. */
+	const alertNote = $derived.by(() => {
+		if (server.kind !== "dev" && server.kind !== "database") return null;
+		const above = alerts.thresholdBytes === null ? null : `above ${formatBytesText(alerts.thresholdBytes)}`;
+		if (alerts.enabled && above) return `Alerts if it keeps growing or goes ${above}`;
+		if (alerts.enabled) return "Alerts if it keeps growing";
+		return above && `Alerts ${above}`;
+	});
 	// Pins and protection cover every port of a project.
 	const scope = $derived(server.folder ? "every port of this project" : `:${server.port} only`);
 
@@ -227,10 +244,11 @@
 				values={server.memoryHistory}
 				fromZero
 				area
+				threshold={alerts.thresholdBytes ?? undefined}
 				class={cn("h-20 w-full", leaking ? "text-warning" : "text-foreground")}
 			/>
-			{#if settings.current.alerts.enabled && (server.kind === "dev" || server.kind === "database")}
-				<p class="text-xs text-muted-foreground">You get an alert if it keeps growing.</p>
+			{#if alertNote}
+				<p class="text-xs text-muted-foreground">{alertNote}</p>
 			{/if}
 		</section>
 

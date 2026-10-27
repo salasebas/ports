@@ -22,6 +22,19 @@
         "minHeight": 460
       },
       {
+        "label": "settings",
+        "title": "Settings",
+        "url": "/settings",
+        "width": 520,
+        "height": 600,
+        "minWidth": 440,
+        "minHeight": 420,
+        "center": true,
+        "visible": false,
+        "minimizable": false,
+        "maximizable": false
+      },
+      {
         "label": "tray",
         "title": "Ports",
         "url": "/tray",

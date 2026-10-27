@@ -14,12 +14,19 @@ const GB: f64 = 1024.0 * MB;
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AlertSettings {
+    /// Alert when a server's memory keeps growing.
     pub enabled: bool,
+    /// Also alert when a server uses more than this; `None` turns it off.
+    #[serde(default)]
+    pub threshold_bytes: Option<u64>,
 }
 
 impl Default for AlertSettings {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            threshold_bytes: Some(2 * 1024 * 1024 * 1024),
+        }
     }
 }
 
@@ -37,30 +44,42 @@ pub struct Alerts {
 }
 
 impl Alerts {
-    /// Dev servers and databases whose memory keeps growing, at most one
-    /// alert per server an hour. Desktop apps that happen to listen on a
+    /// Dev servers and databases whose memory keeps growing or, when the
+    /// user set a threshold, is above it; at most one alert per server an
+    /// hour, whatever the reason. Desktop apps that happen to listen on a
     /// port, such as Docker Desktop, are left alone.
     pub fn due(&mut self, settings: AlertSettings, servers: &[Server], now: u64) -> Vec<Alert> {
         self.sent
             .retain(|_, at| now.saturating_sub(*at) < REPEAT_AFTER_MS);
-        if !settings.enabled {
-            return Vec::new();
-        }
         servers
             .iter()
-            .filter(|server| server.leaking && matches!(server.kind, Kind::Dev | Kind::Database))
+            .filter(|server| matches!(server.kind, Kind::Dev | Kind::Database))
             .filter_map(|server| {
                 let key = (server.port, server.pid?);
+                let body = if settings.enabled && server.leaking {
+                    let first = server.memory_history.first().copied().unwrap_or_default();
+                    let growth = server.memory_bytes.saturating_sub(first);
+                    format!("Grew by {} in 10 minutes and keeps growing.", bytes(growth))
+                } else if let Some(threshold) = settings
+                    .threshold_bytes
+                    .filter(|threshold| server.memory_bytes >= *threshold)
+                {
+                    format!(
+                        "Uses {}, above your {} alert.",
+                        bytes(server.memory_bytes),
+                        bytes(threshold)
+                    )
+                } else {
+                    return None;
+                };
                 if self.sent.contains_key(&key) {
                     return None;
                 }
                 self.sent.insert(key, now);
-                let first = server.memory_history.first().copied().unwrap_or_default();
-                let growth = server.memory_bytes.saturating_sub(first);
                 Some(Alert {
                     port: server.port,
                     title: format!("{} on :{}", server.name, server.port),
-                    body: format!("Grew by {} in 10 minutes and keeps growing.", bytes(growth)),
+                    body,
                 })
             })
             .collect()
@@ -147,15 +166,35 @@ mod tests {
         assert_eq!(alerts.due(settings, &[leaking(3000)], 62 * MINUTE).len(), 1);
     }
 
-    // Lots of memory alone is no leak: a database cache or a big build is normal.
     #[test]
-    fn ignores_memory_that_is_large_but_steady() {
+    fn alerts_once_when_a_server_grows_past_the_threshold() {
         let mut alerts = Alerts::default();
+        let settings = AlertSettings::default();
+        let sent: usize = [(0, GIB), (1, 3 * GIB), (2, 3 * GIB), (30, 4 * GIB)]
+            .into_iter()
+            .map(|(minute, memory)| {
+                alerts
+                    .due(settings, &[server(5173, memory)], minute * MINUTE)
+                    .len()
+            })
+            .sum();
+        assert_eq!(sent, 1);
+    }
+
+    // Some servers use a lot of memory on purpose, e.g. a database cache.
+    #[test]
+    fn ignores_high_memory_once_the_threshold_is_off() {
+        let mut alerts = Alerts::default();
+        let leaks_only = AlertSettings {
+            threshold_bytes: None,
+            ..AlertSettings::default()
+        };
         assert!(
             alerts
-                .due(AlertSettings::default(), &[server(5173, 8 * GIB)], 0)
+                .due(leaks_only, &[server(5173, 8 * GIB)], 0)
                 .is_empty()
         );
+        assert_eq!(alerts.due(leaks_only, &[leaking(3000)], 0).len(), 1);
     }
 
     #[test]
@@ -169,7 +208,12 @@ mod tests {
     #[test]
     fn sends_nothing_while_alerts_are_off() {
         let mut alerts = Alerts::default();
-        let off = AlertSettings { enabled: false };
-        assert!(alerts.due(off, &[leaking(5173)], 0).is_empty());
+        let off = AlertSettings {
+            enabled: false,
+            threshold_bytes: None,
+        };
+        let mut big_leak = leaking(5173);
+        big_leak.memory_bytes = 8 * GIB;
+        assert!(alerts.due(off, &[big_leak], 0).is_empty());
     }
 }

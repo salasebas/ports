@@ -18,7 +18,7 @@
 	import ServerFilter from "$lib/components/ports/server-filter.svelte";
 	import ServerRow from "$lib/components/ports/server-row.svelte";
 	import ServerSearch from "$lib/components/ports/server-search.svelte";
-	import SettingsMenu from "$lib/components/ports/settings-menu.svelte";
+	import SettingsButton from "$lib/components/ports/settings-button.svelte";
 	import ConfirmDialog from "$lib/components/ports/confirm-dialog.svelte";
 	import UsageSummary from "$lib/components/ports/usage-summary.svelte";
 	import { PortsStore } from "$lib/ports/ports-store.svelte";
@@ -87,7 +87,7 @@
 				</Button>
 				<div class="flex items-center gap-0.5">
 					<CleanUpButton {store} />
-					<SettingsMenu side="top" />
+					<SettingsButton />
 					<Button variant="ghost" size="icon-sm" aria-label="Quit Ports" onclick={() => invoke("quit_app")}>
 						<PowerIcon />
 					</Button>

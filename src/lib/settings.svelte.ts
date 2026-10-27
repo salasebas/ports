@@ -8,7 +8,17 @@ export const SETTINGS_EVENT = "ports://settings";
 export interface AlertSettings {
 	/** Notify when a server's memory keeps growing. */
 	enabled: boolean;
+	/** Also notify when a server uses more than this; null turns it off. */
+	thresholdBytes: number | null;
 }
+
+const GB = 1024 ** 3;
+
+/** Choices for `AlertSettings.thresholdBytes`, as select values. */
+export const alertThresholds = [
+	{ value: "off", label: "Off" },
+	...[1, 2, 4, 8].map((gb) => ({ value: String(gb * GB), label: `Above ${gb} GB` })),
+];
 
 /** Mirrors `Settings` in `src-tauri/src/settings.rs`. */
 export interface Settings {
@@ -23,7 +33,7 @@ export interface Settings {
  * and follows the changes made in any window.
  */
 class BackendSettings {
-	current = $state.raw<Settings>({ shortcut: null, alerts: { enabled: true } });
+	current = $state.raw<Settings>({ shortcut: null, alerts: { enabled: true, thresholdBytes: 2 * GB } });
 	#loaded = false;
 
 	load = () => {
@@ -47,3 +57,8 @@ class BackendSettings {
 }
 
 export const settings = new BackendSettings();
+
+/** Brings up the settings window, from any window. */
+export function openSettings() {
+	if (isTauri()) void invoke("open_settings");
+}

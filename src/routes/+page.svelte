@@ -38,7 +38,7 @@
 	import RenameDialog from "$lib/components/ports/rename-dialog.svelte";
 	import ServerFilter from "$lib/components/ports/server-filter.svelte";
 	import ServerSearch from "$lib/components/ports/server-search.svelte";
-	import SettingsMenu from "$lib/components/ports/settings-menu.svelte";
+	import SettingsButton from "$lib/components/ports/settings-button.svelte";
 	import Sparkline from "$lib/components/ports/sparkline.svelte";
 	import ConfirmDialog from "$lib/components/ports/confirm-dialog.svelte";
 	import UsageSummary from "$lib/components/ports/usage-summary.svelte";
@@ -313,7 +313,7 @@
 			{@render sortMenu()}
 			<CleanUpButton {store} />
 			{@render action("Refresh", RefreshCwIcon, store.refresh)}
-			<SettingsMenu />
+			<SettingsButton />
 		</div>
 	</header>
 

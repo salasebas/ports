@@ -1,34 +1,33 @@
 <script lang="ts">
-	import type { Component } from "svelte";
+	import type { Component, Snippet } from "svelte";
 	import MonitorIcon from "@lucide/svelte/icons/monitor";
 	import MoonIcon from "@lucide/svelte/icons/moon";
-	import SettingsIcon from "@lucide/svelte/icons/settings";
 	import SunIcon from "@lucide/svelte/icons/sun";
 	import XIcon from "@lucide/svelte/icons/x";
 	import { isTauri } from "@tauri-apps/api/core";
 	import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 	import { setMode, userPrefersMode } from "mode-watcher";
+	import { onMount } from "svelte";
 	import { toast } from "svelte-sonner";
 	import { Badge } from "$lib/components/ui/badge";
 	import { Button } from "$lib/components/ui/button";
+	import * as Card from "$lib/components/ui/card";
 	import * as Field from "$lib/components/ui/field";
 	import * as NativeSelect from "$lib/components/ui/native-select";
-	import * as Popover from "$lib/components/ui/popover";
+	import { ScrollArea } from "$lib/components/ui/scroll-area";
 	import { Switch } from "$lib/components/ui/switch";
 	import * as ToggleGroup from "$lib/components/ui/toggle-group";
+	import ShortcutRecorder from "$lib/components/ports/shortcut-recorder.svelte";
 	import { hiddenLabel, setRefreshInterval, unhide } from "$lib/ports/ports-store.svelte";
 	import { editors, preferences, refreshIntervals } from "$lib/ports/preferences.svelte";
-	import { settings, type AlertSettings } from "$lib/settings.svelte";
-	import ShortcutRecorder from "./shortcut-recorder.svelte";
+	import { alertThresholds, settings, type AlertSettings } from "$lib/settings.svelte";
 
 	type Mode = "light" | "dark" | "system";
-
-	let { side = "bottom" }: { side?: "top" | "bottom" } = $props();
 
 	const id = $props.id();
 	const desktop = isTauri();
 
-	/** Owned by the OS, so it's read on every open instead of stored. */
+	/** Owned by the OS, so it's read whenever the window comes forward instead of stored. */
 	let openAtLogin = $state(false);
 
 	async function readOpenAtLogin() {
@@ -43,6 +42,8 @@
 			toast.error(String(error));
 		}
 	}
+
+	onMount(() => void readOpenAtLogin());
 
 	let shortcutError = $state<string | null>(null);
 
@@ -63,21 +64,24 @@
 	];
 </script>
 
-<Popover.Root
-	onOpenChange={(open) => {
-		if (open) void readOpenAtLogin();
-		else shortcutError = null;
-	}}
->
-	<Popover.Trigger>
-		{#snippet child({ props })}
-			<Button {...props} variant="ghost" size="icon-sm" aria-label="Settings">
-				<SettingsIcon />
-			</Button>
-		{/snippet}
-	</Popover.Trigger>
-	<Popover.Content {side} align="end" class="max-h-(--bits-popover-content-available-height) w-72 overflow-y-auto">
-		<Field.Group class="gap-4">
+{#snippet section(title: string, fields: Snippet)}
+	<Field.Set class="gap-2">
+		<Field.Legend variant="label" class="mb-0 px-1 text-muted-foreground">{title}</Field.Legend>
+		<Card.Root size="sm" class="rounded-2xl">
+			<Card.Content>
+				<Field.Group class="gap-4">
+					{@render fields()}
+				</Field.Group>
+			</Card.Content>
+		</Card.Root>
+	</Field.Set>
+{/snippet}
+
+<svelte:window onfocus={readOpenAtLogin} />
+
+<ScrollArea class="h-screen">
+	<main class="mx-auto flex max-w-lg flex-col gap-6 px-6 py-6">
+		{#snippet general()}
 			<Field.Field>
 				<Field.Title id="{id}-appearance">Appearance</Field.Title>
 				<ToggleGroup.Root
@@ -103,19 +107,39 @@
 			</Field.Field>
 			<Field.Separator />
 			<Field.Field orientation="horizontal">
+				<Field.Label for="{id}-open-at-login">Open at login</Field.Label>
+				<Switch id="{id}-open-at-login" disabled={!desktop} bind:checked={() => openAtLogin, setOpenAtLogin} />
+			</Field.Field>
+			<Field.Separator />
+			<Field.Field orientation="horizontal" data-invalid={shortcutError ? true : undefined}>
+				<Field.Content>
+					<Field.Label for="{id}-shortcut">Show Ports</Field.Label>
+					<Field.Description>Opens the menu bar popover from any app.</Field.Description>
+				</Field.Content>
+				<ShortcutRecorder id="{id}-shortcut" onerror={(error) => (shortcutError = error)} />
+			</Field.Field>
+			{#if shortcutError}
+				<Field.Error>{shortcutError}</Field.Error>
+			{/if}
+		{/snippet}
+		{@render section("General", general)}
+
+		{#snippet servers()}
+			<Field.Field orientation="horizontal">
 				<Field.Label for="{id}-editor">Editor</Field.Label>
-				<NativeSelect.Root id="{id}-editor" size="sm" class="w-32" bind:value={preferences.editor.current}>
+				<NativeSelect.Root id="{id}-editor" size="sm" class="w-36" bind:value={preferences.editor.current}>
 					{#each editors as editor (editor.value)}
 						<NativeSelect.Option value={editor.value}>{editor.label}</NativeSelect.Option>
 					{/each}
 				</NativeSelect.Root>
 			</Field.Field>
+			<Field.Separator />
 			<Field.Field orientation="horizontal">
 				<Field.Label for="{id}-refresh">Refresh</Field.Label>
 				<NativeSelect.Root
 					id="{id}-refresh"
 					size="sm"
-					class="w-32"
+					class="w-36"
 					bind:value={() => String(preferences.refreshInterval.current), (value) => setRefreshInterval(Number(value))}
 				>
 					{#each refreshIntervals as interval (interval.value)}
@@ -123,47 +147,64 @@
 					{/each}
 				</NativeSelect.Root>
 			</Field.Field>
-			<Field.Field orientation="horizontal">
-				<Field.Content>
-					<Field.Label for="{id}-confirm">Confirm actions</Field.Label>
-					<Field.Description>Stop and restart.</Field.Description>
-				</Field.Content>
-				<Switch id="{id}-confirm" bind:checked={preferences.confirmActions.current} />
-			</Field.Field>
-			<Field.Field orientation="horizontal">
-				<Field.Label for="{id}-open-at-login">Open at login</Field.Label>
-				<Switch id="{id}-open-at-login" disabled={!desktop} bind:checked={() => openAtLogin, setOpenAtLogin} />
-			</Field.Field>
 			<Field.Separator />
 			<Field.Field orientation="horizontal">
 				<Field.Content>
-					<Field.Label for="{id}-alerts">Memory alerts</Field.Label>
-					<Field.Description>When a server's memory keeps growing.</Field.Description>
+					<Field.Label for="{id}-confirm">Confirm actions</Field.Label>
+					<Field.Description>Ask before stopping or restarting a server.</Field.Description>
+				</Field.Content>
+				<Switch id="{id}-confirm" bind:checked={preferences.confirmActions.current} />
+			</Field.Field>
+		{/snippet}
+		{@render section("Servers", servers)}
+
+		{#snippet memory()}
+			<Field.Field orientation="horizontal">
+				<Field.Content>
+					<Field.Label for="{id}-leaks">Leaks</Field.Label>
+					<Field.Description>When a server's memory keeps growing for ten minutes.</Field.Description>
 				</Field.Content>
 				<Switch
-					id="{id}-alerts"
+					id="{id}-leaks"
 					disabled={!desktop}
 					bind:checked={() => alerts.enabled, (enabled) => setAlerts({ enabled })}
 				/>
 			</Field.Field>
 			<Field.Separator />
-			<Field.Field orientation="horizontal" data-invalid={shortcutError ? true : undefined}>
+			<Field.Field orientation="horizontal">
 				<Field.Content>
-					<Field.Label for="{id}-shortcut">Show Ports</Field.Label>
-					<Field.Description>From anywhere.</Field.Description>
+					<Field.Label for="{id}-threshold">High memory</Field.Label>
+					<Field.Description>When a server uses more than this.</Field.Description>
 				</Field.Content>
-				<ShortcutRecorder id="{id}-shortcut" onerror={(error) => (shortcutError = error)} />
+				<NativeSelect.Root
+					id="{id}-threshold"
+					size="sm"
+					class="w-36"
+					disabled={!desktop}
+					bind:value={
+						() => (alerts.thresholdBytes === null ? "off" : String(alerts.thresholdBytes)),
+						(value) => setAlerts({ thresholdBytes: value === "off" ? null : Number(value) })
+					}
+				>
+					{#each alertThresholds as threshold (threshold.value)}
+						<NativeSelect.Option value={threshold.value}>{threshold.label}</NativeSelect.Option>
+					{/each}
+				</NativeSelect.Root>
 			</Field.Field>
-			{#if shortcutError}
-				<Field.Error>{shortcutError}</Field.Error>
-			{/if}
-			{#if preferences.hidden.current.length}
-				<Field.Separator />
-				<Field.Field>
-					<Field.Content>
-						<Field.Title>Hidden</Field.Title>
-						<Field.Description>Left out of both lists.</Field.Description>
-					</Field.Content>
+		{/snippet}
+		{@render section("Memory alerts", memory)}
+
+		{#snippet hidden()}
+			<Field.Field>
+				<Field.Content>
+					<Field.Title>Hidden servers</Field.Title>
+					<Field.Description>
+						{preferences.hidden.current.length
+							? "Left out of both lists. Remove one to show it again."
+							: "Hide a server from its details to leave it out of both lists."}
+					</Field.Description>
+				</Field.Content>
+				{#if preferences.hidden.current.length}
 					<div class="flex flex-wrap gap-1.5">
 						{#each preferences.hidden.current as entry (entry)}
 							<Badge variant="secondary" class="gap-0.5 pr-0.5">
@@ -180,8 +221,9 @@
 							</Badge>
 						{/each}
 					</div>
-				</Field.Field>
-			{/if}
-		</Field.Group>
-	</Popover.Content>
-</Popover.Root>
+				{/if}
+			</Field.Field>
+		{/snippet}
+		{@render section("Lists", hidden)}
+	</main>
+</ScrollArea>
