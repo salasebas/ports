@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { Component, Snippet } from "svelte";
+	import ChevronLeftIcon from "@lucide/svelte/icons/chevron-left";
 	import MonitorIcon from "@lucide/svelte/icons/monitor";
 	import MoonIcon from "@lucide/svelte/icons/moon";
 	import SunIcon from "@lucide/svelte/icons/sun";
@@ -9,15 +10,17 @@
 	import { setMode, userPrefersMode } from "mode-watcher";
 	import { onMount } from "svelte";
 	import { toast } from "svelte-sonner";
+	import { goto } from "$app/navigation";
+	import { resolve } from "$app/paths";
 	import { Badge } from "$lib/components/ui/badge";
 	import { Button } from "$lib/components/ui/button";
 	import * as Card from "$lib/components/ui/card";
 	import * as Field from "$lib/components/ui/field";
 	import * as NativeSelect from "$lib/components/ui/native-select";
-	import { ScrollArea } from "$lib/components/ui/scroll-area";
 	import { Switch } from "$lib/components/ui/switch";
 	import * as ToggleGroup from "$lib/components/ui/toggle-group";
 	import ShortcutRecorder from "$lib/components/ports/shortcut-recorder.svelte";
+	import { cn } from "$lib/utils";
 	import { hiddenLabel, setRefreshInterval, unhide } from "$lib/ports/ports-store.svelte";
 	import { editors, preferences, refreshIntervals } from "$lib/ports/preferences.svelte";
 	import { alertThresholds, settings, type AlertSettings } from "$lib/settings.svelte";
@@ -44,6 +47,13 @@
 	}
 
 	onMount(() => void readOpenAtLogin());
+
+	let scrollY = $state(0);
+
+	function onkeydown(event: KeyboardEvent) {
+		// The shortcut recorder and open menus handle Escape first and prevent default.
+		if (event.key === "Escape" && !event.defaultPrevented) void goto(resolve("/"));
+	}
 
 	let shortcutError = $state<string | null>(null);
 
@@ -77,10 +87,23 @@
 	</Field.Set>
 {/snippet}
 
-<svelte:window onfocus={readOpenAtLogin} />
+<svelte:window onfocus={readOpenAtLogin} {onkeydown} bind:scrollY />
 
-<ScrollArea class="h-screen">
-	<main class="mx-auto flex max-w-lg flex-col gap-6 px-6 py-6">
+<div class="flex min-h-screen flex-col">
+	<header
+		class={cn(
+			"sticky top-0 z-10 grid grid-cols-[1fr_auto_1fr] items-center border-b bg-background/80 px-4 py-3 backdrop-blur-xl backdrop-saturate-150 transition-colors duration-200",
+			scrollY > 0 ? "border-border" : "border-transparent",
+		)}
+	>
+		<Button href={resolve("/")} variant="ghost" size="sm" class="justify-self-start">
+			<ChevronLeftIcon data-icon="inline-start" />
+			Ports
+		</Button>
+		<h1 class="text-lg font-semibold tracking-tight">Settings</h1>
+	</header>
+
+	<main class="mx-auto flex w-full max-w-lg flex-col gap-6 px-6 py-6">
 		{#snippet general()}
 			<Field.Field>
 				<Field.Title id="{id}-appearance">Appearance</Field.Title>
@@ -226,4 +249,4 @@
 		{/snippet}
 		{@render section("Lists", hidden)}
 	</main>
-</ScrollArea>
+</div>

@@ -1,5 +1,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { goto } from "$app/navigation";
+import { resolve } from "$app/paths";
 
 /** Must match `SETTINGS_EVENT` in `src-tauri/src/settings.rs`. */
 export const SETTINGS_EVENT = "ports://settings";
@@ -58,7 +60,8 @@ class BackendSettings {
 
 export const settings = new BackendSettings();
 
-/** Brings up the settings window, from any window. */
+/** Shows the settings page of the main window, from any window. */
 export function openSettings() {
 	if (isTauri()) void invoke("open_settings");
+	else void goto(resolve("/settings"));
 }

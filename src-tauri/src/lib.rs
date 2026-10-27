@@ -1,5 +1,5 @@
 use tauri::{
-    AppHandle, Manager, WindowEvent,
+    AppHandle, Emitter, Manager, WindowEvent,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
@@ -13,23 +13,19 @@ mod settings;
 mod shortcut;
 
 const MAIN_WINDOW: &str = "main";
-const SETTINGS_WINDOW: &str = "settings";
 const TRAY_WINDOW: &str = "tray";
+/// Asks the main window to show its settings page. Must match `src/routes/+layout.svelte`.
+const SETTINGS_EVENT: &str = "ports://open-settings";
 
-/// Brings a window to the front, closing the popover it may come from.
-fn show_window(app: &AppHandle, label: &str) {
+fn show_main(app: &AppHandle) {
     if let Some(window) = app.get_webview_window(TRAY_WINDOW) {
         let _ = window.hide();
     }
-    if let Some(window) = app.get_webview_window(label) {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
     }
-}
-
-fn show_main(app: &AppHandle) {
-    show_window(app, MAIN_WINDOW);
 }
 
 fn toggle_tray_window(app: &AppHandle) {
@@ -56,9 +52,13 @@ fn open_main_window(app: AppHandle) {
     show_main(&app);
 }
 
+/// Settings are a page of the main window, so the popover's gear opens them there.
 #[tauri::command]
 fn open_settings(app: AppHandle) {
-    show_window(&app, SETTINGS_WINDOW);
+    show_main(&app);
+    if let Err(error) = app.emit_to(MAIN_WINDOW, SETTINGS_EVENT, ()) {
+        eprintln!("could not open the settings: {error}");
+    }
 }
 
 #[tauri::command]
@@ -127,7 +127,7 @@ pub fn run() {
             }
             // Polling pauses while every window is hidden; catch up as one appears.
             (_, WindowEvent::Focused(true)) => window.state::<ports::Monitor>().window_shown(),
-            (MAIN_WINDOW | SETTINGS_WINDOW, WindowEvent::CloseRequested { api, .. }) => {
+            (MAIN_WINDOW, WindowEvent::CloseRequested { api, .. }) => {
                 // Keep running in the menu bar; quitting happens from the tray.
                 api.prevent_close();
                 let _ = window.hide();

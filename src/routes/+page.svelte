@@ -1,7 +1,8 @@
 <script lang="ts">
-	import { isTauri } from "@tauri-apps/api/core";
-	import { listen } from "@tauri-apps/api/event";
 	import { onMount, type Component } from "svelte";
+	import { goto } from "$app/navigation";
+	import { resolve } from "$app/paths";
+	import { page } from "$app/state";
 	import { flip } from "svelte/animate";
 	import { cubicOut } from "svelte/easing";
 	import { prefersReducedMotion } from "svelte/motion";
@@ -78,17 +79,14 @@
 		store.select(server.port);
 	}
 
-	/** Must match `DETAILS_EVENT` in `src-tauri/src/ports/mod.rs`. */
-	const DETAILS_EVENT = "ports://details";
-
-	// A click on a memory alert brings this window up on the server's details.
-	onMount(() => {
-		if (!isTauri()) return;
-		const unlisten = listen<number>(DETAILS_EVENT, ({ payload: port }) => {
-			const server = store.servers.find((s) => s.port === port);
-			if (server) showDetails(server);
-		});
-		return () => void unlisten.then((stop) => stop());
+	// `/?details=5173` opens a server's details, e.g. after a click on its memory
+	// alert; it waits for the first snapshot, then drops the parameter.
+	$effect(() => {
+		const port = Number(page.url.searchParams.get("details"));
+		const server = port ? store.servers.find((s) => s.port === port) : undefined;
+		if (!server) return;
+		showDetails(server);
+		void goto(resolve("/"), { replaceState: true, noScroll: true, keepFocus: true });
 	});
 
 	/** A new column sorts in its natural direction; the current one flips. */

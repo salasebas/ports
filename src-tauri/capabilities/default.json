@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window, the settings window and the menu bar popover",
-  "windows": ["main", "settings", "tray"],
+  "description": "Capability for the main window and the menu bar popover",
+  "windows": ["main", "tray"],
   "permissions": [
     "core:default",
     "core:window:allow-hide",
