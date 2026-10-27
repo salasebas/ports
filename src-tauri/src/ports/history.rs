@@ -43,6 +43,9 @@ pub struct History {
 impl History {
     pub fn record(&mut self, now_ms: u64, memory: u64, cpu: f64) {
         let slot = now_ms / BUCKET_MS;
+        if self.buckets.back().is_some_and(|bucket| slot < bucket.slot) {
+            self.buckets.clear();
+        }
         match self.buckets.back_mut() {
             Some(bucket) if bucket.slot == slot => {
                 bucket.memory = memory;
@@ -94,9 +97,8 @@ pub fn is_leaking(memory: &[u64], span: usize) -> bool {
     if span < LEAK_MIN_BUCKETS || memory.len() < SLICES {
         return false;
     }
-    let means: Vec<f64> = memory
-        .chunks(memory.len() / SLICES)
-        .take(SLICES)
+    let means: Vec<f64> = (0..SLICES)
+        .map(|i| &memory[i * memory.len() / SLICES..(i + 1) * memory.len() / SLICES])
         .map(|slice| slice.iter().map(|&m| m as f64).sum::<f64>() / slice.len() as f64)
         .collect();
     let growth = means[SLICES - 1] - means[0];
@@ -177,5 +179,21 @@ mod tests {
         assert_eq!(status(false, now, now - 30 * 60_000), Status::Idle);
         assert_eq!(status(false, now, now - 60_000), Status::Running);
         assert_eq!(status(true, now, now - 30 * 60_000), Status::Attention);
+    }
+
+    #[test]
+    fn includes_recovery_at_the_end_of_a_sparse_window() {
+        let mut memory: Vec<u64> = (0..6).map(|i| (100 + i * 25) * MB).collect();
+        memory.extend([100 * MB; 5]);
+        assert!(!is_leaking(&memory, 60));
+    }
+
+    #[test]
+    fn starts_a_new_window_after_the_clock_moves_backwards() {
+        let mut history = History::default();
+        history.record(1_000_000, 200, 1.0);
+        history.record(900_000, 100, 0.0);
+        assert_eq!(history.span(), 1);
+        assert_eq!(history.memory(), vec![100]);
     }
 }

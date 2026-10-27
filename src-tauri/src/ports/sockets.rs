@@ -1,72 +1,40 @@
-//! TCP sockets on this machine, grouped by local port.
+//! TCP bindings and their owners. Numeric ports alone do not identify a service.
 
+use listeners::{Protocol, SocketState};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::net::{IpAddr, SocketAddr};
 
-use listeners::{Protocol, SocketState};
-
 #[derive(Debug, Default)]
 pub struct Sockets {
-    /// PIDs listening on each port; the IPv4 and IPv6 sockets of a port share one entry.
-    pub listening: BTreeMap<u16, BTreeSet<u32>>,
-    /// Listening ports whose process this user can't see, with the owner's uid when known.
-    pub unowned: BTreeMap<u16, Option<u32>>,
-    /// Addresses each listening port is bound to, e.g. `127.0.0.1` or `0.0.0.0`.
-    pub addresses: BTreeMap<u16, BTreeSet<IpAddr>>,
-    /// Accepted connections, as (local port, owning PID).
+    pub listening: BTreeMap<SocketAddr, BTreeSet<u32>>,
+    pub unowned: BTreeMap<SocketAddr, Option<u32>>,
     established: HashSet<(u16, u32)>,
 }
 
 impl Sockets {
-    /// `listeners` maps sockets to processes through their file descriptors,
-    /// which only works for this user's processes. Listeners of other users
-    /// (root, `postgres`) come from tables any user can read instead.
-    pub fn scan() -> Self {
-        let mut sockets = match listeners::get_all() {
-            Ok(all) => Self::from_entries(
-                all.into_iter()
-                    .filter(|l| l.protocol == Protocol::TCP)
-                    .map(|l| (l.socket, l.process.pid, l.state)),
-            ),
-            Err(error) => {
-                eprintln!("could not list sockets: {error}");
-                Self::default()
-            }
-        };
+    pub fn scan() -> Result<Self, String> {
+        let all =
+            listeners::get_all().map_err(|error| format!("Could not list sockets: {error}"))?;
+        let mut sockets = Self::from_entries(
+            all.into_iter()
+                .filter(|l| l.protocol == Protocol::TCP)
+                .map(|l| (l.socket, l.process.pid, l.state)),
+        );
         #[cfg(target_os = "macos")]
-        {
-            // The kernel keeps the last process that used each socket. One
-            // this user may signal, or one that's gone, is stale: `listeners`
-            // already found every socket this user's processes hold, so the
-            // holder now is a process of another user, e.g. after a fork.
-            let (current, stale): (Vec<_>, Vec<_>) = pcblist::listening()
-                .into_iter()
-                .filter(|(socket, _)| !sockets.listening.contains_key(&socket.port()))
-                .partition(|(_, pid)| Self::belongs_to_another_user(*pid));
-            for (socket, _) in current.iter().chain(&stale) {
-                sockets.bound(*socket);
+        for (socket, pid) in pcblist::listening()? {
+            let socket = canonical(socket);
+            if sockets.listening.contains_key(&socket) {
+                continue;
             }
-            for (socket, pid) in current {
-                sockets
-                    .listening
-                    .entry(socket.port())
-                    .or_default()
-                    .insert(pid);
-            }
-            for (socket, _) in stale {
-                if !sockets.listening.contains_key(&socket.port()) {
-                    sockets.unowned.insert(socket.port(), None);
-                }
+            if Self::belongs_to_another_user(pid) {
+                sockets.listening.entry(socket).or_default().insert(pid);
+            } else {
+                sockets.unowned.insert(socket, None);
             }
         }
         #[cfg(target_os = "linux")]
-        for (socket, uid) in proc_net::listening() {
-            if !sockets.listening.contains_key(&socket.port()) {
-                sockets.bound(socket);
-                sockets.unowned.insert(socket.port(), Some(uid));
-            }
-        }
-        sockets
+        sockets.merge_unowned(proc_net::listening()?);
+        Ok(sockets)
     }
 
     #[cfg(target_os = "macos")]
@@ -75,17 +43,18 @@ impl Sockets {
         !alive && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
 
-    fn from_entries(entries: impl IntoIterator<Item = (SocketAddr, u32, SocketState)>) -> Self {
+    pub(super) fn from_entries(
+        entries: impl IntoIterator<Item = (SocketAddr, u32, SocketState)>,
+    ) -> Self {
         let mut sockets = Self::default();
         for (socket, pid, state) in entries {
             match state {
                 SocketState::Listen if socket.port() != 0 => {
                     sockets
                         .listening
-                        .entry(socket.port())
+                        .entry(canonical(socket))
                         .or_default()
                         .insert(pid);
-                    sockets.bound(socket);
                 }
                 SocketState::Established => {
                     sockets.established.insert((socket.port(), pid));
@@ -96,27 +65,61 @@ impl Sockets {
         sockets
     }
 
-    fn bound(&mut self, socket: SocketAddr) {
-        self.addresses
-            .entry(socket.port())
-            .or_default()
-            // Dual-stack sockets report IPv4 addresses as `::ffff:127.0.0.1`.
-            .insert(socket.ip().to_canonical());
+    #[cfg(any(target_os = "linux", test))]
+    fn merge_unowned(&mut self, entries: impl IntoIterator<Item = (SocketAddr, u32)>) {
+        for (socket, uid) in entries {
+            let socket = canonical(socket);
+            if !self.listening.contains_key(&socket) {
+                self.unowned.insert(socket, Some(uid));
+            }
+        }
     }
 
-    /// The addresses `port` is bound to, wildcards (`0.0.0.0`, `::`) included.
-    pub fn addresses(&self, port: u16) -> Vec<IpAddr> {
-        self.addresses
-            .get(&port)
-            .map(|addresses| addresses.iter().copied().collect())
-            .unwrap_or_default()
+    #[cfg(test)]
+    pub fn listeners(&self, port: u16) -> BTreeSet<u32> {
+        self.listening
+            .iter()
+            .filter(|(socket, _)| socket.port() == port)
+            .flat_map(|(_, pids)| pids.iter().copied())
+            .collect()
     }
 
-    /// Whether any of `pids` holds a connection accepted on `port`.
+    pub fn all_pids(&self) -> BTreeSet<u32> {
+        self.listening.values().flatten().copied().collect()
+    }
+
+    #[cfg(test)]
+    pub fn addresses(&self, port: u16, pids: &BTreeSet<u32>) -> Vec<IpAddr> {
+        self.listening
+            .iter()
+            .filter(|(socket, owners)| socket.port() == port && !owners.is_disjoint(pids))
+            .map(|(socket, _)| socket.ip())
+            .collect()
+    }
+
+    pub fn occupied(&self, port: u16, addresses: &[IpAddr]) -> bool {
+        self.listening
+            .keys()
+            .chain(self.unowned.keys())
+            .any(|socket| {
+                socket.port() == port
+                    && addresses.iter().any(|ip| {
+                        ip.is_ipv4() == socket.ip().is_ipv4()
+                            && (*ip == socket.ip()
+                                || ip.is_unspecified()
+                                || socket.ip().is_unspecified())
+                    })
+            })
+    }
+
     pub fn has_connections(&self, port: u16, pids: &BTreeSet<u32>) -> bool {
         pids.iter()
             .any(|pid| self.established.contains(&(port, *pid)))
     }
+}
+
+fn canonical(socket: SocketAddr) -> SocketAddr {
+    SocketAddr::new(socket.ip().to_canonical(), socket.port())
 }
 
 /// The kernel's TCP table, as `netstat -anv` reads it. It includes the PID
@@ -145,8 +148,10 @@ mod pcblist {
     const TCPS_LISTEN: u32 = 1;
 
     /// Local address and PID of every listening TCP socket, IPv4 and IPv6.
-    pub fn listening() -> Vec<(SocketAddr, u32)> {
-        read().map(|buffer| parse(&buffer)).unwrap_or_default()
+    pub fn listening() -> Result<Vec<(SocketAddr, u32)>, String> {
+        read()
+            .map(|buffer| parse(&buffer))
+            .ok_or_else(|| "Could not read the macOS TCP table".to_string())
     }
 
     fn read() -> Option<Vec<u8>> {
@@ -259,7 +264,9 @@ mod pcblist {
                 let listener = TcpListener::bind(address).unwrap();
                 let socket = listener.local_addr().unwrap();
                 assert!(
-                    super::listening().contains(&(socket, std::process::id())),
+                    super::listening()
+                        .unwrap()
+                        .contains(&(socket, std::process::id())),
                     "{socket} is missing"
                 );
             }
@@ -275,12 +282,17 @@ mod proc_net {
     const LISTEN: &str = "0A";
 
     #[cfg(target_os = "linux")]
-    pub fn listening() -> Vec<(SocketAddr, u32)> {
-        ["/proc/net/tcp", "/proc/net/tcp6"]
-            .iter()
-            .filter_map(|path| std::fs::read_to_string(path).ok())
-            .flat_map(|table| parse(&table))
-            .collect()
+    pub fn listening() -> Result<Vec<(SocketAddr, u32)>, String> {
+        let mut found = Vec::new();
+        for path in ["/proc/net/tcp", "/proc/net/tcp6"] {
+            match std::fs::read_to_string(path) {
+                Ok(table) => found.extend(parse(&table)),
+                Err(error)
+                    if path.ends_with("tcp6") && error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("Could not read {path}: {error}")),
+            }
+        }
+        Ok(found)
     }
 
     /// The kernel prints each 32-bit word of the address in host byte order.
@@ -336,12 +348,9 @@ mod tests {
             (at("[::1]:5173"), 10, SocketState::Listen),
             (at("0.0.0.0:5432"), 20, SocketState::Listen),
         ]);
+        assert_eq!(sockets.listeners(5173), BTreeSet::from([10]));
         assert_eq!(
-            sockets.listening,
-            BTreeMap::from([(5173, BTreeSet::from([10])), (5432, BTreeSet::from([20]))])
-        );
-        assert_eq!(
-            sockets.addresses(5173),
+            sockets.addresses(5173, &BTreeSet::from([10])),
             vec![at("127.0.0.1:0").ip(), at("[::1]:0").ip()]
         );
     }
@@ -351,7 +360,10 @@ mod tests {
     fn reads_ipv4_mapped_addresses_as_ipv4() {
         let sockets =
             Sockets::from_entries([(at("[::ffff:127.0.0.1]:8080"), 10, SocketState::Listen)]);
-        assert_eq!(sockets.addresses(8080), vec![at("127.0.0.1:0").ip()]);
+        assert_eq!(
+            sockets.addresses(8080, &BTreeSet::from([10])),
+            vec![at("127.0.0.1:0").ip()]
+        );
     }
 
     #[test]
@@ -394,5 +406,32 @@ mod tests {
                 vec![(at("[::]:8080"), 1000), (at("[::1]:3000"), 1000)]
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+    #[test]
+    fn preserves_independent_owners_and_other_users_on_the_same_port() {
+        let local: SocketAddr = "127.0.0.1:3000".parse().unwrap();
+        let other: SocketAddr = "[::1]:3000".parse().unwrap();
+        let exposed: SocketAddr = "0.0.0.0:3000".parse().unwrap();
+        let mut sockets = Sockets::from_entries([
+            (local, 10, SocketState::Listen),
+            (other, 20, SocketState::Listen),
+        ]);
+        sockets.merge_unowned([(local, 1000), (exposed, 0)]);
+        assert_eq!(
+            sockets.addresses(3000, &BTreeSet::from([10])),
+            vec![local.ip()]
+        );
+        assert_eq!(
+            sockets.addresses(3000, &BTreeSet::from([20])),
+            vec![other.ip()]
+        );
+        assert_eq!(sockets.unowned, BTreeMap::from([(exposed, Some(0))]));
+        assert!(sockets.occupied(3000, &[exposed.ip()]));
+        assert!(!sockets.occupied(3001, &[exposed.ip()]));
     }
 }

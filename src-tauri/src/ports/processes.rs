@@ -123,7 +123,7 @@ pub struct Job {
     pub listener: u32,
     /// What the user launched, e.g. `npm run dev` above the `node` that listens.
     pub root: u32,
-    /// Signalled as a whole so processes spawned mid-stop go too.
+    /// Tracked through shutdown so newly spawned group members go too.
     pub group: Option<u32>,
     pub pids: BTreeSet<u32>,
 }
@@ -132,7 +132,18 @@ pub struct Job {
 /// descendants (its workers among them), plus the listener's process group when that group is a job
 /// started from a shell (such as `npm run dev`) or by Ports, never the group
 /// of a terminal, of an app like an editor, or of Ports itself.
+#[cfg(test)]
 pub fn job(listeners: &BTreeSet<u32>, table: &ProcessTable, groups: &impl Groups) -> Job {
+    scoped_job(listeners, table, groups, listeners)
+}
+
+#[cfg(test)]
+pub fn scoped_job(
+    listeners: &BTreeSet<u32>,
+    table: &ProcessTable,
+    groups: &impl Groups,
+    all_listeners: &BTreeSet<u32>,
+) -> Job {
     // Workers sharing the port (SO_REUSEPORT) hang off the first one.
     let first = listeners
         .iter()
@@ -140,9 +151,33 @@ pub fn job(listeners: &BTreeSet<u32>, table: &ProcessTable, groups: &impl Groups
         .find(|pid| table.parent(*pid).is_none_or(|p| !listeners.contains(&p)))
         .or_else(|| listeners.first().copied())
         .unwrap_or_default();
-    let listener = master(first, table, groups);
+    scoped_job_for(first, listeners, table, groups, all_listeners)
+}
 
-    let group = owned_group(listener, table, groups);
+pub fn scoped_job_for(
+    first: u32,
+    co_listeners: &BTreeSet<u32>,
+    table: &ProcessTable,
+    groups: &impl Groups,
+    all_listeners: &BTreeSet<u32>,
+) -> Job {
+    let descendants = table.descendants(first);
+    let listener = master(
+        first,
+        table,
+        groups,
+        co_listeners,
+        all_listeners,
+        &descendants,
+    );
+
+    let descendants = table.descendants(listener);
+    let group = owned_group(listener, table, groups).filter(|group| {
+        let members = table.descendants(*group);
+        !all_listeners
+            .iter()
+            .any(|pid| members.contains(pid) && !descendants.contains(pid))
+    });
     // Unrelated processes can listen on one port too, e.g. on 127.0.0.1 and
     // ::1; they aren't part of this server and must survive its stop.
     let mut pids = table.descendants(listener);
@@ -166,7 +201,14 @@ pub fn job(listeners: &BTreeSet<u32>, table: &ProcessTable, groups: &impl Groups
 /// master and its workers, and Linux reports whichever process it finds
 /// last. The master is the nearest ancestor still running the same program
 /// in the same process group.
-fn master(listener: u32, table: &ProcessTable, groups: &impl Groups) -> u32 {
+fn master(
+    listener: u32,
+    table: &ProcessTable,
+    groups: &impl Groups,
+    co_listeners: &BTreeSet<u32>,
+    all_listeners: &BTreeSet<u32>,
+    service: &BTreeSet<u32>,
+) -> u32 {
     let (Some(program), Some(pgid)) = (table.programs.get(&listener), groups.pgid(listener)) else {
         return listener;
     };
@@ -174,6 +216,12 @@ fn master(listener: u32, table: &ProcessTable, groups: &impl Groups) -> u32 {
         .ancestors(listener)
         .into_iter()
         .take_while(|p| table.programs.get(p) == Some(program) && groups.pgid(*p) == Some(pgid))
+        .take_while(|parent| {
+            let descendants = table.descendants(*parent);
+            !all_listeners.iter().any(|pid| {
+                descendants.contains(pid) && !service.contains(pid) && !co_listeners.contains(pid)
+            })
+        })
         .last()
         .unwrap_or(listener)
 }
@@ -243,6 +291,26 @@ mod tests {
             (NODE, SH),
             (ESBUILD, NODE),
         ])
+    }
+
+    #[test]
+    fn sibling_workers_sharing_one_binding_normalize_to_their_master() {
+        let mut table = ProcessTable::from_parents([(200, SHELL), (201, 200), (202, 200)]);
+        for pid in [200, 201, 202] {
+            table.programs.insert(pid, PathBuf::from("/python"));
+        }
+        let groups = FakeGroups {
+            pgids: HashMap::from([(SHELL, SHELL), (200, 200), (201, 200), (202, 200)]),
+            session_leaders: vec![SHELL],
+            own: 999,
+        };
+        let co = BTreeSet::from([201, 202]);
+        for pid in &co {
+            let actual = scoped_job_for(*pid, &co, &table, &groups, &co);
+            assert_eq!(actual.listener, 200);
+            assert_eq!(actual.root, 200);
+            assert_eq!(actual.pids, BTreeSet::from([200, 201, 202]));
+        }
     }
 
     #[test]
@@ -380,5 +448,30 @@ mod tests {
         let job = job(&BTreeSet::from([20, 30]), &table, &groups);
         assert_eq!(job.listener, 20);
         assert_eq!(job.pids, BTreeSet::from([20, 21]));
+    }
+
+    #[test]
+    fn does_not_take_a_task_runner_that_owns_another_listening_service() {
+        let table = ProcessTable::from_parents([(200, SHELL), (201, 200), (202, 201), (210, 200)]);
+        let groups = FakeGroups {
+            pgids: HashMap::from([
+                (SHELL, SHELL),
+                (200, 200),
+                (201, 200),
+                (202, 200),
+                (210, 200),
+            ]),
+            session_leaders: vec![SHELL],
+            own: 999,
+        };
+        let job = scoped_job(
+            &BTreeSet::from([202]),
+            &table,
+            &groups,
+            &BTreeSet::from([202, 210]),
+        );
+        assert_eq!(job.root, 202);
+        assert_eq!(job.group, None);
+        assert_eq!(job.pids, BTreeSet::from([202]));
     }
 }

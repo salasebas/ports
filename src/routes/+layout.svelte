@@ -25,7 +25,7 @@
 		if (!isTauri() || getCurrentWindow().label !== "main") return;
 		const listening = [
 			listen(SETTINGS_EVENT, () => goto(resolve("/settings"))),
-			listen<number>(DETAILS_EVENT, ({ payload: port }) => goto(`${resolve("/")}?details=${port}`)),
+			listen<string>(DETAILS_EVENT, ({ payload: id }) => goto(`${resolve("/")}?details=${encodeURIComponent(id)}`)),
 		];
 		return () => listening.forEach((unlisten) => void unlisten.then((stop) => stop()));
 	});

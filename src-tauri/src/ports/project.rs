@@ -201,19 +201,46 @@ pub fn git_branch(folder: &Path, home: &Path) -> Option<String> {
     }
 }
 
-/// Every word of the command lines, with paths reduced to file names, so
-/// `node ./node_modules/.bin/vite` and `next-server (v15.1.0)` both match.
+/// Executable and script/module names, never arbitrary option values.
 pub fn command_words<'a>(commands: impl IntoIterator<Item = &'a [OsString]>) -> HashSet<String> {
-    commands
-        .into_iter()
-        .flatten()
-        .flat_map(|arg| {
-            arg.to_string_lossy()
-                .split_whitespace()
-                .map(|word| file_name(word).to_string())
-                .collect::<Vec<_>>()
-        })
-        .collect()
+    let mut words = HashSet::new();
+    for command in commands {
+        let Some(first) = command.first() else {
+            continue;
+        };
+        let first = first.to_string_lossy();
+        let executable = file_name(first.split_whitespace().next().unwrap_or_default());
+        words.insert(executable.to_string());
+        let args: Vec<_> = command
+            .iter()
+            .skip(1)
+            .map(|arg| arg.to_string_lossy())
+            .collect();
+        let script = if executable.starts_with("python") {
+            match args.as_slice() {
+                [flag, module, ..] if flag == "-m" => Some(module.as_ref()),
+                [script, ..] if !script.starts_with('-') => Some(script.as_ref()),
+                _ => None,
+            }
+        } else if ["node", "bun", "deno", "ruby", "php"].contains(&executable) {
+            args.first()
+                .filter(|arg| !arg.starts_with('-'))
+                .map(|arg| arg.as_ref())
+        } else {
+            None
+        };
+        if let Some(script) = script {
+            words.insert(file_name(script).to_string());
+        }
+    }
+    words
+}
+
+pub fn is_http_command(words: &HashSet<String>) -> bool {
+    COMMANDS
+        .iter()
+        .any(|(word, name)| !is_database(name) && words.contains(*word))
+        || RUNNERS.iter().any(|(word, ..)| words.contains(*word))
 }
 
 pub fn framework(words: &HashSet<String>, folder: Option<&Path>) -> Option<&'static str> {
@@ -229,7 +256,7 @@ pub fn framework(words: &HashSet<String>, folder: Option<&Path>) -> Option<&'sta
                 .unwrap_or(runner),
         );
     }
-    from_dependencies
+    None
 }
 
 fn dependency_framework(folder: &Path) -> Option<&'static str> {
@@ -429,7 +456,6 @@ mod tests {
             ),
             ("node /p/node_modules/.bin/vite", Some(&express), "Vite"),
             ("next-server (v15.1.0)", Some(&next), "Next.js"),
-            ("node server.js", Some(&express), "Express"),
             (
                 "python -m uvicorn app.main:app --reload",
                 Some(&fastapi),
@@ -453,6 +479,26 @@ mod tests {
                 "{command}"
             );
         }
+    }
+
+    #[test]
+    fn does_not_classify_option_values_or_unrelated_project_tools_as_servers() {
+        assert_eq!(
+            framework(&words("python app.py --database postgres"), None),
+            None
+        );
+        let vite = project(&[(
+            "package.json",
+            r#"{"dependencies":{"express":"5"},"devDependencies":{"vite":"7"}}"#,
+        )]);
+        assert_eq!(
+            framework(&words("node custom-tcp.js"), Some(vite.path())),
+            None
+        );
+        assert_eq!(
+            framework(&words("bazel -jar A-server.jar"), Some(vite.path())),
+            None
+        );
     }
 
     #[test]

@@ -1,9 +1,9 @@
 <script lang="ts">
 	import * as ToggleGroup from "$lib/components/ui/toggle-group";
-	import { formatBytes, formatBytesText, formatPercent, isMeasured, portColor } from "$lib/ports/format";
+	import { formatBytes, formatBytesText, formatPercent, portColor } from "$lib/ports/format";
 	import type { PortsStore } from "$lib/ports/ports-store.svelte";
 	import { preferences, type Metric } from "$lib/ports/preferences.svelte";
-	import type { Server } from "$lib/ports/types";
+
 	import { cn } from "$lib/utils";
 
 	let { store, class: className }: { store: PortsStore; class?: string } = $props();
@@ -23,18 +23,18 @@
 		const cpu = preferences.metric.current === "cpu";
 		// Empty until the first snapshot arrives.
 		const ofMemory = (bytes: number) => (system.totalBytes ? bytes / system.totalBytes : 0);
-		const shareOf = (server: Server) => (cpu ? server.cpuPercent / 100 : ofMemory(server.memoryBytes));
 		const amount = (fraction: number) =>
 			cpu ? formatPercent(fraction * 100) : formatBytesText(fraction * system.totalBytes);
 
-		// One slice per process: a process holding several ports is one server here.
-		const ranked = store.shown
-			.filter((server, i, all) => isMeasured(server) && all.findIndex((s) => s.pid === server.pid) === i)
-			.map((server) => ({ server, share: shareOf(server) }))
+		const ranked = store.allocations
+			.map(({ server, usage: allocated }) => ({
+				server,
+				share: cpu ? allocated.cpuPercent / 100 : ofMemory(allocated.memoryBytes),
+			}))
 			.filter((slice) => slice.share > 0)
 			.toSorted((a, b) => b.share - a.share);
 		const named = ranked.slice(0, NAMED).map(({ server, share }) => ({
-			key: String(server.pid),
+			key: server.id,
 			label: server.name,
 			color: portColor(server.port),
 			share,

@@ -47,9 +47,9 @@ export function serverProcessId(server: Server): string {
 }
 
 /** Memory and CPU are measured for processes Ports can see, not for containers or other users' processes. */
-export const isMeasured = (server: Server) => server.pid !== undefined;
+export const isMeasured = (server: Server) => server.resources.length > 0;
 
-export const canStop = (server: Server) => server.pid !== undefined || server.container !== undefined;
+export const canStop = (server: Server) => server.target !== undefined;
 
 /** How to start each framework's dev server on every interface instead of loopback only. */
 const exposeFlags: Record<string, string> = {
@@ -76,8 +76,12 @@ const exposeFlags: Record<string, string> = {
 export const exposeFlag = (server: Server): string | undefined =>
 	server.framework ? exposeFlags[server.framework] : undefined;
 
-export function serverUrl(port: number): string {
-	return `http://localhost:${port}`;
+export function serverUrl(server: Pick<Server, "port" | "addresses">): string {
+	const address =
+		server.addresses.find((ip) => ip === "127.0.0.1" || ip === "::1") ?? server.addresses[0] ?? "127.0.0.1";
+	const local = address === "0.0.0.0" ? "127.0.0.1" : address === "::" ? "::1" : address;
+	const host = local.includes(":") ? `[${local}]` : local;
+	return `http://${host}:${server.port}`;
 }
 
 /** Stable color slot so a port keeps its color across refreshes. */

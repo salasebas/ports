@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatBytesText, formatDuration } from "./format";
+import { formatBytesText, formatDuration, serverUrl } from "./format";
 
 const minute = 60_000;
 const hour = 60 * minute;
@@ -23,5 +23,17 @@ describe("formatBytesText", () => {
 		[12 * 1024 ** 3, "12.0 GB"],
 	])("shows %i bytes as %s", (bytes, expected) => {
 		expect(formatBytesText(bytes)).toBe(expected);
+	});
+});
+
+// Bound socket addresses define reachability; localhost cannot reach a NIC-only listener.
+describe("serverUrl", () => {
+	it.each([
+		[["192.168.1.20"], "http://192.168.1.20:3000"],
+		[["::"], "http://[::1]:3000"],
+		[["2001:db8::1"], "http://[2001:db8::1]:3000"],
+		[["0.0.0.0"], "http://127.0.0.1:3000"],
+	])("uses a reachable binding for %s", (addresses, expected) => {
+		expect(serverUrl({ port: 3000, addresses })).toBe(expected);
 	});
 });

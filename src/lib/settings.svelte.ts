@@ -24,6 +24,7 @@ export const alertThresholds = [
 
 /** Mirrors `Settings` in `src-tauri/src/settings.rs`. */
 export interface Settings {
+	revision: number;
 	/** The shortcut that shows the popover, e.g. `alt+super+KeyP`; null when there's none. */
 	shortcut: string | null;
 	alerts: AlertSettings;
@@ -34,27 +35,37 @@ export interface Settings {
  * hidden: the shortcut and the memory alerts. Each window loads them once
  * and follows the changes made in any window.
  */
-class BackendSettings {
-	current = $state.raw<Settings>({ shortcut: null, alerts: { enabled: true, thresholdBytes: 2 * GB } });
+export class BackendSettings {
+	current = $state.raw<Settings>({ revision: -1, shortcut: null, alerts: { enabled: true, thresholdBytes: 2 * GB } });
 	#loaded = false;
+
+	apply = (settings: Settings) => {
+		if (settings.revision > this.current.revision) this.current = settings;
+	};
 
 	load = () => {
 		if (this.#loaded || !isTauri()) return;
 		this.#loaded = true;
-		void listen<Settings>(SETTINGS_EVENT, (event) => (this.current = event.payload));
-		invoke<Settings>("get_settings").then(
-			(settings) => (this.current = settings),
-			(error) => console.error(error),
-		);
+		void (async () => {
+			let stop: (() => void) | undefined;
+			try {
+				stop = await listen<Settings>(SETTINGS_EVENT, (event) => this.apply(event.payload));
+				this.apply(await invoke<Settings>("get_settings"));
+			} catch (error) {
+				stop?.();
+				this.#loaded = false;
+				console.error(error);
+			}
+		})();
 	};
 
 	/** Rejects with the reason when the shortcut can't be used; the previous one stays. */
 	setShortcut = async (shortcut: string | null) => {
-		this.current = await invoke<Settings>("set_shortcut", { shortcut });
+		this.apply(await invoke<Settings>("set_shortcut", { shortcut }));
 	};
 
-	setAlerts = async (alerts: AlertSettings) => {
-		this.current = await invoke<Settings>("set_alerts", { alerts });
+	setAlerts = async (alerts: Partial<AlertSettings>) => {
+		this.apply(await invoke<Settings>("set_alerts", { alerts }));
 	};
 }
 

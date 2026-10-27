@@ -4,10 +4,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mockSnapshot } from "./mock";
 import { hiddenPort, hiddenProcess, PortsStore, SNAPSHOT_EVENT, unhide } from "./ports-store.svelte";
 import { preferences } from "./preferences.svelte";
-import type { Server } from "./types";
+import type { Server, Snapshot, ServerTarget } from "./types";
 
 function server(overrides: Partial<Server>): Server {
-	return {
+	const value: Omit<Server, "id" | "target" | "resources"> = {
 		port: 3000,
 		pid: 100,
 		process: "node",
@@ -28,6 +28,24 @@ function server(overrides: Partial<Server>): Server {
 		cpuHistory: [0],
 		...overrides,
 	};
+	const process = { pid: value.pid!, start: String(value.startedAt) };
+	const target: ServerTarget | undefined = value.container
+		? {
+				kind: "container",
+				port: value.port,
+				id: value.container.id,
+				engine: "/docker.sock",
+				addresses: value.addresses,
+			}
+		: value.pid
+			? { kind: "process", port: value.port, listener: process, root: process, addresses: value.addresses }
+			: undefined;
+	return {
+		...value,
+		id: `${value.port}:${value.pid ?? value.container?.id}:${value.startedAt}`,
+		target,
+		resources: value.pid ? [{ process, memoryBytes: value.memoryBytes, cpuPercent: value.cpuPercent }] : [],
+	};
 }
 
 const web = server({ port: 5173, name: "web", branch: "feat/login", framework: "Vite" });
@@ -35,29 +53,54 @@ const api = server({ port: 8080, pid: 200, name: "api", process: "bun", branch: 
 const db = server({ port: 5432, pid: 300, name: "postgres", process: "postgres", kind: "database" });
 const editor = server({ port: 44438, pid: 400, name: "zed", process: "zed", kind: "other" });
 
+let activeStore: PortsStore;
+let backendRows: Server[];
+let revision = 0;
+function snapshot(servers: Server[]): Snapshot {
+	return { ...mockSnapshot(), revision: ++revision, servers };
+}
+
 function storeWith(...servers: Server[]) {
 	const store = new PortsStore();
 	store.servers = servers;
+	activeStore = store;
+	backendRows = servers;
 	return store;
 }
 
 /** Commands the store sent to the Rust backend, with their arguments. */
 let calls: [string, unknown][];
 
-function backend(reply: (cmd: string) => unknown = () => undefined) {
+function backend(reply?: (cmd: string) => unknown) {
 	calls = [];
 	// Set by Tauri in its windows; mockIPC only fakes the IPC.
 	vi.stubGlobal("isTauri", true);
 	mockIPC(
 		(cmd, args) => {
 			calls.push([cmd, args]);
-			return reply(cmd);
+			if (reply) return reply(cmd);
+			if (cmd === "restart_server") return snapshot(activeStore.servers);
+			if (cmd === "stop_server") {
+				const { target } = args as { target: ServerTarget };
+				backendRows = backendRows.filter((row) => {
+					const other = row.target;
+					if (!other || target.kind !== other.kind) return true;
+					return target.kind === "process" && other.kind === "process"
+						? target.root.pid !== other.root.pid || target.root.start !== other.root.start
+						: target.kind === "container" &&
+								other.kind === "container" &&
+								(target.id !== other.id || target.engine !== other.engine);
+				});
+				return snapshot(backendRows);
+			}
+			return undefined;
 		},
 		{ shouldMockEvents: true },
 	);
 }
 
 beforeEach(() => {
+	revision = 0;
 	preferences.confirmActions.current = true;
 	preferences.shownKinds.current = ["dev", "database", "container"];
 	preferences.sort.current = { key: "port", descending: false };
@@ -74,9 +117,21 @@ afterEach(() => {
 });
 
 describe("live updates", () => {
+	it("keeps a newer snapshot when an older refresh reply finishes later", async () => {
+		const reply = Promise.withResolvers<ReturnType<typeof mockSnapshot>>();
+		backend((cmd) => (cmd === "refresh" ? reply.promise : undefined));
+		const store = new PortsStore();
+		const old = { ...mockSnapshot(), revision: 1, servers: [web] };
+		const newer = { ...old, revision: 2, servers: [api] };
+		const refreshing = store.refresh();
+		store.apply(newer);
+		reply.resolve(old);
+		await refreshing;
+		expect(store.servers).toEqual([api]);
+	});
 	// A server started in a terminal must reach an open window without pressing refresh.
 	it("shows each snapshot the backend pushes", async () => {
-		backend((cmd) => (cmd === "snapshot" ? { servers: [], system: mockSnapshot().system } : undefined));
+		backend((cmd) => (cmd === "snapshot" ? { revision: 0, servers: [], system: mockSnapshot().system } : undefined));
 		const store = new PortsStore();
 		const disconnect = store.connect();
 		const pushed = mockSnapshot();
@@ -130,12 +185,11 @@ describe("kinds of server", () => {
 
 	// The summary must add up to what the list shows.
 	it("counts hidden servers as other apps in the usage summary", () => {
-		const store = storeWith(web, editor);
+		const store = storeWith(server({ ...web, memoryBytes: 300, cpuPercent: 2 }), editor);
 		store.system = {
 			totalBytes: 16_000,
-			kinds: { dev: { memoryBytes: 300, cpuPercent: 2 }, other: { memoryBytes: 2_000, cpuPercent: 5 } },
-			otherAppsBytes: 6_000,
-			otherAppsCpuPercent: 10,
+			usedBytes: 8_300,
+			cpuPercent: 17,
 		};
 		expect(store.usage).toEqual({
 			serversBytes: 300,
@@ -147,6 +201,17 @@ describe("kinds of server", () => {
 });
 
 describe("stopping a server", () => {
+	it("keeps a replacement published before the stopped process replies", async () => {
+		const reply = Promise.withResolvers<Snapshot>();
+		backend((cmd) => (cmd === "stop_server" ? reply.promise : undefined));
+		const store = storeWith(web);
+		const stopping = store.stop(web);
+		const replacement = server({ ...web, pid: 999, name: "replacement" });
+		store.apply({ ...snapshot([replacement]), revision: 2 });
+		reply.resolve({ ...snapshot([]), revision: 1 });
+		await stopping;
+		expect(store.servers).toEqual([replacement]);
+	});
 	it("asks for confirmation instead of stopping when the preference is on", async () => {
 		const store = storeWith(web, api);
 		await store.request("stop", web);
@@ -161,14 +226,14 @@ describe("stopping a server", () => {
 		expect(store.pending).toEqual({ action: "restart", server: web });
 		expect(calls).toEqual([]);
 		await store.confirm();
-		expect(calls).toEqual([["restart_server", { target: { port: web.port, pid: web.pid } }]]);
+		expect(calls).toEqual([["restart_server", { target: web.target }]]);
 	});
 
 	it("stops the process on the port right away when confirmation is turned off", async () => {
 		preferences.confirmActions.current = false;
 		const store = storeWith(web, api);
 		await store.request("stop", web);
-		expect(calls).toEqual([["stop_server", { target: { port: web.port, pid: web.pid } }]]);
+		expect(calls).toEqual([["stop_server", { target: web.target, onlyIfIdle: false }]]);
 		expect(store.pending).toBeNull();
 		expect(store.servers).toEqual([api]);
 	});
@@ -182,19 +247,19 @@ describe("stopping a server", () => {
 			container: { id: "4a1b", image: "postgres" },
 		});
 		await storeWith(container).stop(container);
-		expect(calls).toEqual([["stop_server", { target: { port: 5433, container: "4a1b" } }]]);
+		expect(calls).toEqual([["stop_server", { target: container.target, onlyIfIdle: false }]]);
 	});
 
 	// Stopping waits up to seconds for the server to exit; a second click must not stop it twice.
 	it("ignores another stop of a server that is still stopping", async () => {
-		const stopping = Promise.withResolvers<void>();
+		const stopping = Promise.withResolvers<Snapshot>();
 		backend((cmd) => (cmd === "stop_server" ? stopping.promise : undefined));
 		const store = storeWith(web);
 		const first = store.stop(web);
 		expect(store.isBusy(web, "control")).toBe(true);
 		await store.request("stop", web);
 		await store.stop(web);
-		stopping.resolve();
+		stopping.resolve(snapshot([]));
 		await first;
 		expect(calls.filter(([cmd]) => cmd === "stop_server")).toHaveLength(1);
 		expect(store.isBusy(web, "control")).toBe(false);
@@ -202,7 +267,7 @@ describe("stopping a server", () => {
 
 	it("closes the details of the stopped server and clears the pending confirmation", async () => {
 		const store = storeWith(web, api);
-		store.select(web.port);
+		store.select(web.id);
 		await store.request("stop", web);
 		await store.confirm();
 		expect(store.selected).toBeNull();
@@ -301,6 +366,31 @@ describe("clean up", () => {
 	const busy = server({ port: 3000, pid: 201, name: "busy" });
 	const idleDb = server({ port: 5432, pid: 300, kind: "database", status: "idle", protected: true });
 
+	it.each(["protected", "active", "hidden"])("rechecks a %s server before confirming cleanup", async (change) => {
+		const store = storeWith(idleWeb);
+		store.cleanUp();
+		if (change === "protected") store.setProtected(idleWeb, true);
+		if (change === "active") store.servers = [{ ...idleWeb, status: "running" }];
+		if (change === "hidden") store.hide(hiddenPort(idleWeb.port));
+		await store.confirmCleanUp();
+		expect(calls.filter(([cmd]) => cmd === "stop_server")).toEqual([]);
+	});
+
+	it("protects all ports affected by the same process", () => {
+		const sibling = server({ ...idleWeb, port: 5174 });
+		const store = storeWith(idleWeb, sibling);
+		store.setProtected(sibling, true);
+		expect(store.idle).toEqual([]);
+	});
+
+	it("stops a process with multiple ports once", async () => {
+		const sibling = server({ ...idleWeb, port: 5174 });
+		const store = storeWith(idleWeb, sibling);
+		store.cleanUp();
+		await store.confirmCleanUp();
+		expect(calls.filter(([cmd]) => cmd === "stop_server")).toHaveLength(1);
+	});
+
 	it("stops every idle server after one confirmation, leaving the rest running", async () => {
 		const store = storeWith(idleWeb, idleApi, busy, idleDb);
 		store.cleanUp();
@@ -308,8 +398,8 @@ describe("clean up", () => {
 		expect(calls).toEqual([]);
 		await store.confirmCleanUp();
 		expect(calls).toEqual([
-			["stop_server", { target: { port: 5173, pid: 100 } }],
-			["stop_server", { target: { port: 8080, pid: 200 } }],
+			["stop_server", { target: idleWeb.target, onlyIfIdle: true, allowedIds: [idleWeb.id, idleApi.id] }],
+			["stop_server", { target: idleApi.target, onlyIfIdle: true, allowedIds: [idleWeb.id, idleApi.id] }],
 		]);
 		expect(store.servers).toEqual([busy, idleDb]);
 	});
@@ -329,4 +419,50 @@ describe("clean up", () => {
 		store.cleanUp();
 		expect(store.cleaning).toBeNull();
 	});
+});
+
+// The resource owner is a kernel process identity, even when jobs overlap or a row is hidden.
+describe("resource allocation and row identity", () => {
+	it("counts shared descendants once across headline totals and chart slices", () => {
+		const child = server({ pid: 50, port: 3001, memoryBytes: 100, cpuPercent: 1 });
+		const parent = server({ pid: 51, port: 3002, memoryBytes: 200, cpuPercent: 2 });
+		parent.resources.push(...child.resources);
+		const store = storeWith(child, parent);
+		expect(store.usage.serversBytes).toBe(300);
+		expect(store.allocations.reduce((sum, row) => sum + row.usage.memoryBytes, 0)).toBe(300);
+		store.hide(hiddenPort(child.port));
+		expect(store.usage.serversBytes).toBe(300);
+		store.hide(hiddenPort(parent.port));
+		expect(store.usage.serversBytes).toBe(0);
+	});
+
+	it("selects independent owners on the same numeric port", () => {
+		const second = server({ ...web, pid: 501, addresses: ["::1"] });
+		const store = storeWith(web, second);
+		store.select(second.id);
+		expect(store.selected).toBe(second);
+	});
+});
+
+it("blocks controls on an overlapping process tree with a different root", async () => {
+	const parent = server({ pid: 600, port: 3000 });
+	const child = server({ pid: 601, port: 3001 });
+	parent.resources.push(...child.resources);
+	const stopped = Promise.withResolvers<Snapshot>();
+	backend((command) => (command === "stop_server" ? stopped.promise : snapshot([])));
+	const store = storeWith(parent, child);
+	const stopping = store.stop(parent);
+	expect(store.isBusy(child, "control")).toBe(true);
+	await store.restart(child);
+	expect(calls.map(([command]) => command)).toEqual(["stop_server"]);
+	stopped.resolve(snapshot([]));
+	await stopping;
+});
+
+it("moves an individually hidden server's resources into Other apps", () => {
+	const row = server({ ...web, memoryBytes: 300, cpuPercent: 2 });
+	const store = storeWith(row);
+	store.system = { totalBytes: 1600, usedBytes: 1000, cpuPercent: 10 };
+	store.hide(hiddenPort(row.port));
+	expect(store.usage).toEqual({ serversBytes: 0, serversCpuPercent: 0, otherAppsBytes: 1000, otherAppsCpuPercent: 10 });
 });

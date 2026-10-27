@@ -61,7 +61,7 @@
 		return above && `Alerts ${above}`;
 	});
 	// Pins and protection cover every port of a project.
-	const scope = $derived(server.folder ? "every port of this project" : `:${server.port} only`);
+	const scope = $derived(server.folder ? "every port of this project" : "this server and ports sharing its processes");
 
 	const facts = $derived(
 		[
@@ -112,7 +112,7 @@
 	<div class="flex flex-col gap-2">
 		<div class="flex gap-2">
 			<Button size="lg" class="flex-1" onclick={() => store.open(server)}>
-				Open localhost:{server.port}
+				Open port {server.port}
 			</Button>
 			<Button variant="secondary" size="icon-lg" aria-label="Copy URL" onclick={() => store.copyUrl(server)}>
 				<CopyIcon />
