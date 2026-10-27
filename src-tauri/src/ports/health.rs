@@ -9,15 +9,14 @@ use std::time::Duration;
 
 use super::history::Status;
 use super::network;
-use super::project;
-use super::sampler::{Kind, Server};
+use super::sampler::Server;
 
 pub const PROBE_EVERY_MS: u64 = 10_000;
 /// Generous enough for a dev server busy compiling, well below the interval.
 pub const TIMEOUT: Duration = Duration::from_secs(3);
 
-/// A server, by port and listening PID, that didn't answer its last probe.
-pub type Key = (u16, u32);
+/// A snapshot service identity that did not answer its last probe.
+pub type Key = String;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Probe {
@@ -37,15 +36,11 @@ pub struct Target {
 /// Servers Ports runs a probe on: the processes it sees. Containers are
 /// left out, since the runtime's forwarder answers for them.
 pub fn target(server: &Server) -> Option<Target> {
-    let pid = server.pid?;
+    server.pid?;
     Some(Target {
-        key: (server.port, pid),
+        key: server.id.clone(),
         address: network::local_address(server.port, &server.addresses),
-        // A project folder alone doesn't make a process an HTTP server.
-        probe: match (server.kind, server.framework) {
-            (Kind::Dev, Some(framework)) if !project::is_database(framework) => Probe::Http,
-            _ => Probe::Tcp,
-        },
+        probe: if server.http { Probe::Http } else { Probe::Tcp },
     })
 }
 
@@ -55,7 +50,12 @@ pub fn unresponsive(targets: &[Target]) -> HashSet<Key> {
         let probes: Vec<_> = targets
             .iter()
             .map(|target| {
-                scope.spawn(move || (target.key, probe(target.address, target.probe, TIMEOUT)))
+                scope.spawn(move || {
+                    (
+                        target.key.clone(),
+                        probe(target.address, target.probe, TIMEOUT),
+                    )
+                })
             })
             .collect();
         probes
@@ -71,9 +71,7 @@ pub fn unresponsive(targets: &[Target]) -> HashSet<Key> {
 /// stays idle, so clean up still stops a forgotten server that also hangs.
 pub fn apply(unresponsive: &HashSet<Key>, servers: &mut [Server]) {
     for server in servers {
-        if let Some(pid) = server.pid
-            && unresponsive.contains(&(server.port, pid))
-        {
+        if unresponsive.contains(&server.id) {
             server.responding = false;
             if server.status != Status::Idle {
                 server.status = Status::Attention;
@@ -146,10 +144,10 @@ mod tests {
 
     #[test]
     fn a_free_port_has_nothing_to_probe() {
-        let address = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        // Reserve the non-listening client port so parallel tests cannot take it.
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let address = client.local_addr().unwrap();
         assert_eq!(probe(address, Probe::Http, SHORT), None);
     }
 }

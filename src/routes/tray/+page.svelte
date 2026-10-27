@@ -69,7 +69,7 @@
 			<ScrollArea class="min-h-0 flex-1">
 				{#if store.filtered.length}
 					<ul class="flex flex-col p-2">
-						{#each store.filtered as server (server.port)}
+						{#each store.filtered as server (server.id)}
 							<ServerRow {server} {store} />
 						{/each}
 					</ul>

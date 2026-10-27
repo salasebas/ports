@@ -201,19 +201,48 @@ pub fn git_branch(folder: &Path, home: &Path) -> Option<String> {
     }
 }
 
-/// Every word of the command lines, with paths reduced to file names, so
-/// `node ./node_modules/.bin/vite` and `next-server (v15.1.0)` both match.
+/// Executable and script/module names, never arbitrary option values.
 pub fn command_words<'a>(commands: impl IntoIterator<Item = &'a [OsString]>) -> HashSet<String> {
-    commands
-        .into_iter()
-        .flatten()
-        .flat_map(|arg| {
-            arg.to_string_lossy()
-                .split_whitespace()
-                .map(|word| file_name(word).to_string())
-                .collect::<Vec<_>>()
-        })
-        .collect()
+    let mut words = HashSet::new();
+    for command in commands {
+        let Some(first) = command.first() else {
+            continue;
+        };
+        let first = first.to_string_lossy();
+        // Retitled processes read `nginx: master process …`.
+        let executable =
+            file_name(first.split_whitespace().next().unwrap_or_default()).trim_end_matches(':');
+        words.insert(executable.to_string());
+        let args: Vec<_> = command
+            .iter()
+            .skip(1)
+            .map(|arg| arg.to_string_lossy())
+            .collect();
+        let script = if executable.starts_with("python") {
+            match args.as_slice() {
+                [flag, module, ..] if flag == "-m" => Some(module.as_ref()),
+                [script, ..] if !script.starts_with('-') => Some(script.as_ref()),
+                _ => None,
+            }
+        } else if ["node", "bun", "deno", "ruby", "php"].contains(&executable) {
+            args.first()
+                .filter(|arg| !arg.starts_with('-'))
+                .map(|arg| arg.as_ref())
+        } else {
+            None
+        };
+        if let Some(script) = script {
+            words.extend(script_names(script).map(str::to_string));
+        }
+    }
+    words
+}
+
+pub fn is_http_command(words: &HashSet<String>) -> bool {
+    COMMANDS
+        .iter()
+        .any(|(word, name)| !is_database(name) && words.contains(*word))
+        || RUNNERS.iter().any(|(word, ..)| words.contains(*word))
 }
 
 pub fn framework(words: &HashSet<String>, folder: Option<&Path>) -> Option<&'static str> {
@@ -229,6 +258,7 @@ pub fn framework(words: &HashSet<String>, folder: Option<&Path>) -> Option<&'sta
                 .unwrap_or(runner),
         );
     }
+    // Only a label: the HTTP probe needs executable evidence (`is_http_command`).
     from_dependencies
 }
 
@@ -269,6 +299,21 @@ fn dependency_names(folder: &Path) -> HashSet<String> {
 
 fn file_name(word: &str) -> &str {
     word.rsplit('/').next().unwrap_or(word)
+}
+
+/// The script's name without its extension (`astro.mjs` → `astro`) and the
+/// package it belongs to, so pnpm's `node …/node_modules/vite/bin/vite.js`
+/// and npm's `node_modules/.bin/vite` both read as `vite`.
+fn script_names(script: &str) -> impl Iterator<Item = &str> {
+    let name = file_name(script);
+    let stem = [".js", ".mjs", ".cjs", ".ts"]
+        .iter()
+        .find_map(|extension| name.strip_suffix(extension))
+        .unwrap_or(name);
+    let package = script
+        .rsplit_once("node_modules/")
+        .and_then(|(_, rest)| rest.split('/').find(|part| !part.starts_with(['@', '.'])));
+    std::iter::once(stem).chain(package)
 }
 
 /// `~/projects/web` for folders inside home, the full path otherwise.
@@ -428,8 +473,20 @@ mod tests {
                 "SvelteKit",
             ),
             ("node /p/node_modules/.bin/vite", Some(&express), "Vite"),
+            // pnpm runs the package's script, not the `.bin` shim.
+            (
+                "node /p/node_modules/.pnpm/vite@7.1.0/node_modules/vite/bin/vite.js dev",
+                Some(&sveltekit),
+                "SvelteKit",
+            ),
+            (
+                "node /p/node_modules/.pnpm/astro@5.0.0/node_modules/astro/bin/astro.mjs dev",
+                None,
+                "Astro",
+            ),
+            ("nginx: master process /usr/sbin/nginx", None, "nginx"),
+            ("node dist/server.js", Some(&express), "Express"),
             ("next-server (v15.1.0)", Some(&next), "Next.js"),
-            ("node server.js", Some(&express), "Express"),
             (
                 "python -m uvicorn app.main:app --reload",
                 Some(&fastapi),
@@ -453,6 +510,20 @@ mod tests {
                 "{command}"
             );
         }
+    }
+
+    #[test]
+    fn does_not_classify_option_values_or_unrelated_project_tools_as_servers() {
+        assert_eq!(
+            framework(&words("python app.py --database postgres"), None),
+            None
+        );
+        // A project's dependencies name it, but only the command proves HTTP.
+        assert!(!is_http_command(&words("node custom-tcp.js")));
+        assert!(!is_http_command(&words("bazel -jar A-server.jar")));
+        assert!(is_http_command(&words(
+            "node /p/node_modules/.pnpm/vite@7.1.0/node_modules/vite/bin/vite.js"
+        )));
     }
 
     #[test]

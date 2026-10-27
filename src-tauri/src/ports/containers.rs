@@ -1,20 +1,19 @@
-//! Docker containers that publish ports. Docker Desktop, OrbStack, Colima and
-//! Podman forward a published port through one helper process, so the socket
-//! alone names the runtime, not the container. Their Engine API names the
-//! container and stops it the way `docker stop` does, without touching the
-//! runtime.
+//! Published container bindings, collected and controlled through the local Engine API.
 
+use reqwest::Method;
+use reqwest::blocking::Client;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
-use std::io::{ErrorKind, Read, Write};
-use std::os::unix::net::UnixStream;
+use std::io::Read;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
-use serde::Deserialize;
-
-/// Long enough for a container to finish `docker stop`'s own 10 s grace period.
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
 const LIST_TIMEOUT: Duration = Duration::from_secs(1);
+const COLLECTION_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Container {
@@ -22,8 +21,22 @@ pub struct Container {
     pub name: String,
     pub image: String,
     pub started_at: u64,
-    /// The Engine API socket of the runtime that runs it.
-    socket: PathBuf,
+    pub socket: PathBuf,
+    pub bindings: BTreeSet<SocketAddr>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContainerTarget {
+    pub port: u16,
+    pub id: String,
+    pub engine: PathBuf,
+    pub addresses: Vec<IpAddr>,
+}
+
+impl ContainerTarget {
+    pub fn key(&self) -> String {
+        format!("container:{}:{}", self.engine.display(), self.id)
+    }
 }
 
 #[derive(Deserialize)]
@@ -42,6 +55,8 @@ struct Listed {
 #[serde(rename_all = "PascalCase")]
 struct Published {
     public_port: Option<u16>,
+    #[serde(rename = "IP")]
+    ip: Option<String>,
     #[serde(rename = "Type")]
     protocol: String,
 }
@@ -51,7 +66,6 @@ struct Published {
 struct Inspected {
     state: State,
 }
-
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct State {
@@ -91,133 +105,145 @@ fn sockets(home: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// One request per connection: the response ends at EOF because the
-/// connection closes, which Docker only does when asked. Large bodies still
-/// come chunked, whatever the request's HTTP version.
-fn request(socket: &Path, method: &str, path: &str, timeout: Duration) -> Result<String, String> {
-    let failed = |error: std::io::Error| match error.kind() {
-        ErrorKind::WouldBlock | ErrorKind::TimedOut => "Docker didn't answer in time".to_string(),
-        _ => format!("Can't reach Docker: {error}"),
-    };
-    let mut stream = UnixStream::connect(socket).map_err(failed)?;
-    stream
-        .set_read_timeout(Some(timeout))
-        .and_then(|()| stream.set_write_timeout(Some(timeout)))
-        .and_then(|()| {
-            write!(
-                stream,
-                "{method} {path} HTTP/1.0\r\nHost: docker\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
-            )
-        })
-        .map_err(failed)?;
-    let mut response = String::new();
-    stream.read_to_string(&mut response).map_err(failed)?;
-    let (head, body) = response
-        .split_once("\r\n\r\n")
-        .ok_or("Docker sent an invalid response")?;
-    let status: u16 = head
-        .split(' ')
-        .nth(1)
-        .and_then(|code| code.parse().ok())
-        .ok_or("Docker sent an invalid response")?;
-    let chunked = head.lines().any(|line| {
-        line.split_once(':').is_some_and(|(name, value)| {
-            name.eq_ignore_ascii_case("transfer-encoding")
-                && value.trim().eq_ignore_ascii_case("chunked")
-        })
-    });
-    let body = if chunked {
-        unchunk(body).ok_or("Docker sent an invalid response")?
-    } else {
-        body.to_string()
-    };
-    // 304: the container was already stopped.
-    if (200..300).contains(&status) || status == 304 {
+/// One client per engine for the app's lifetime: building a blocking client
+/// starts a runtime thread, too costly to repeat on every sample.
+fn client(socket: &Path) -> Result<Client, String> {
+    static CLIENTS: OnceLock<Mutex<HashMap<PathBuf, Client>>> = OnceLock::new();
+    let mut clients = CLIENTS
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(client) = clients.get(socket) {
+        return Ok(client.clone());
+    }
+    let client = Client::builder()
+        .unix_socket(socket.to_path_buf())
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(CONTROL_TIMEOUT)
+        .build()
+        .map_err(|error| error.to_string())?;
+    clients.insert(socket.to_path_buf(), client.clone());
+    Ok(client)
+}
+
+fn request(
+    client: &Client,
+    method: Method,
+    path: &str,
+    timeout: Duration,
+) -> Result<Vec<u8>, String> {
+    let response = client
+        .request(method, format!("http://docker{path}"))
+        .timeout(timeout)
+        .header("Connection", "close")
+        .send()
+        .map_err(|error| error.to_string())?;
+    let status = response.status();
+    let mut body = Vec::new();
+    response
+        .take(MAX_RESPONSE_BYTES + 1)
+        .read_to_end(&mut body)
+        .map_err(|error| error.to_string())?;
+    if body.len() as u64 > MAX_RESPONSE_BYTES {
+        return Err("Docker response is too large".into());
+    }
+    if status.is_success() || status.as_u16() == 304 {
         return Ok(body);
     }
     #[derive(Deserialize)]
     struct Failure {
         message: String,
     }
-    Err(serde_json::from_str::<Failure>(&body)
+    Err(serde_json::from_slice::<Failure>(&body)
         .map_or_else(|_| format!("Docker answered {status}"), |f| f.message))
 }
 
-/// A chunked body: each chunk is its size in hex, CRLF, the data, CRLF, until
-/// a chunk of size 0.
-fn unchunk(mut rest: &str) -> Option<String> {
-    let mut body = String::new();
-    loop {
-        let (size, after) = rest.split_once("\r\n")?;
-        let size = usize::from_str_radix(size.split(';').next()?.trim(), 16).ok()?;
-        if size == 0 {
-            return Some(body);
-        }
-        body.push_str(after.get(..size)?);
-        rest = after.get(size..)?.strip_prefix("\r\n")?;
-    }
+pub fn published(home: &Path) -> Vec<Container> {
+    published_at(&sockets(home))
 }
 
-/// Running containers by the host port they publish over TCP, from every
-/// runtime that answers. Empty when none does, e.g. Docker isn't installed
-/// or the user isn't allowed to use it.
-pub fn published(home: &Path) -> HashMap<u16, Container> {
-    let mut ports = HashMap::new();
-    for socket in sockets(home) {
-        let Some(listed) = request(&socket, "GET", "/containers/json", LIST_TIMEOUT)
-            .ok()
-            .and_then(|body| serde_json::from_str::<Vec<Listed>>(&body).ok())
-        else {
+pub(super) fn published_at(paths: &[PathBuf]) -> Vec<Container> {
+    let deadline = Instant::now() + COLLECTION_TIMEOUT;
+    let mut containers = Vec::new();
+    for socket in paths {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            break;
+        };
+        let Ok(client) = client(socket) else {
             continue;
         };
-        for (port, mut container) in by_port(listed, &socket) {
-            if let Some(started_at) = started_at(&socket, &container.id) {
-                container.started_at = started_at;
+        let listed = request(
+            &client,
+            Method::GET,
+            "/containers/json",
+            remaining.min(LIST_TIMEOUT),
+        )
+        .and_then(|body| {
+            serde_json::from_slice::<Vec<Listed>>(&body).map_err(|error| error.to_string())
+        });
+        let listed = match listed {
+            Ok(listed) => listed,
+            Err(error) => {
+                eprintln!("Could not list containers at {}: {error}", socket.display());
+                continue;
             }
-            ports.entry(port).or_insert(container);
+        };
+        for mut container in by_container(listed, socket) {
+            if let Some(remaining) = deadline.checked_duration_since(Instant::now())
+                && let Ok(body) = request(
+                    &client,
+                    Method::GET,
+                    &format!("/containers/{}/json", container.id),
+                    remaining.min(LIST_TIMEOUT),
+                )
+                && let Ok(inspected) = serde_json::from_slice::<Inspected>(&body)
+                && let Some(started) = parse_time(&inspected.state.started_at)
+            {
+                container.started_at = started;
+            }
+            containers.push(container);
         }
     }
-    ports
+    containers
 }
 
-fn by_port(listed: Vec<Listed>, socket: &Path) -> Vec<(u16, Container)> {
-    let mut ports = Vec::new();
-    for listed in listed {
-        let container = Container {
-            name: listed
-                .names
-                .first()
-                .map_or(&listed.id[..12.min(listed.id.len())], |name| {
-                    name.trim_start_matches('/')
+fn by_container(listed: Vec<Listed>, socket: &Path) -> Vec<Container> {
+    listed
+        .into_iter()
+        .filter_map(|listed| {
+            let bindings: BTreeSet<_> = listed
+                .ports
+                .into_iter()
+                .filter(|p| p.protocol == "tcp")
+                .filter_map(|p| {
+                    let port = p.public_port.filter(|p| *p != 0)?;
+                    let ip = match p.ip {
+                        Some(ip) => ip.parse::<IpAddr>().ok()?,
+                        None => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                    };
+                    Some(SocketAddr::new(ip.to_canonical(), port))
                 })
-                .to_string(),
-            id: listed.id,
-            image: listed.image,
-            // Replaced by the start time; a restart keeps the creation time.
-            started_at: listed.created * 1000,
-            socket: socket.to_path_buf(),
-        };
-        let tcp: BTreeSet<u16> = listed
-            .ports
-            .iter()
-            .filter(|port| port.protocol == "tcp")
-            .filter_map(|port| port.public_port)
-            .collect();
-        ports.extend(tcp.into_iter().map(|port| (port, container.clone())));
-    }
-    ports
-}
-
-fn started_at(socket: &Path, id: &str) -> Option<u64> {
-    let body = request(
-        socket,
-        "GET",
-        &format!("/containers/{id}/json"),
-        LIST_TIMEOUT,
-    )
-    .ok()?;
-    let inspected: Inspected = serde_json::from_str(&body).ok()?;
-    parse_time(&inspected.state.started_at)
+                .collect();
+            if bindings.is_empty() {
+                return None;
+            }
+            Some(Container {
+                name: listed
+                    .names
+                    .first()
+                    .map_or(&listed.id[..12.min(listed.id.len())], |name| {
+                        name.trim_start_matches('/')
+                    })
+                    .to_string(),
+                id: listed.id,
+                image: listed.image,
+                started_at: listed.created * 1000,
+                socket: socket.to_path_buf(),
+                bindings,
+            })
+        })
+        .collect()
 }
 
 /// Milliseconds since the epoch for Docker's UTC times, e.g.
@@ -253,29 +279,97 @@ pub fn image_name(image: &str) -> &str {
     last.split(':').next().unwrap_or(last)
 }
 
-/// The container that publishes `port`, if it's still the one with `id`.
-fn locate(home: &Path, port: u16, id: &str) -> Result<Container, String> {
-    published(home)
-        .remove(&port)
-        .filter(|container| container.id == id)
-        .ok_or_else(|| format!(":{port} is no longer published by that container"))
+fn locate(home: &Path, target: &ContainerTarget) -> Result<Container, String> {
+    if target.addresses.is_empty() || !sockets(home).contains(&target.engine) {
+        return Err("The container runtime is no longer available".into());
+    }
+    published_at(std::slice::from_ref(&target.engine))
+        .into_iter()
+        .find(|c| {
+            c.id == target.id
+                && target
+                    .addresses
+                    .iter()
+                    .all(|ip| c.bindings.contains(&SocketAddr::new(*ip, target.port)))
+        })
+        .ok_or_else(|| format!(":{} is no longer published by that container", target.port))
 }
 
-pub fn stop(home: &Path, port: u16, id: &str) -> Result<(), String> {
-    let container = locate(home, port, id)?;
-    let path = format!("/containers/{}/stop", container.id);
-    request(&container.socket, "POST", &path, CONTROL_TIMEOUT).map(drop)
+pub fn stop(home: &Path, target: &ContainerTarget) -> Result<(), String> {
+    let container = locate(home, target)?;
+    request(
+        &client(&container.socket)?,
+        Method::POST,
+        &format!("/containers/{}/stop", container.id),
+        CONTROL_TIMEOUT,
+    )
+    .map(drop)
 }
 
-pub fn restart(home: &Path, port: u16, id: &str) -> Result<(), String> {
-    let container = locate(home, port, id)?;
-    let path = format!("/containers/{}/restart", container.id);
-    request(&container.socket, "POST", &path, CONTROL_TIMEOUT).map(drop)
+pub fn restart(home: &Path, target: &ContainerTarget) -> Result<(), String> {
+    let container = locate(home, target)?;
+    request(
+        &client(&container.socket)?,
+        Method::POST,
+        &format!("/containers/{}/restart", container.id),
+        CONTROL_TIMEOUT,
+    )
+    .map(drop)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn inspects_a_multiport_container_once_and_decodes_split_unicode_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("docker.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let engine = std::thread::spawn(move || {
+            let mut paths = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                paths.push(line.split_whitespace().nth(1).unwrap().to_string());
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                let body = if paths.len() == 1 {
+                    r#"[{"Id":"abc123","Names":["/café"],"Image":"node","Created":1,"Ports":[{"PublicPort":3000,"IP":"127.0.0.1","Type":"tcp"},{"PublicPort":3001,"IP":"::1","Type":"tcp"},{"PublicPort":3002,"IP":"0.0.0.0","Type":"tcp"}]}]"#
+                } else {
+                    r#"{"State":{"StartedAt":"2026-10-27T07:21:04Z"}}"#
+                };
+                stream.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").unwrap();
+                // Single-byte chunks deliberately split the UTF-8 name across frames.
+                for byte in body.as_bytes() {
+                    stream
+                        .write_all(&[b'1', b'\r', b'\n', *byte, b'\r', b'\n'])
+                        .unwrap();
+                }
+                stream.write_all(b"0\r\n\r\n").unwrap();
+            }
+            paths
+        });
+        let result = published_at(&[socket]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "café");
+        assert_eq!(result[0].bindings.len(), 3);
+        assert_eq!(result[0].started_at, 1_793_085_664_000);
+        assert_eq!(
+            engine.join().unwrap(),
+            ["/containers/json", "/containers/abc123/json"]
+        );
+    }
 
     #[test]
     fn maps_each_published_tcp_port_to_its_container() {
@@ -288,25 +382,21 @@ mod tests {
              "Ports":[{"IP":"0.0.0.0","PrivatePort":53,"PublicPort":5353,"Type":"udp"},
                       {"PrivatePort":8080,"Type":"tcp"}]}
         ]"#;
-        let ports = by_port(
+        let ports = by_container(
             serde_json::from_str(body).unwrap(),
             Path::new("/docker.sock"),
         );
         assert_eq!(ports.len(), 1);
-        let (port, db) = &ports[0];
-        assert_eq!(*port, 5433);
+        let db = &ports[0];
+        assert_eq!(
+            db.bindings,
+            BTreeSet::from([
+                "0.0.0.0:5433".parse().unwrap(),
+                "[::]:5433".parse().unwrap()
+            ])
+        );
         assert_eq!(db.name, "shop-db");
         assert_eq!(db.image, "postgres:16-alpine");
-    }
-
-    #[test]
-    fn joins_a_chunked_body() {
-        // The shape OrbStack's Docker 29 sends for a long container list.
-        assert_eq!(
-            unchunk("5\r\n[{\"a\"\r\n4\r\n:1}]\r\n0\r\n\r\n").as_deref(),
-            Some("[{\"a\":1}]")
-        );
-        assert_eq!(unchunk("5\r\nabc"), None);
     }
 
     #[test]

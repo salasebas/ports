@@ -61,7 +61,7 @@
 
 	async function setAlerts(change: Partial<AlertSettings>) {
 		try {
-			await settings.setAlerts({ ...alerts, ...change });
+			await settings.setAlerts(change);
 		} catch (error) {
 			toast.error(String(error));
 		}

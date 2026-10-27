@@ -26,7 +26,7 @@
 			<AlertDialog.Description>Protected servers keep running.</AlertDialog.Description>
 		</AlertDialog.Header>
 		<ul class="flex max-h-60 flex-col gap-2 overflow-y-auto text-sm">
-			{#each servers as server (server.port)}
+			{#each servers as server (server.id)}
 				<li class="flex items-center gap-3">
 					<PortLabel port={server.port} class="w-14 shrink-0" />
 					<span class="min-w-0 flex-1 truncate font-medium">{server.name}</span>

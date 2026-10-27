@@ -4,6 +4,7 @@
 	import * as Field from "$lib/components/ui/field";
 	import { serverProcessId } from "$lib/ports/format";
 	import type { PortsStore } from "$lib/ports/ports-store.svelte";
+	import { sharesControl } from "$lib/ports/resources";
 	import { preferences } from "$lib/ports/preferences.svelte";
 
 	let { store }: { store: PortsStore } = $props();
@@ -39,11 +40,15 @@
 				<AlertDialog.Title>{action === "stop" ? "Stop" : "Restart"} {server.name}?</AlertDialog.Title>
 				<AlertDialog.Description>
 					{#if action === "stop"}
-						This ends {server.process} ({serverProcessId(server)}) and frees :{server.port}.
+						This ends {server.process} ({serverProcessId(server)}) and stops its listening ports.
 						{#if server.protected}It is marked as protected.{/if}
 					{:else}
 						This stops {server.process} ({serverProcessId(server)}) and starts it again on :{server.port}.
 					{/if}
+					Affected ports: {store.servers
+						.filter((row) => sharesControl(row, server))
+						.map((row) => `:${row.port}`)
+						.join(", ")}.
 				</AlertDialog.Description>
 			</AlertDialog.Header>
 			<Field.Field orientation="horizontal" class="justify-center">

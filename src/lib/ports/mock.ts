@@ -1,4 +1,4 @@
-import type { Server, Snapshot, SystemUsage } from "./types";
+import type { Server, Snapshot } from "./types";
 
 const MB = 1024 ** 2;
 const GB = 1024 ** 3;
@@ -24,7 +24,7 @@ function cpuSeries(base: number, seed: number): number[] {
 }
 
 export function mockServers(now = Date.now()): Server[] {
-	const servers: Server[] = [
+	const servers: Omit<Server, "id" | "target" | "resources">[] = [
 		{
 			port: 1420,
 			pid: 48211,
@@ -161,24 +161,28 @@ export function mockServers(now = Date.now()): Server[] {
 			cpuHistory: cpuSeries(0.3, 6),
 		},
 	];
-	return servers.toSorted((a, b) => a.port - b.port);
+	return servers
+		.map((server): Server => {
+			const process = { pid: server.pid!, start: String(server.startedAt) };
+			return {
+				...server,
+				id: `${server.port}:${process.pid}:${process.start}`,
+				target: { kind: "process", port: server.port, listener: process, root: process, addresses: server.addresses },
+				resources: [{ process, memoryBytes: server.memoryBytes, cpuPercent: server.cpuPercent }],
+			};
+		})
+		.toSorted((a, b) => a.port - b.port);
 }
 
 export function mockSnapshot(now = Date.now()): Snapshot {
 	const servers = mockServers(now);
-	const kinds: SystemUsage["kinds"] = {};
-	for (const server of servers) {
-		const usage = (kinds[server.kind] ??= { memoryBytes: 0, cpuPercent: 0 });
-		usage.memoryBytes += server.memoryBytes;
-		usage.cpuPercent += server.cpuPercent;
-	}
 	return {
+		revision: 1,
 		servers,
 		system: {
 			totalBytes: 16 * GB,
-			kinds,
-			otherAppsBytes: 7 * GB,
-			otherAppsCpuPercent: 14,
+			usedBytes: 7 * GB + servers.reduce((sum, server) => sum + server.memoryBytes, 0),
+			cpuPercent: 14 + servers.reduce((sum, server) => sum + server.cpuPercent, 0),
 		},
 	};
 }

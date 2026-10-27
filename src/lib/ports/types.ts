@@ -5,7 +5,25 @@ export type ServerKind = "dev" | "database" | "container" | "other";
 
 export type ServerStatus = "running" | "idle" | "attention";
 
+export interface ProcessIdentity {
+	pid: number;
+	start: string;
+}
+
+export type ServerTarget =
+	| { kind: "process"; port: number; listener: ProcessIdentity; root: ProcessIdentity; addresses: string[] }
+	| { kind: "container"; port: number; id: string; engine: string; addresses: string[] };
+
+export interface ProcessUsage {
+	process: ProcessIdentity;
+	memoryBytes: number;
+	cpuPercent: number;
+}
+
 export interface Server {
+	id: string;
+	target?: ServerTarget;
+	resources: ProcessUsage[];
 	port: number;
 	/**
 	 * Missing when another user's process holds the port and the system
@@ -59,15 +77,12 @@ export interface Usage {
 
 export interface SystemUsage {
 	totalBytes: number;
-	/** The servers of each kind, counting a process that holds several ports once. */
-	kinds: Partial<Record<ServerKind, Usage>>;
-	/** Everything else in use, outside every server. */
-	otherAppsBytes: number;
-	/** Share of the whole machine's CPU, like `Server.cpuPercent`. */
-	otherAppsCpuPercent: number;
+	usedBytes: number;
+	cpuPercent: number;
 }
 
 export interface Snapshot {
+	revision: number;
 	servers: Server[];
 	system: SystemUsage;
 }

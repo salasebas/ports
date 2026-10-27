@@ -76,14 +76,14 @@
 
 	function showDetails(server: Server) {
 		lastSelected = server;
-		store.select(server.port);
+		store.select(server.id);
 	}
 
 	// `/?details=5173` opens a server's details, e.g. after a click on its memory
 	// alert; it waits for the first snapshot, then drops the parameter.
 	$effect(() => {
-		const port = Number(page.url.searchParams.get("details"));
-		const server = port ? store.servers.find((s) => s.port === port) : undefined;
+		const id = page.url.searchParams.get("details");
+		const server = store.servers.find((s) => s.id === id);
 		if (!server) return;
 		showDetails(server);
 		void goto(resolve("/"), { replaceState: true, noScroll: true, keepFocus: true });
@@ -97,15 +97,15 @@
 		preferences.sort.current = { key, descending };
 	}
 
-	type Row = { key: number; server: Server; group?: never } | { key: string; group: ServerGroup; server?: never };
+	type Row = { key: string; server: Server; group?: never } | { key: string; group: ServerGroup; server?: never };
 
 	const rows = $derived<Row[]>(
 		preferences.groupByProject.current
 			? store.groups.flatMap((group) => [
 					{ key: `group:${group.folder ?? ""}`, group },
-					...group.servers.map((server) => ({ key: server.port, server })),
+					...group.servers.map((server) => ({ key: server.id, server })),
 				])
-			: store.filtered.map((server) => ({ key: server.port, server })),
+			: store.filtered.map((server) => ({ key: server.id, server })),
 	);
 </script>
 
@@ -279,7 +279,7 @@
 		<div
 			class="flex justify-end gap-0.5 opacity-0 transition-opacity duration-150 will-change-[opacity] group-hover/row:opacity-100 focus-within:opacity-100 has-data-[state=open]:opacity-100"
 		>
-			{@render action(`Open localhost:${server.port}`, ArrowUpRightIcon, () => store.open(server))}
+			{@render action(`Open port ${server.port}`, ArrowUpRightIcon, () => store.open(server))}
 			{#if canStop(server)}
 				{@render action(
 					`Stop ${server.name}`,
@@ -351,7 +351,7 @@
 									class={server
 										? "group/row grid cursor-default grid-cols-(--cols) items-center border-b transition-colors hover:bg-muted/60 data-[state=selected]:bg-muted"
 										: "grid grid-cols-(--cols) border-b bg-muted/30"}
-									data-state={server && store.selectedPort === server.port ? "selected" : undefined}
+									data-state={server && store.selectedId === server.id ? "selected" : undefined}
 									onclick={server ? () => showDetails(server) : undefined}
 									animate:flip={{ duration: 220 * motion, easing: cubicOut }}
 									in:fade={{ duration: 180 * motion, delay: 60 * motion }}

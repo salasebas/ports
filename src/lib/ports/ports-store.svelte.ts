@@ -5,7 +5,8 @@ import { SvelteSet } from "svelte/reactivity";
 import { toast } from "svelte-sonner";
 import { canStop, serverUrl } from "./format";
 import { preferences, type SortKey } from "./preferences.svelte";
-import type { Server, ServerKind, Snapshot, SystemUsage, Usage } from "./types";
+import type { Server, Snapshot, SystemUsage } from "./types";
+import { allocateUsage, controlKey, sharesControl } from "./resources";
 
 /** Must match `SNAPSHOT_EVENT` in `src-tauri/src/ports/mod.rs`. */
 export const SNAPSHOT_EVENT = "ports://snapshot";
@@ -31,12 +32,15 @@ export type ServerAction = "stop" | "restart";
 
 /**
  * Work a button starts; its button stays disabled until the work ends. Stop
- * and restart share `control`: the backend runs one of them per port at a time.
+ * and restart share `control`: intersecting process scopes run one action at a time.
  */
 type Busy = "control" | "editor" | "terminal" | "folder";
 
 /** What the window saw on the port, so the backend never stops something that took its place. */
-const target = (server: Server) => ({ port: server.port, pid: server.pid, container: server.container?.id });
+const target = (server: Server) => {
+	if (!server.target) throw new Error("Ports cannot control this server");
+	return server.target;
+};
 
 /** A project's ports share one key, so pinning or protecting one covers all of them. */
 export const serverKey = (server: Server) => (server.folder ? `project:${server.folder}` : `port:${server.port}`);
@@ -85,17 +89,19 @@ function isHidden(server: Server) {
 /** UI state for the server list, fed by the snapshots the Rust backend publishes. */
 export class PortsStore {
 	servers = $state.raw<Server[]>([]);
-	system = $state.raw<SystemUsage>({ totalBytes: 0, kinds: {}, otherAppsBytes: 0, otherAppsCpuPercent: 0 });
+	system = $state.raw<SystemUsage>({ totalBytes: 0, usedBytes: 0, cpuPercent: 0 });
+	#revision = -1;
 	query = $state("");
-	selectedPort = $state<number | null>(null);
+	selectedId = $state<string | null>(null);
 	/** Action waiting for the user to confirm it. */
 	pending = $state.raw<{ action: ServerAction; server: Server } | null>(null);
 	/** Idle servers clean up will stop once the user confirms. */
 	cleaning = $state.raw<Server[] | null>(null);
 	/** Server whose name the user is editing. */
 	renaming = $state.raw<Server | null>(null);
-	/** Work in progress, keyed `action:port`. */
+	/** Work in progress, keyed by action and service identity. */
 	#busy = new SvelteSet<string>();
+	#controlling = $state.raw<Server[]>([]);
 
 	#customized = $derived(this.servers.map(customize));
 
@@ -133,57 +139,71 @@ export class PortsStore {
 		return [...groups.values()].toSorted((a, b) => Number(!a.folder) - Number(!b.folder));
 	});
 
-	selected = $derived(this.#customized.find((server) => server.port === this.selectedPort) ?? null);
+	selected = $derived(this.#customized.find((server) => server.id === this.selectedId) ?? null);
 
 	/** What clean up stops: shown idle servers Ports can stop, unless protected. */
-	idle = $derived(this.shown.filter((server) => server.status === "idle" && canStop(server) && !server.protected));
+	idle = $derived(
+		this.shown.filter(
+			(server) =>
+				canStop(server) &&
+				this.#customized
+					.filter((sibling) => sharesControl(server, sibling))
+					.every(
+						(sibling) =>
+							sibling.status === "idle" &&
+							!sibling.protected &&
+							!isHidden(sibling) &&
+							preferences.shownKinds.current.includes(sibling.kind),
+					),
+		),
+	);
 
-	/** Totals for the shown kinds; hidden servers count as other apps. */
+	allocations = $derived(allocateUsage(this.shown));
+
+	/** Hidden processes belong to Other apps; shared trees count once. */
 	usage = $derived.by(() => {
-		const shown = preferences.shownKinds.current;
-		const usage = {
-			serversBytes: 0,
-			serversCpuPercent: 0,
-			otherAppsBytes: this.system.otherAppsBytes,
-			otherAppsCpuPercent: this.system.otherAppsCpuPercent,
+		const serversBytes = this.allocations.reduce((sum, row) => sum + row.usage.memoryBytes, 0);
+		const serversCpuPercent = this.allocations.reduce((sum, row) => sum + row.usage.cpuPercent, 0);
+		return {
+			serversBytes,
+			serversCpuPercent,
+			otherAppsBytes: Math.max(0, this.system.usedBytes - serversBytes),
+			otherAppsCpuPercent: Math.max(0, this.system.cpuPercent - serversCpuPercent),
 		};
-		for (const [kind, { memoryBytes, cpuPercent }] of Object.entries(this.system.kinds) as [ServerKind, Usage][]) {
-			if (shown.includes(kind)) {
-				usage.serversBytes += memoryBytes;
-				usage.serversCpuPercent += cpuPercent;
-			} else {
-				usage.otherAppsBytes += memoryBytes;
-				usage.otherAppsCpuPercent += cpuPercent;
-			}
-		}
-		return usage;
 	});
 
 	/** Follows the backend's snapshots until the returned cleanup runs. */
 	connect = () => {
 		// A plain browser tab on the dev server has no backend to follow.
 		if (!isTauri()) return () => {};
-		let pushed = false;
+		let connected = true;
 		const unlisten = listen<Snapshot>(SNAPSHOT_EVENT, (event) => {
-			pushed = true;
-			this.apply(event.payload);
+			if (connected) this.apply(event.payload);
 		});
-		invoke<Snapshot>("snapshot").then(
-			// A pushed snapshot is newer than the one this call started from.
-			(snapshot) => pushed || this.apply(snapshot),
-			(error) => toast.error(String(error)),
-		);
+		void unlisten
+			.then(() => (connected ? invoke<Snapshot>("snapshot") : null))
+			.then((snapshot) => {
+				if (connected && snapshot) this.apply(snapshot);
+			})
+			.catch((error: unknown) => {
+				if (connected) toast.error(String(error));
+			});
 		void attempt(invoke("set_refresh_interval", { ms: preferences.refreshInterval.current }));
-		return () => void unlisten.then((stop) => stop());
+		return () => {
+			connected = false;
+			void unlisten.then((stop) => stop()).catch(() => {});
+		};
 	};
 
 	apply = (snapshot: Snapshot) => {
+		if (snapshot.revision <= this.#revision) return;
+		this.#revision = snapshot.revision;
 		this.servers = snapshot.servers;
 		this.system = snapshot.system;
 	};
 
-	select = (port: number | null) => {
-		this.selectedPort = port;
+	select = (id: string | null) => {
+		this.selectedId = id;
 	};
 
 	refresh = async () => {
@@ -194,17 +214,22 @@ export class PortsStore {
 		}
 	};
 
-	isBusy = (server: Server, work: Busy) => this.#busy.has(`${work}:${server.port}`);
+	isBusy = (server: Server, work: Busy) =>
+		work === "control"
+			? this.#controlling.some((busy) => sharesControl(busy, server))
+			: this.#busy.has(`${work}:${server.id}`);
 
-	/** Runs `work` unless the same work on the same server is still running. */
+	/** Runs `work` unless the same work on the same server, or a control of its processes, is still running. */
 	async #run<T>(server: Server, work: Busy, run: () => Promise<T>): Promise<T | undefined> {
-		const key = `${work}:${server.port}`;
-		if (this.#busy.has(key)) return;
-		this.#busy.add(key);
+		if (this.isBusy(server, work)) return;
+		const key = `${work}:${server.id}`;
+		if (work === "control") this.#controlling = [...this.#controlling, server];
+		else this.#busy.add(key);
 		try {
 			return await run();
 		} finally {
-			this.#busy.delete(key);
+			if (work === "control") this.#controlling = this.#controlling.filter((busy) => busy !== server);
+			else this.#busy.delete(key);
 		}
 	}
 
@@ -234,14 +259,14 @@ export class PortsStore {
 	hide = (entry: string) => {
 		if (!preferences.hidden.current.includes(entry))
 			preferences.hidden.current = [...preferences.hidden.current, entry];
-		if (this.selected && isHidden(this.selected)) this.selectedPort = null;
+		if (this.selected && isHidden(this.selected)) this.selectedId = null;
 	};
 
 	open = async (server: Server) => {
-		await openUrl(serverUrl(server.port));
+		await attempt(openUrl(serverUrl(server)));
 	};
 
-	copyUrl = async (server: Server, url = serverUrl(server.port)) => {
+	copyUrl = async (server: Server, url = serverUrl(server)) => {
 		if (await attempt(navigator.clipboard.writeText(url))) {
 			toast.success("Copied", { id: "copy-url", description: url });
 		}
@@ -273,9 +298,16 @@ export class PortsStore {
 
 	restart = (server: Server) =>
 		this.#run(server, "control", async () => {
-			const id = toast.loading(`Restarting ${server.name}…`, { id: `restart-${server.port}` });
+			const id = toast.loading(`Restarting ${server.name}…`, { id: `restart-${server.id}` });
 			try {
-				await invoke("restart_server", { target: target(server) });
+				this.apply(await invoke<Snapshot>("restart_server", { target: target(server) }));
+				// The new process has a new identity; keep its details open.
+				if (this.selectedId === server.id && !this.selected) {
+					this.selectedId =
+						this.#customized.find(
+							(row) => row.port === server.port && row.process === server.process && row.folder === server.folder,
+						)?.id ?? null;
+				}
 				toast.success(`Restarted ${server.name}`, { id, description: `:${server.port}` });
 			} catch (error) {
 				toast.error(String(error), { id });
@@ -284,21 +316,26 @@ export class PortsStore {
 
 	stop = (server: Server) =>
 		this.#run(server, "control", async () => {
-			const id = toast.loading(`Stopping ${server.name}…`, { id: `stop-${server.port}` });
+			const id = toast.loading(`Stopping ${server.name}…`, { id: `stop-${server.id}` });
 			const error = await this.#stop(server);
 			if (error) toast.error(error, { id });
-			else toast.success(`Stopped ${server.name}`, { id, description: `:${server.port} is free` });
+			else toast.success(`Stopped ${server.name}`, { id, description: `:${server.port}` });
 		});
 
 	/** Stops the server and takes it off the list; returns why it couldn't. */
-	async #stop(server: Server): Promise<string | null> {
+	async #stop(server: Server, onlyIfIdle = false): Promise<string | null> {
 		try {
-			await invoke("stop_server", { target: target(server) });
+			this.apply(
+				await invoke<Snapshot>("stop_server", {
+					target: target(server),
+					onlyIfIdle,
+					...(onlyIfIdle ? { allowedIds: this.idle.map((row) => row.id) } : {}),
+				}),
+			);
 		} catch (error) {
 			return String(error);
 		}
-		this.servers = this.servers.filter((s) => s.port !== server.port);
-		if (this.selectedPort === server.port) this.selectedPort = null;
+		if (this.selectedId === server.id && !this.selected) this.selectedId = null;
 		return null;
 	}
 
@@ -308,16 +345,34 @@ export class PortsStore {
 	};
 
 	confirmCleanUp = async () => {
-		const servers = this.cleaning ?? [];
+		const captured = this.cleaning ?? [];
 		this.cleaning = null;
-		if (!servers.length) return;
-		const id = toast.loading(`Stopping ${idleCount(servers.length)}…`, { id: "clean-up" });
-		const results = await Promise.all(servers.map((server) => this.#run(server, "control", () => this.#stop(server))));
-		const errors = results.filter((error): error is string => typeof error === "string");
-		if (errors.length) {
-			toast.error(`Couldn't stop ${errors.length} of ${idleCount(servers.length)}`, { id, description: errors[0] });
-		} else {
-			toast.success(`Stopped ${idleCount(servers.length)}`, { id });
+		const eligible = captured
+			.flatMap((old) => {
+				const current = this.idle.find((server) => server.id === old.id && controlKey(server) === controlKey(old));
+				return current ? [current] : [];
+			})
+			.toSorted((a, b) => b.resources.length - a.resources.length);
+		const servers: Server[] = [];
+		for (const server of eligible) {
+			if (!servers.some((chosen) => sharesControl(chosen, server))) servers.push(server);
 		}
+		if (!servers.length) return;
+		// Count rows, like the dialog: one stop can end several ports of a process.
+		const rows = (stopped: Server[]) => eligible.filter((row) => stopped.some((s) => sharesControl(s, row))).length;
+		const id = toast.loading("Stopping " + idleCount(eligible.length) + "…", { id: "clean-up" });
+		const results = await Promise.all(
+			servers.map((server) => this.#run(server, "control", () => this.#stop(server, true))),
+		);
+		const attempted = servers.filter((_, i) => results[i] !== undefined);
+		const errors = results.filter((result): result is string => typeof result === "string");
+		const failed = servers.filter((_, i) => typeof results[i] === "string");
+		if (!attempted.length) toast.info("No idle servers were stopped", { id });
+		else if (errors.length)
+			toast.error("Couldn't stop " + rows(failed) + " of " + idleCount(rows(attempted)), {
+				id,
+				description: errors[0],
+			});
+		else toast.success("Stopped " + idleCount(rows(attempted)), { id });
 	};
 }

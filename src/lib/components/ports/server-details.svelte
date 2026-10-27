@@ -112,7 +112,7 @@
 	<div class="flex flex-col gap-2">
 		<div class="flex gap-2">
 			<Button size="lg" class="flex-1" onclick={() => store.open(server)}>
-				Open localhost:{server.port}
+				Open port {server.port}
 			</Button>
 			<Button variant="secondary" size="icon-lg" aria-label="Copy URL" onclick={() => store.copyUrl(server)}>
 				<CopyIcon />

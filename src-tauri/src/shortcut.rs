@@ -84,13 +84,26 @@ pub fn replace(app: &AppHandle, text: Option<&str>) -> Result<(), String> {
             format!("Couldn't use this shortcut; another app may be using it ({error})")
         })?;
     }
-    if let Some(previous) = current.take()
+    if let Err(error) = settings::write(app, settings::SHORTCUT, next.map(Shortcut::into_string)) {
+        if let Some(next) = next {
+            let _ = app.global_shortcut().unregister(next);
+        }
+        return Err(error);
+    }
+    if let Some(previous) = *current
         && let Err(error) = app.global_shortcut().unregister(previous)
     {
-        eprintln!("could not unregister the previous shortcut: {error}");
+        if let Some(next) = next {
+            let _ = app.global_shortcut().unregister(next);
+        }
+        if let Err(rollback) =
+            settings::write(app, settings::SHORTCUT, current.map(Shortcut::into_string))
+        {
+            eprintln!("could not restore the saved shortcut: {rollback}");
+        }
+        return Err(format!("Couldn't release the previous shortcut ({error})"));
     }
     *current = next;
-    settings::write(app, settings::SHORTCUT, next.map(Shortcut::into_string));
     Ok(())
 }
 

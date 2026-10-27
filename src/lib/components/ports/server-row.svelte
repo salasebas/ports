@@ -35,7 +35,7 @@
 		type="button"
 		class="absolute inset-0 rounded-xl outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
 		aria-label="Details for {server.name} on port {server.port}"
-		onclick={() => store.select(server.port)}
+		onclick={() => store.select(server.id)}
 	></button>
 
 	<PortLabel port={server.port} class="w-14 shrink-0 text-[15px]" />
@@ -71,12 +71,7 @@
 		<div
 			class="pointer-events-none relative flex gap-0.5 opacity-0 transition-opacity duration-150 will-change-[opacity] group-focus-within/row:pointer-events-auto group-focus-within/row:opacity-100 group-hover/row:pointer-events-auto group-hover/row:opacity-100"
 		>
-			<Button
-				variant="ghost"
-				size="icon-sm"
-				aria-label="Open localhost:{server.port}"
-				onclick={() => store.open(server)}
-			>
+			<Button variant="ghost" size="icon-sm" aria-label="Open port {server.port}" onclick={() => store.open(server)}>
 				<ArrowUpRightIcon />
 			</Button>
 			{#if canStop(server)}

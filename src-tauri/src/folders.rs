@@ -53,12 +53,18 @@ fn existing_dir(home: &Path, folder: &str) -> Result<PathBuf, String> {
 
 /// `open -a` reports a missing app through its exit status, so wait for it.
 #[cfg(target_os = "macos")]
-fn open_with(program: &str, path: &PathBuf) -> Result<(), String> {
-    let status = Command::new("open")
-        .args(["-a", program])
-        .arg(path)
-        .status()
-        .map_err(|e| e.to_string())?;
+async fn open_with(program: &str, path: &Path) -> Result<(), String> {
+    let program_owned = program.to_string();
+    let path = path.to_path_buf();
+    let status = tauri::async_runtime::spawn_blocking(move || {
+        Command::new("open")
+            .args(["-a", &program_owned])
+            .arg(path)
+            .status()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
     if status.success() {
         Ok(())
     } else {
@@ -70,27 +76,31 @@ fn open_with(program: &str, path: &PathBuf) -> Result<(), String> {
 pub async fn open_in_editor(app: AppHandle, folder: String, editor: Editor) -> Result<(), String> {
     let path = resolve(&app, &folder)?;
     #[cfg(target_os = "macos")]
-    return open_with(editor.program(), &path);
+    return open_with(editor.program(), &path).await;
     #[cfg(not(target_os = "macos"))]
-    Command::new(editor.program())
-        .arg(&path)
-        .spawn()
-        .map(drop)
-        .map_err(|_| format!("{} isn't installed", editor.program()))
+    {
+        let mut command = Command::new(editor.program());
+        command.arg(&path);
+        tauri::async_runtime::spawn_blocking(move || crate::child_process::launch(command))
+            .await
+            .map_err(|e| e.to_string())?
+    }
 }
 
 #[tauri::command]
 pub async fn open_in_terminal(app: AppHandle, folder: String) -> Result<(), String> {
     let path = resolve(&app, &folder)?;
     #[cfg(target_os = "macos")]
-    return open_with("Terminal", &path);
+    return open_with("Terminal", &path).await;
     // Debian and Ubuntu point this alternative at the default terminal.
     #[cfg(not(target_os = "macos"))]
-    Command::new("x-terminal-emulator")
-        .current_dir(&path)
-        .spawn()
-        .map(drop)
-        .map_err(|e| e.to_string())
+    {
+        let mut command = Command::new("x-terminal-emulator");
+        command.current_dir(&path);
+        tauri::async_runtime::spawn_blocking(move || crate::child_process::launch(command))
+            .await
+            .map_err(|e| e.to_string())?
+    }
 }
 
 #[tauri::command]

@@ -2,8 +2,9 @@
 //! `settings.json` in the app's data folder. Preferences only the windows
 //! use stay in the webview's storage.
 
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_store::StoreExt;
 
@@ -19,6 +20,7 @@ const SETTINGS_EVENT: &str = "ports://settings";
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
+    revision: u64,
     /// The accelerator that shows the popover, e.g. `alt+super+KeyP`; `None` when there's none.
     shortcut: Option<String>,
     alerts: AlertSettings,
@@ -30,38 +32,67 @@ pub fn read<T: DeserializeOwned, R: Runtime>(app: &AppHandle<R>, key: &str) -> O
     serde_json::from_value(value).ok()
 }
 
-pub fn write<R: Runtime>(app: &AppHandle<R>, key: &str, value: impl Serialize) {
-    let saved = app
-        .store(STORE)
-        .map_err(|e| e.to_string())
-        .and_then(|store| {
-            let value = serde_json::to_value(value).map_err(|e| e.to_string())?;
-            store.set(key, value);
-            store.save().map_err(|e| e.to_string())
-        });
-    if let Err(error) = saved {
-        eprintln!("could not save the {key} setting: {error}");
+pub fn write<R: Runtime>(
+    app: &AppHandle<R>,
+    key: &str,
+    value: impl Serialize,
+) -> Result<(), String> {
+    let store = app.store(STORE).map_err(|e| e.to_string())?;
+    persist(&store, key, value)
+}
+
+fn persist<R: Runtime>(
+    store: &tauri_plugin_store::Store<R>,
+    key: &str,
+    value: impl Serialize,
+) -> Result<(), String> {
+    let previous = store.get(key);
+    store.set(key, serde_json::to_value(value).map_err(|e| e.to_string())?);
+    if let Err(error) = store.save() {
+        match previous {
+            Some(value) => store.set(key, value),
+            None => {
+                store.delete(key);
+            }
+        }
+        return Err(format!("Could not save {key}: {error}"));
     }
+    Ok(())
+}
+
+#[derive(Default)]
+pub struct Changes(Mutex<u64>);
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AlertPatch {
+    enabled: Option<bool>,
+    #[serde(default, deserialize_with = "present")]
+    threshold_bytes: Option<Option<u64>>,
+}
+fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<u64>>, D::Error> {
+    Option::<u64>::deserialize(d).map(Some)
 }
 
 pub fn alerts(app: &AppHandle) -> AlertSettings {
     read(app, ALERTS).unwrap_or_default()
 }
 
-fn current(app: &AppHandle) -> Settings {
+fn current(app: &AppHandle, revision: u64) -> Settings {
     #[cfg(desktop)]
     let shortcut = crate::shortcut::current(app);
     #[cfg(not(desktop))]
     let shortcut = None;
     Settings {
+        revision,
         shortcut,
         alerts: app.state::<Monitor>().alert_settings(),
     }
 }
 
 /// Tells every window, so a change in one reaches the other.
-fn broadcast(app: &AppHandle) -> Settings {
-    let settings = current(app);
+fn broadcast(app: &AppHandle, revision: u64) -> Settings {
+    let settings = current(app, revision);
     if let Err(error) = app.emit(SETTINGS_EVENT, &settings) {
         eprintln!("could not send the settings: {error}");
     }
@@ -70,23 +101,76 @@ fn broadcast(app: &AppHandle) -> Settings {
 
 #[tauri::command]
 pub fn get_settings(app: AppHandle) -> Settings {
-    current(&app)
+    let state = app.state::<Changes>();
+    let revision = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    current(&app, *revision)
 }
 
 #[tauri::command]
-pub fn set_alerts(app: AppHandle, alerts: AlertSettings) -> Settings {
-    app.state::<Monitor>().set_alert_settings(alerts);
-    write(&app, ALERTS, alerts);
-    broadcast(&app)
+pub fn set_alerts(app: AppHandle, alerts: AlertPatch) -> Result<Settings, String> {
+    let state = app.state::<Changes>();
+    let mut revision = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    let monitor = app.state::<Monitor>();
+    let mut next = monitor.alert_settings();
+    if let Some(enabled) = alerts.enabled {
+        next.enabled = enabled;
+    }
+    if let Some(threshold) = alerts.threshold_bytes {
+        next.threshold_bytes = threshold;
+    }
+    write(&app, ALERTS, next)?;
+    monitor.set_alert_settings(next);
+    *revision += 1;
+    Ok(broadcast(&app, *revision))
 }
 
-/// Replaces the shortcut that shows the popover; `None` removes it. A
-/// shortcut that can't be registered leaves the current one in place.
 #[tauri::command]
 pub fn set_shortcut(app: AppHandle, shortcut: Option<String>) -> Result<Settings, String> {
+    let state = app.state::<Changes>();
+    let mut revision = state.0.lock().unwrap_or_else(|e| e.into_inner());
     #[cfg(desktop)]
     crate::shortcut::replace(&app, shortcut.as_deref())?;
     #[cfg(not(desktop))]
     let _ = shortcut;
-    Ok(broadcast(&app))
+    *revision += 1;
+    Ok(broadcast(&app, *revision))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn returns_save_failure_and_restores_the_previous_cached_value() {
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_store::Builder::default().build())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("data");
+        std::fs::create_dir(&parent).unwrap();
+        let path = parent.join("settings.json");
+        let store = app
+            .store_builder(&path)
+            .disable_auto_save()
+            .build()
+            .unwrap();
+        persist(&store, "enabled", true).unwrap();
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(&parent).unwrap();
+        std::fs::write(&parent, "blocks the settings directory").unwrap();
+        assert!(
+            persist(&store, "enabled", false)
+                .unwrap_err()
+                .contains("Could not save")
+        );
+        assert_eq!(store.get("enabled"), Some(serde_json::json!(true)));
+    }
+
+    #[test]
+    fn distinguishes_omitted_threshold_from_explicit_null() {
+        let omitted: AlertPatch = serde_json::from_str(r#"{"enabled":false}"#).unwrap();
+        assert_eq!(omitted.threshold_bytes, None);
+        let cleared: AlertPatch = serde_json::from_str(r#"{"thresholdBytes":null}"#).unwrap();
+        assert_eq!(cleared.threshold_bytes, Some(None));
+    }
 }

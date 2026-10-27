@@ -6,6 +6,7 @@ use tauri::{
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_positioner::{Position, WindowExt};
 
+mod child_process;
 mod folders;
 mod ports;
 mod settings;
@@ -80,6 +81,7 @@ pub fn run() {
         .setup(|app| {
             #[cfg(desktop)]
             shortcut::init(app, toggle_tray_window)?;
+            app.manage(settings::Changes::default());
 
             app.manage(ports::Monitor::new(
                 app.path().home_dir()?,

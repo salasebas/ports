@@ -5,6 +5,7 @@ mod containers;
 mod control;
 mod health;
 mod history;
+mod identity;
 mod network;
 mod processes;
 mod project;
@@ -12,8 +13,10 @@ mod sampler;
 mod sockets;
 
 pub use alerts::AlertSettings;
+use control::Target;
 
 use std::collections::HashSet;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -44,11 +47,12 @@ const HIDDEN_INTERVAL_MS: u64 = 30_000;
 pub struct Monitor {
     home: PathBuf,
     sampler: Mutex<Sampler>,
+    publication: Mutex<()>,
     latest: Mutex<Option<Snapshot>>,
     interval_ms: AtomicU64,
     woken: Mutex<bool>,
     wake: Condvar,
-    stopping: Mutex<HashSet<u16>>,
+    stopping: Mutex<HashSet<String>>,
     health: Mutex<Health>,
     alerts: Mutex<Alerts>,
     alert_settings: Mutex<AlertSettings>,
@@ -72,6 +76,7 @@ impl Monitor {
     pub fn new(home: PathBuf, alert_settings: AlertSettings) -> Self {
         Self {
             sampler: Mutex::new(Sampler::new(home.clone())),
+            publication: Mutex::new(()),
             home,
             latest: Mutex::new(None),
             interval_ms: AtomicU64::new(DEFAULT_INTERVAL_MS),
@@ -84,21 +89,22 @@ impl Monitor {
         }
     }
 
-    fn sample(&self) -> Snapshot {
-        let mut snapshot = lock(&self.sampler).sample();
+    fn sample(&self) -> Result<Snapshot, String> {
+        let mut snapshot = lock(&self.sampler).sample()?;
         health::apply(&lock(&self.health).unresponsive, &mut snapshot.servers);
-        *lock(&self.latest) = Some(snapshot.clone());
-        snapshot
+        Ok(snapshot)
     }
 
-    fn publish(&self, app: &AppHandle) -> Snapshot {
-        let snapshot = self.sample();
+    fn publish(&self, app: &AppHandle) -> Result<Snapshot, String> {
+        let _publication = lock(&self.publication);
+        let snapshot = self.sample()?;
+        *lock(&self.latest) = Some(snapshot.clone());
         if let Err(error) = app.emit(SNAPSHOT_EVENT, &snapshot) {
             eprintln!("could not send a snapshot: {error}");
         }
         self.alert(app, &snapshot);
         self.probe_if_due(app, &snapshot);
-        snapshot
+        Ok(snapshot)
     }
 
     pub fn alert_settings(&self) -> AlertSettings {
@@ -113,11 +119,14 @@ impl Monitor {
         let settings = self.alert_settings();
         let due = lock(&self.alerts).due(settings, &snapshot.servers, now_ms());
         for alert in due {
+            let mut hash = DefaultHasher::new();
+            alert.server_id.hash(&mut hash);
             let shown = app
                 .notification()
                 .builder()
                 // A click reports the id, which leads back to the server.
-                .id(i32::from(alert.port))
+                .id(hash.finish() as i32)
+                .extra("serverId", &alert.server_id)
                 .title(alert.title)
                 .body(alert.body)
                 .show();
@@ -197,21 +206,36 @@ impl Monitor {
         *woken = false;
     }
 
-    /// Runs one stop or restart per port at a time; a second click while the
+    /// Runs one stop or restart per affected process at a time; a second click while the
     /// first one is still waiting for the server to exit is refused.
     fn control(
         &self,
         app: &AppHandle,
-        port: u16,
+        target: &Target,
         work: impl FnOnce() -> Result<(), String>,
-    ) -> Result<(), String> {
-        if !lock(&self.stopping).insert(port) {
-            return Err(format!("Already stopping or restarting :{port}"));
+    ) -> Result<Snapshot, String> {
+        let keys = match target {
+            Target::Process(target) => control::scope(target)?,
+            Target::Container(_) => vec![target.key()],
+        };
+        {
+            let mut stopping = lock(&self.stopping);
+            if keys.iter().any(|key| stopping.contains(key)) {
+                return Err("Already stopping or restarting part of this service".into());
+            }
+            stopping.extend(keys.iter().cloned());
         }
         let result = work();
-        lock(&self.stopping).remove(&port);
-        self.publish(app);
-        result
+        let snapshot = self.publish(app);
+        lock(&self.stopping).retain(|key| !keys.contains(key));
+        result?;
+        // The control worked; a failed sample right after it must not report it as failed.
+        // The monitor samples again right away to publish the change.
+        snapshot.or_else(|error| {
+            eprintln!("Could not sample ports: {error}");
+            self.wake();
+            lock(&self.latest).clone().ok_or(error)
+        })
     }
 }
 
@@ -229,7 +253,9 @@ pub fn start(app: &AppHandle) -> std::io::Result<()> {
                     .webview_windows()
                     .values()
                     .any(|window| window.is_visible().unwrap_or(false));
-                monitor.publish(&app);
+                if let Err(error) = monitor.publish(&app) {
+                    eprintln!("Could not sample ports: {error}");
+                }
                 monitor.wait(visible);
             }
         })
@@ -249,14 +275,17 @@ pub async fn snapshot(app: AppHandle) -> Result<Snapshot, String> {
     blocking(move || {
         let monitor = app.state::<Monitor>();
         let latest = lock(&monitor.latest).clone();
-        Ok(latest.unwrap_or_else(|| monitor.sample()))
+        match latest {
+            Some(snapshot) => Ok(snapshot),
+            None => monitor.publish(&app),
+        }
     })
     .await
 }
 
 #[tauri::command]
 pub async fn refresh(app: AppHandle) -> Result<Snapshot, String> {
-    blocking(move || Ok(app.state::<Monitor>().publish(&app))).await
+    blocking(move || app.state::<Monitor>().publish(&app)).await
 }
 
 /// Shows the server's details when the user clicks its memory alert.
@@ -266,15 +295,16 @@ pub fn open_alerts_on_click(app: &AppHandle, show: impl Fn(&AppHandle) + Send + 
         if performed.action_id() != "tap" {
             return;
         }
-        let Some(port) = performed
+        let Some(server_id) = performed
             .notification()
-            .and_then(|notification| u16::try_from(notification.id()).ok())
+            .and_then(|notification| notification.extra().get("serverId"))
+            .and_then(serde_json::Value::as_str)
         else {
             return;
         };
         show(&handle);
-        if let Err(error) = handle.emit(DETAILS_EVENT, port) {
-            eprintln!("could not open the details of :{port}: {error}");
+        if let Err(error) = handle.emit(DETAILS_EVENT, server_id) {
+            eprintln!("could not open server details: {error}");
         }
     });
     if let Err(error) = registered {
@@ -293,52 +323,67 @@ pub fn set_refresh_interval(monitor: State<'_, Monitor>, ms: u64) {
     }
 }
 
-/// What the window saw on the port, so Ports never stops something that took its place.
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Target {
-    port: u16,
-    pid: Option<u32>,
-    container: Option<String>,
-}
-
 #[tauri::command]
-pub async fn stop_server(app: AppHandle, target: Target) -> Result<(), String> {
+pub async fn stop_server(
+    app: AppHandle,
+    target: Target,
+    only_if_idle: Option<bool>,
+    allowed_ids: Option<Vec<String>>,
+) -> Result<Snapshot, String> {
     blocking(move || {
         let monitor = app.state::<Monitor>();
-        monitor.control(&app, target.port, || match target {
-            Target {
-                pid: Some(pid),
-                port,
-                ..
-            } => control::stop(port, pid),
-            Target {
-                container: Some(id),
-                port,
-                ..
-            } => containers::stop(&monitor.home, port, &id),
-            Target { port, .. } => Err(format!("Ports can't stop the server on :{port}")),
+        monitor.control(&app, &target, || {
+            if only_if_idle.unwrap_or(false) {
+                let fresh = monitor.sample()?;
+                let selected = fresh
+                    .servers
+                    .iter()
+                    .find(|server| {
+                        server.target.as_ref().is_some_and(|current| {
+                            current.key() == target.key() && current.port() == target.port()
+                        })
+                    })
+                    .ok_or("The idle server changed; refresh before cleaning up")?;
+                let affected = fresh.servers.iter().filter(|other| {
+                    other
+                        .target
+                        .as_ref()
+                        .is_some_and(|current| current.key() == target.key())
+                        || other.resources.iter().any(|resource| {
+                            selected
+                                .resources
+                                .iter()
+                                .any(|ours| ours.process == resource.process)
+                        })
+                });
+                if affected.into_iter().any(|server| {
+                    server.status != history::Status::Idle
+                        || !allowed_ids
+                            .as_ref()
+                            .is_some_and(|ids| ids.contains(&server.id))
+                }) {
+                    return Err(
+                        "The service is active or its affected ports changed; it was left running"
+                            .into(),
+                    );
+                }
+            }
+            match &target {
+                Target::Process(target) => control::stop(target),
+                Target::Container(target) => containers::stop(&monitor.home, target),
+            }
         })
     })
     .await
 }
 
 #[tauri::command]
-pub async fn restart_server(app: AppHandle, target: Target) -> Result<(), String> {
+pub async fn restart_server(app: AppHandle, target: Target) -> Result<Snapshot, String> {
     blocking(move || {
         let monitor = app.state::<Monitor>();
-        monitor.control(&app, target.port, || match target {
-            Target {
-                pid: Some(pid),
-                port,
-                ..
-            } => control::restart(port, pid),
-            Target {
-                container: Some(id),
-                port,
-                ..
-            } => containers::restart(&monitor.home, port, &id),
-            Target { port, .. } => Err(format!("Ports can't restart the server on :{port}")),
+        monitor.control(&app, &target, || match &target {
+            Target::Process(target) => control::restart(target),
+            Target::Container(target) => containers::restart(&monitor.home, target),
         })
     })
     .await

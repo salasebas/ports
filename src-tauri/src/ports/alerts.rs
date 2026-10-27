@@ -32,15 +32,16 @@ impl Default for AlertSettings {
 
 #[derive(Debug, PartialEq)]
 pub struct Alert {
+    pub server_id: String,
     pub port: u16,
     pub title: String,
     pub body: String,
 }
 
-/// When each server was last alerted about, by port and listening PID.
+/// When each service identity was last alerted about.
 #[derive(Default)]
 pub struct Alerts {
-    sent: HashMap<(u16, u32), u64>,
+    sent: HashMap<String, u64>,
 }
 
 impl Alerts {
@@ -55,7 +56,8 @@ impl Alerts {
             .iter()
             .filter(|server| matches!(server.kind, Kind::Dev | Kind::Database))
             .filter_map(|server| {
-                let key = (server.port, server.pid?);
+                server.pid?;
+                let key = server.id.clone();
                 let body = if settings.enabled && server.leaking {
                     let first = server.memory_history.first().copied().unwrap_or_default();
                     let growth = server.memory_bytes.saturating_sub(first);
@@ -75,6 +77,7 @@ impl Alerts {
                 }
                 self.sent.insert(key, now);
                 Some(Alert {
+                    server_id: server.id.clone(),
                     port: server.port,
                     title: format!("{} on :{}", server.name, server.port),
                     body,
@@ -103,6 +106,10 @@ mod tests {
 
     fn server(port: u16, memory_bytes: u64) -> Server {
         Server {
+            id: format!("test:{port}"),
+            target: None,
+            resources: Vec::new(),
+            http: true,
             port,
             pid: Some(u32::from(port)),
             owner: None,
@@ -148,6 +155,7 @@ mod tests {
         assert_eq!(
             due,
             vec![Alert {
+                server_id: "test:3000".into(),
                 port: 3000,
                 title: "web on :3000".into(),
                 body: "Grew by 600 MB in 10 minutes and keeps growing.".into(),
