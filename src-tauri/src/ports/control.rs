@@ -20,7 +20,7 @@ use sysinfo::{
 
 const TERM_GRACE: Duration = Duration::from_secs(3);
 const KILL_GRACE: Duration = Duration::from_secs(2);
-const POLL: Duration = Duration::from_millis(50);
+const POLL: Duration = Duration::from_millis(100);
 const LISTEN_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,9 +178,6 @@ fn end(job: &Job, system: &System, selected: &ProcessTarget) -> Result<(), Strin
     if !selected.root.is_current() || !selected.listener.is_current() {
         return Err("The selected service changed before shutdown".into());
     }
-    if job.group.is_none() {
-        return end_shared_group(job, system, selected);
-    }
     let leader = selected.root.clone();
     let session = OsGroups.sid(job.root);
     let uid = system
@@ -209,11 +206,13 @@ fn end(job: &Job, system: &System, selected: &ProcessTarget) -> Result<(), Strin
             let table = ProcessTable::new(&current);
             let leader_now = ProcessIdentity::read(leader.pid);
             let group_not_reused = leader_now.as_ref().is_none_or(|id| id == &leader);
-            let descendants = if leader_now.as_ref() == Some(&leader) {
-                table.descendants(leader.pid)
-            } else {
-                BTreeSet::new()
-            };
+            // Children forked while a known member still lives are its descendants.
+            // Only an isolated group also catches one already reparented.
+            let descendants: BTreeSet<_> = targets
+                .iter()
+                .filter(|target| target.is_current())
+                .flat_map(|target| table.descendants(target.pid))
+                .collect();
             for (pid, process) in current.processes() {
                 let pid = pid.as_u32();
                 let in_group = group_not_reused
@@ -260,95 +259,6 @@ fn end(job: &Job, system: &System, selected: &ProcessTarget) -> Result<(), Strin
         Some(survivor) => Err(format!("{} didn't exit", label(system, survivor.pid))),
         None => Ok(()),
     }
-}
-
-/// A shared group cannot be swept after an orphan forks. Freeze this tree
-/// before force-stopping it, so shutdown handlers cannot create untracked
-/// children and unrelated group members never receive a signal.
-fn end_shared_group(job: &Job, system: &System, selected: &ProcessTarget) -> Result<(), String> {
-    struct Frozen(BTreeSet<ProcessIdentity>);
-    impl Drop for Frozen {
-        fn drop(&mut self) {
-            for target in &self.0 {
-                if target.is_current() {
-                    unsafe {
-                        libc::kill(target.pid as libc::pid_t, libc::SIGCONT);
-                    }
-                }
-            }
-        }
-    }
-    let mut frozen = Frozen(BTreeSet::new());
-    let root = selected.root.clone();
-    let deadline = Instant::now() + TERM_GRACE;
-    let mut pending: BTreeSet<_> = job
-        .pids
-        .iter()
-        .filter_map(|pid| ProcessIdentity::read(*pid))
-        .collect();
-    pending.retain(|id| id.pid != selected.root.pid && id.pid != selected.listener.pid);
-    pending.insert(root.clone());
-    pending.insert(selected.listener.clone());
-    loop {
-        // Stop parents first; a stopped parent cannot fork or reparent its children.
-        let mut ordered: Vec<_> = pending.iter().collect();
-        ordered.sort_by_key(|identity| if identity.pid == root.pid { 0 } else { 1 });
-        for target in ordered {
-            if !frozen.0.contains(target) && target.is_current() {
-                send(
-                    unsafe { libc::kill(target.pid as libc::pid_t, libc::SIGSTOP) },
-                    target.pid,
-                    system,
-                )?;
-                frozen.0.insert(target.clone());
-            }
-        }
-        let current = process_table();
-        let table = ProcessTable::new(&current);
-        let all_stopped = frozen.0.iter().filter(|id| id.is_current()).all(|id| {
-            current
-                .process(Pid::from_u32(id.pid))
-                .is_none_or(|process| {
-                    matches!(
-                        process.status(),
-                        ProcessStatus::Stop | ProcessStatus::Zombie
-                    )
-                })
-        });
-        let discovered: BTreeSet<_> = frozen
-            .0
-            .iter()
-            .filter(|id| id.is_current())
-            .flat_map(|id| table.descendants(id.pid))
-            .filter_map(ProcessIdentity::read)
-            .collect();
-        let added = !discovered.is_subset(&frozen.0);
-        pending.extend(discovered);
-        if !added && all_stopped {
-            break;
-        }
-        if Instant::now() >= deadline {
-            return Err("Could not safely freeze the service tree".into());
-        }
-        thread::sleep(POLL);
-    }
-    for target in &frozen.0 {
-        if target.is_current() {
-            send(
-                unsafe { libc::kill(target.pid as libc::pid_t, libc::SIGKILL) },
-                target.pid,
-                system,
-            )?;
-        }
-    }
-    let deadline = Instant::now() + KILL_GRACE;
-    while !alive(&frozen.0).is_empty() {
-        if Instant::now() >= deadline {
-            return Err("The service tree did not exit".into());
-        }
-        thread::sleep(POLL);
-    }
-    Ok(())
 }
 
 fn send(result: libc::c_int, pid: u32, system: &System) -> Result<(), String> {
@@ -509,14 +419,10 @@ fn wait_until_listening(
         {
             let system = process_table();
             let descendants = ProcessTable::new(&system).descendants(launched.pid);
+            // The relaunch may resolve `localhost` to another family, so any
+            // binding on the port counts once the launched tree owns it.
             if sockets.listening.iter().any(|(socket, owners)| {
-                socket.port() == target.port
-                    && target.addresses.iter().any(|ip| {
-                        *ip == socket.ip()
-                            || ip.is_ipv4() == socket.ip().is_ipv4()
-                                && (ip.is_unspecified() || socket.ip().is_unspecified())
-                    })
-                    && !owners.is_disjoint(&descendants)
+                socket.port() == target.port && !owners.is_disjoint(&descendants)
             }) {
                 break Ok(());
             }
@@ -687,11 +593,10 @@ time.sleep(60)
     }
 
     #[test]
-    fn shutdown_cannot_leave_a_newly_forked_child_in_private_or_shared_groups() {
-        for private in [true, false] {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("forked");
-            let code = r#"import os,signal,socket,time,sys
+    fn shutdown_cannot_leave_a_child_forked_by_a_term_handler_in_its_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("forked");
+        let code = r#"import os,signal,socket,time,sys
 s=socket.socket();s.bind(('127.0.0.1',0));s.listen()
 def term(*args):
  p=os.fork()
@@ -704,34 +609,63 @@ signal.signal(signal.SIGTERM,term)
 print(s.getsockname()[1],flush=True)
 time.sleep(60)
 "#;
-            let mut command = Command::new("python3");
-            command
-                .args(["-c", code, path.to_str().unwrap()])
-                .stdout(Stdio::piped());
-            if private {
-                command.process_group(0);
+        let mut server = Command::new("python3")
+            .args(["-c", code, path.to_str().unwrap()])
+            .stdout(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(server.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let port = line.trim().parse().unwrap();
+        let result = stop(&target(port, server.id()));
+        let forked = std::fs::read_to_string(path)
+            .ok()
+            .map(|pid| pid.parse::<u32>().unwrap());
+        let child_alive = forked.is_some_and(running);
+        if let Some(pid) = forked {
+            unsafe {
+                libc::kill(pid as i32, libc::SIGKILL);
             }
-            let mut server = command.spawn().unwrap();
-            let mut line = String::new();
-            BufReader::new(server.stdout.take().unwrap())
-                .read_line(&mut line)
-                .unwrap();
-            let port = line.trim().parse().unwrap();
-            let result = stop(&target(port, server.id()));
-            let forked = std::fs::read_to_string(path)
-                .ok()
-                .map(|pid| pid.parse::<u32>().unwrap());
-            let child_alive = forked.is_some_and(running);
-            if let Some(pid) = forked {
-                unsafe {
-                    libc::kill(pid as i32, libc::SIGKILL);
-                }
-            }
-            let _ = server.kill();
-            server.wait().unwrap();
-            result.unwrap();
-            assert!(!child_alive, "private group: {private}");
         }
+        let _ = server.kill();
+        server.wait().unwrap();
+        result.unwrap();
+        assert!(!child_alive);
+    }
+
+    #[test]
+    fn a_server_in_a_shared_group_still_gets_to_shut_down_gracefully() {
+        // Spawned without its own group, the server shares the test runner's
+        // group, like a dev server started by an editor task.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("terminated");
+        let code = r#"import signal,socket,sys,time
+s=socket.socket();s.bind(('127.0.0.1',0));s.listen()
+def term(*args):
+ open(sys.argv[1],'w').close()
+ sys.exit(0)
+signal.signal(signal.SIGTERM,term)
+print(s.getsockname()[1],flush=True)
+time.sleep(60)
+"#;
+        let mut server = Command::new("python3")
+            .args(["-c", code, path.to_str().unwrap()])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(server.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let port = line.trim().parse().unwrap();
+        let result = stop(&target(port, server.id()));
+        let _ = server.kill();
+        server.wait().unwrap();
+        result.unwrap();
+        assert!(path.exists(), "the server never received SIGTERM");
     }
 
     #[test]

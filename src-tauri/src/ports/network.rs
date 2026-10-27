@@ -68,11 +68,13 @@ pub fn is_exposed(addresses: &[IpAddr]) -> bool {
 
 /// The URL another device opens the server at, when it can reach it.
 pub fn lan_url(port: u16, addresses: &[IpAddr], lan_ip: Option<IpAddr>) -> Option<String> {
+    // `::` is dual-stack by default on macOS and Linux (Node's `listen(port)`),
+    // so it also answers on the IPv4 LAN address; `0.0.0.0` only on IPv4.
     let ip = lan_ip
         .filter(|lan| {
             addresses
                 .iter()
-                .any(|bound| bound.is_unspecified() && bound.is_ipv4() == lan.is_ipv4())
+                .any(|bound| bound.is_unspecified() && (bound.is_ipv6() || lan.is_ipv4()))
         })
         .or_else(|| {
             addresses
@@ -113,7 +115,7 @@ mod tests {
 
     #[test]
     fn a_wildcard_is_reachable_at_the_lan_address() {
-        for wildcard in [ips(&["0.0.0.0"]), ips(&["0.0.0.0", "::"])] {
+        for wildcard in [ips(&["0.0.0.0"]), ips(&["::"]), ips(&["0.0.0.0", "::"])] {
             assert!(is_exposed(&wildcard));
             assert_eq!(
                 lan_url(5173, &wildcard, LAN).as_deref(),
@@ -121,7 +123,10 @@ mod tests {
             );
         }
         assert_eq!(lan_url(5173, &ips(&["0.0.0.0"]), None), None);
-        assert_eq!(lan_url(5173, &ips(&["::"]), LAN), None);
+        assert_eq!(
+            lan_url(5173, &ips(&["0.0.0.0"]), Some("fd00::5".parse().unwrap())),
+            None
+        );
         assert_eq!(
             lan_url(5173, &ips(&["::"]), Some("fd00::5".parse().unwrap())).as_deref(),
             Some("http://[fd00::5]:5173")

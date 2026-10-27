@@ -3,55 +3,14 @@
 use std::process::Child;
 #[cfg(any(not(target_os = "macos"), test))]
 use std::process::Command;
-use std::sync::{Condvar, Mutex, OnceLock};
+#[cfg(any(not(target_os = "macos"), test))]
 use std::time::Duration;
 
-struct Reaper {
-    children: Mutex<Vec<Child>>,
-    wake: Condvar,
-}
-
-fn reaper() -> &'static Reaper {
-    static REAPER: OnceLock<Reaper> = OnceLock::new();
-    REAPER.get_or_init(|| {
-        std::thread::Builder::new()
-            .name("ports-reaper".into())
-            .spawn(|| {
-                let reaper = reaper();
-                loop {
-                    let children = reaper.children.lock().unwrap_or_else(|e| e.into_inner());
-                    let mut children = reaper
-                        .wake
-                        .wait_timeout(children, Duration::from_millis(100))
-                        .unwrap_or_else(|e| e.into_inner())
-                        .0;
-                    children.retain_mut(|child| match child.try_wait() {
-                        Ok(Some(_)) => false,
-                        Ok(None) => true,
-                        Err(error) if error.raw_os_error() == Some(libc::ECHILD) => false,
-                        Err(error) => {
-                            eprintln!("Could not reap child {}: {error}", child.id());
-                            true
-                        }
-                    });
-                }
-            })
-            .expect("could not start the child reaper");
-        Reaper {
-            children: Mutex::new(Vec::new()),
-            wake: Condvar::new(),
-        }
-    })
-}
-
-pub fn reap(child: Child) {
-    let reaper = reaper();
-    reaper
-        .children
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .push(child);
-    reaper.wake.notify_one();
+/// Waits for the child on its own thread, so it never lingers as a zombie.
+pub fn reap(mut child: Child) {
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
 }
 
 #[cfg(any(not(target_os = "macos"), test))]

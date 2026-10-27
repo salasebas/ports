@@ -76,11 +76,13 @@ const exposeFlags: Record<string, string> = {
 export const exposeFlag = (server: Server): string | undefined =>
 	server.framework ? exposeFlags[server.framework] : undefined;
 
+const reachesLocalhost = (ip: string) => ["0.0.0.0", "::", "127.0.0.1", "::1"].includes(ip);
+
+/** `localhost` whenever it reaches the server, since apps set up cookies, CORS and OAuth for that origin. */
 export function serverUrl(server: Pick<Server, "port" | "addresses">): string {
-	const address =
-		server.addresses.find((ip) => ip === "127.0.0.1" || ip === "::1") ?? server.addresses[0] ?? "127.0.0.1";
-	const local = address === "0.0.0.0" ? "127.0.0.1" : address === "::" ? "::1" : address;
-	const host = local.includes(":") ? `[${local}]` : local;
+	const concrete =
+		server.addresses.length && !server.addresses.some(reachesLocalhost) ? server.addresses[0] : "localhost";
+	const host = concrete.includes(":") ? `[${concrete}]` : concrete;
 	return `http://${host}:${server.port}`;
 }
 

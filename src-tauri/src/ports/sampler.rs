@@ -344,8 +344,13 @@ fn describe(
         .or_else(|| root.cwd())
         .filter(|_| !listener.exe().is_some_and(project::is_app_bundle))
         .and_then(|cwd| project::project_folder(cwd, home));
-    let words = project::command_words([listener.cmd()]);
-    let framework = project::framework(&words, folder.as_deref());
+    // The root (`php artisan serve`) names the framework; only the listener's
+    // own command proves it speaks HTTP, since a job can run TCP helpers too.
+    let framework = project::framework(
+        &project::command_words([listener.cmd(), root.cmd()]),
+        folder.as_deref(),
+    );
+    let http = project::is_http_command(&project::command_words([listener.cmd()]));
     let process = listener.name().to_string_lossy().into_owned();
     let kind = match (framework, &folder) {
         (Some(name), _) if project::is_database(name) => Kind::Database,
@@ -369,7 +374,7 @@ fn describe(
         id,
         target,
         resources,
-        http: project::is_http_command(&words),
+        http,
         port,
         pid: Some(job.listener),
         owner: None,

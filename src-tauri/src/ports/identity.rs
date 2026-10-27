@@ -37,27 +37,34 @@ fn linux_start(stat: &str) -> Option<&str> {
     stat.rsplit_once(')')?.1.split_whitespace().nth(19)
 }
 
+/// `sysctl(KERN_PROC_PID)` reads any user's process, unlike `proc_pidinfo`,
+/// so root listeners keep their identity too.
 #[cfg(target_os = "macos")]
 fn start(pid: u32) -> Option<String> {
-    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
-    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
-    let read = unsafe {
-        libc::proc_pidinfo(
-            pid as libc::c_int,
-            libc::PROC_PIDTBSDINFO,
-            0,
+    // `struct kinfo_proc` is 648 bytes and begins with `p_starttime`, a timeval.
+    let mut info = [0u64; 81];
+    let mut size = std::mem::size_of_val(&info);
+    let mut mib = [
+        libc::CTL_KERN,
+        libc::KERN_PROC,
+        libc::KERN_PROC_PID,
+        pid as libc::c_int,
+    ];
+    let result = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as libc::c_uint,
             info.as_mut_ptr().cast(),
-            size,
+            &mut size,
+            std::ptr::null_mut(),
+            0,
         )
     };
-    if read != size {
+    if result != 0 || size != std::mem::size_of_val(&info) {
         return None;
     }
-    let info = unsafe { info.assume_init() };
-    Some(format!(
-        "{}:{}",
-        info.pbi_start_tvsec, info.pbi_start_tvusec
-    ))
+    let start: libc::timeval = unsafe { std::ptr::read(info.as_ptr().cast()) };
+    Some(format!("{}:{}", start.tv_sec, start.tv_usec))
 }
 
 #[cfg(test)]
@@ -75,5 +82,11 @@ mod tests {
             ..current
         };
         assert!(!stale.is_current());
+    }
+
+    // Another user's process, such as launchd or init, still has an identity.
+    #[test]
+    fn reads_the_identity_of_another_users_process() {
+        assert!(ProcessIdentity::read(1).is_some());
     }
 }

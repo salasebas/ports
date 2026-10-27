@@ -209,7 +209,9 @@ pub fn command_words<'a>(commands: impl IntoIterator<Item = &'a [OsString]>) -> 
             continue;
         };
         let first = first.to_string_lossy();
-        let executable = file_name(first.split_whitespace().next().unwrap_or_default());
+        // Retitled processes read `nginx: master process …`.
+        let executable =
+            file_name(first.split_whitespace().next().unwrap_or_default()).trim_end_matches(':');
         words.insert(executable.to_string());
         let args: Vec<_> = command
             .iter()
@@ -230,7 +232,7 @@ pub fn command_words<'a>(commands: impl IntoIterator<Item = &'a [OsString]>) -> 
             None
         };
         if let Some(script) = script {
-            words.insert(file_name(script).to_string());
+            words.extend(script_names(script).map(str::to_string));
         }
     }
     words
@@ -256,7 +258,8 @@ pub fn framework(words: &HashSet<String>, folder: Option<&Path>) -> Option<&'sta
                 .unwrap_or(runner),
         );
     }
-    None
+    // Only a label: the HTTP probe needs executable evidence (`is_http_command`).
+    from_dependencies
 }
 
 fn dependency_framework(folder: &Path) -> Option<&'static str> {
@@ -296,6 +299,21 @@ fn dependency_names(folder: &Path) -> HashSet<String> {
 
 fn file_name(word: &str) -> &str {
     word.rsplit('/').next().unwrap_or(word)
+}
+
+/// The script's name without its extension (`astro.mjs` → `astro`) and the
+/// package it belongs to, so pnpm's `node …/node_modules/vite/bin/vite.js`
+/// and npm's `node_modules/.bin/vite` both read as `vite`.
+fn script_names(script: &str) -> impl Iterator<Item = &str> {
+    let name = file_name(script);
+    let stem = [".js", ".mjs", ".cjs", ".ts"]
+        .iter()
+        .find_map(|extension| name.strip_suffix(extension))
+        .unwrap_or(name);
+    let package = script
+        .rsplit_once("node_modules/")
+        .and_then(|(_, rest)| rest.split('/').find(|part| !part.starts_with(['@', '.'])));
+    std::iter::once(stem).chain(package)
 }
 
 /// `~/projects/web` for folders inside home, the full path otherwise.
@@ -455,6 +473,19 @@ mod tests {
                 "SvelteKit",
             ),
             ("node /p/node_modules/.bin/vite", Some(&express), "Vite"),
+            // pnpm runs the package's script, not the `.bin` shim.
+            (
+                "node /p/node_modules/.pnpm/vite@7.1.0/node_modules/vite/bin/vite.js dev",
+                Some(&sveltekit),
+                "SvelteKit",
+            ),
+            (
+                "node /p/node_modules/.pnpm/astro@5.0.0/node_modules/astro/bin/astro.mjs dev",
+                None,
+                "Astro",
+            ),
+            ("nginx: master process /usr/sbin/nginx", None, "nginx"),
+            ("node dist/server.js", Some(&express), "Express"),
             ("next-server (v15.1.0)", Some(&next), "Next.js"),
             (
                 "python -m uvicorn app.main:app --reload",
@@ -487,18 +518,12 @@ mod tests {
             framework(&words("python app.py --database postgres"), None),
             None
         );
-        let vite = project(&[(
-            "package.json",
-            r#"{"dependencies":{"express":"5"},"devDependencies":{"vite":"7"}}"#,
-        )]);
-        assert_eq!(
-            framework(&words("node custom-tcp.js"), Some(vite.path())),
-            None
-        );
-        assert_eq!(
-            framework(&words("bazel -jar A-server.jar"), Some(vite.path())),
-            None
-        );
+        // A project's dependencies name it, but only the command proves HTTP.
+        assert!(!is_http_command(&words("node custom-tcp.js")));
+        assert!(!is_http_command(&words("bazel -jar A-server.jar")));
+        assert!(is_http_command(&words(
+            "node /p/node_modules/.pnpm/vite@7.1.0/node_modules/vite/bin/vite.js"
+        )));
     }
 
     #[test]

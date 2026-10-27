@@ -61,7 +61,7 @@
 		return above && `Alerts ${above}`;
 	});
 	// Pins and protection cover every port of a project.
-	const scope = $derived(server.folder ? "every port of this project" : "this server and ports sharing its processes");
+	const scope = $derived(server.folder ? "every port of this project" : `:${server.port} only`);
 
 	const facts = $derived(
 		[

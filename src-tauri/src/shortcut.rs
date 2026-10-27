@@ -96,10 +96,12 @@ pub fn replace(app: &AppHandle, text: Option<&str>) -> Result<(), String> {
         if let Some(next) = next {
             let _ = app.global_shortcut().unregister(next);
         }
-        let rollback = settings::write(app, settings::SHORTCUT, current.map(Shortcut::into_string));
-        return Err(format!(
-            "Could not release the previous shortcut: {error}; rollback: {rollback:?}"
-        ));
+        if let Err(rollback) =
+            settings::write(app, settings::SHORTCUT, current.map(Shortcut::into_string))
+        {
+            eprintln!("could not restore the saved shortcut: {rollback}");
+        }
+        return Err(format!("Couldn't release the previous shortcut ({error})"));
     }
     *current = next;
     Ok(())

@@ -3,10 +3,11 @@
 use reqwest::Method;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -104,14 +105,26 @@ fn sockets(home: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// One client per engine for the app's lifetime: building a blocking client
+/// starts a runtime thread, too costly to repeat on every sample.
 fn client(socket: &Path) -> Result<Client, String> {
-    Client::builder()
+    static CLIENTS: OnceLock<Mutex<HashMap<PathBuf, Client>>> = OnceLock::new();
+    let mut clients = CLIENTS
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(client) = clients.get(socket) {
+        return Ok(client.clone());
+    }
+    let client = Client::builder()
         .unix_socket(socket.to_path_buf())
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(CONTROL_TIMEOUT)
         .build()
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    clients.insert(socket.to_path_buf(), client.clone());
+    Ok(client)
 }
 
 fn request(

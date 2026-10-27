@@ -26,13 +26,16 @@ describe("formatBytesText", () => {
 	});
 });
 
-// Bound socket addresses define reachability; localhost cannot reach a NIC-only listener.
+// Browsers treat localhost and 127.0.0.1 as different origins; only a NIC-only listener needs its address.
 describe("serverUrl", () => {
 	it.each([
 		[["192.168.1.20"], "http://192.168.1.20:3000"],
-		[["::"], "http://[::1]:3000"],
 		[["2001:db8::1"], "http://[2001:db8::1]:3000"],
-		[["0.0.0.0"], "http://127.0.0.1:3000"],
+		[["::"], "http://localhost:3000"],
+		[["0.0.0.0"], "http://localhost:3000"],
+		[["127.0.0.1", "::1"], "http://localhost:3000"],
+		[[], "http://localhost:3000"],
+		[["127.0.0.2"], "http://127.0.0.2:3000"],
 	])("uses a reachable binding for %s", (addresses, expected) => {
 		expect(serverUrl({ port: 3000, addresses })).toBe(expected);
 	});

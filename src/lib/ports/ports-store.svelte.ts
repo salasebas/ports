@@ -219,17 +219,17 @@ export class PortsStore {
 			? this.#controlling.some((busy) => sharesControl(busy, server))
 			: this.#busy.has(`${work}:${server.id}`);
 
-	/** Runs `work` unless the same work on the same server is still running. */
+	/** Runs `work` unless the same work on the same server, or a control of its processes, is still running. */
 	async #run<T>(server: Server, work: Busy, run: () => Promise<T>): Promise<T | undefined> {
-		const key = `${work}:${work === "control" ? controlKey(server) : server.id}`;
 		if (this.isBusy(server, work)) return;
-		this.#busy.add(key);
+		const key = `${work}:${server.id}`;
 		if (work === "control") this.#controlling = [...this.#controlling, server];
+		else this.#busy.add(key);
 		try {
 			return await run();
 		} finally {
-			this.#busy.delete(key);
 			if (work === "control") this.#controlling = this.#controlling.filter((busy) => busy !== server);
+			else this.#busy.delete(key);
 		}
 	}
 
@@ -301,6 +301,13 @@ export class PortsStore {
 			const id = toast.loading(`Restarting ${server.name}…`, { id: `restart-${server.id}` });
 			try {
 				this.apply(await invoke<Snapshot>("restart_server", { target: target(server) }));
+				// The new process has a new identity; keep its details open.
+				if (this.selectedId === server.id && !this.selected) {
+					this.selectedId =
+						this.#customized.find(
+							(row) => row.port === server.port && row.process === server.process && row.folder === server.folder,
+						)?.id ?? null;
+				}
 				toast.success(`Restarted ${server.name}`, { id, description: `:${server.port}` });
 			} catch (error) {
 				toast.error(String(error), { id });
@@ -351,18 +358,21 @@ export class PortsStore {
 			if (!servers.some((chosen) => sharesControl(chosen, server))) servers.push(server);
 		}
 		if (!servers.length) return;
-		const id = toast.loading("Stopping " + idleCount(servers.length) + "…", { id: "clean-up" });
+		// Count rows, like the dialog: one stop can end several ports of a process.
+		const rows = (stopped: Server[]) => eligible.filter((row) => stopped.some((s) => sharesControl(s, row))).length;
+		const id = toast.loading("Stopping " + idleCount(eligible.length) + "…", { id: "clean-up" });
 		const results = await Promise.all(
 			servers.map((server) => this.#run(server, "control", () => this.#stop(server, true))),
 		);
-		const attempted = results.filter((result) => result !== undefined);
-		const errors = attempted.filter((result): result is string => typeof result === "string");
+		const attempted = servers.filter((_, i) => results[i] !== undefined);
+		const errors = results.filter((result): result is string => typeof result === "string");
+		const failed = servers.filter((_, i) => typeof results[i] === "string");
 		if (!attempted.length) toast.info("No idle servers were stopped", { id });
 		else if (errors.length)
-			toast.error("Couldn't stop " + errors.length + " of " + idleCount(attempted.length), {
+			toast.error("Couldn't stop " + rows(failed) + " of " + idleCount(rows(attempted)), {
 				id,
 				description: errors[0],
 			});
-		else toast.success("Stopped " + idleCount(attempted.length), { id });
+		else toast.success("Stopped " + idleCount(rows(attempted)), { id });
 	};
 }

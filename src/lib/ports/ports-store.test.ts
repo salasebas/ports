@@ -265,6 +265,16 @@ describe("stopping a server", () => {
 		expect(store.isBusy(web, "control")).toBe(false);
 	});
 
+	// The restarted process has a new identity, but it is the same server to the user.
+	it("keeps the details of a restarted server open", async () => {
+		const restarted = server({ ...web, pid: 101, startedAt: 5 });
+		backend((cmd) => (cmd === "restart_server" ? snapshot([restarted, api]) : undefined));
+		const store = storeWith(web, api);
+		store.select(web.id);
+		await store.restart(web);
+		expect(store.selected?.id).toBe(restarted.id);
+	});
+
 	it("closes the details of the stopped server and clears the pending confirmation", async () => {
 		const store = storeWith(web, api);
 		store.select(web.id);

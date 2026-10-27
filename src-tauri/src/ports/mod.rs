@@ -229,7 +229,13 @@ impl Monitor {
         let snapshot = self.publish(app);
         lock(&self.stopping).retain(|key| !keys.contains(key));
         result?;
-        snapshot
+        // The control worked; a failed sample right after it must not report it as failed.
+        // The monitor samples again right away to publish the change.
+        snapshot.or_else(|error| {
+            eprintln!("Could not sample ports: {error}");
+            self.wake();
+            lock(&self.latest).clone().ok_or(error)
+        })
     }
 }
 
