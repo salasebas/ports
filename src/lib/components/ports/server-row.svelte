@@ -1,6 +1,8 @@
 <script lang="ts">
 	import ArrowUpRightIcon from "@lucide/svelte/icons/arrow-up-right";
+	import PinIcon from "@lucide/svelte/icons/pin";
 	import SquareIcon from "@lucide/svelte/icons/square";
+	import WifiIcon from "@lucide/svelte/icons/wifi";
 	import { Button } from "$lib/components/ui/button";
 	import { canStop, formatBytes, isMeasured, serverActivity } from "$lib/ports/format";
 	import type { PortsStore } from "$lib/ports/ports-store.svelte";
@@ -18,6 +20,7 @@
 		return cpu ? { value: String(Math.round(server.cpuPercent)), unit: "%" } : formatBytes(server.memoryBytes);
 	});
 	const attention = $derived(server.status === "attention");
+	const leaking = $derived(attention && server.responding);
 	const detail = $derived(server.branch ?? server.framework ?? server.process);
 </script>
 
@@ -38,9 +41,17 @@
 	<PortLabel port={server.port} class="w-14 shrink-0 text-[15px]" />
 
 	<div class="pointer-events-none flex min-w-0 flex-1 flex-col">
-		<span class="truncate text-sm font-medium">{server.name}</span>
+		<span class="flex items-center gap-1.5 text-sm font-medium">
+			{#if store.isPinned(server)}
+				<PinIcon class="size-3 shrink-0 text-muted-foreground" aria-label="Pinned" />
+			{/if}
+			<span class="truncate">{server.name}</span>
+			{#if server.exposed}
+				<WifiIcon class="size-3 shrink-0 text-muted-foreground" aria-label="Reachable from the network" />
+			{/if}
+		</span>
 		<span class="truncate text-xs text-muted-foreground">
-			{#if attention}
+			{#if attention || !server.responding}
 				<span class="text-warning">{serverActivity(server)}</span>
 			{:else}
 				{detail} · {serverActivity(server)}
@@ -54,7 +65,7 @@
 			max={cpu ? 100 : undefined}
 			class={cn(
 				"pointer-events-none h-5 w-full transition-opacity duration-150 will-change-[opacity] group-focus-within/row:opacity-0 group-hover/row:opacity-0",
-				attention ? "text-warning" : "text-muted-foreground",
+				leaking ? "text-warning" : "text-muted-foreground",
 			)}
 		/>
 		<div
@@ -83,10 +94,7 @@
 	</div>
 
 	<p
-		class={cn(
-			"pointer-events-none w-16 shrink-0 text-right font-mono text-sm tabular-nums",
-			attention && "text-warning",
-		)}
+		class={cn("pointer-events-none w-16 shrink-0 text-right font-mono text-sm tabular-nums", leaking && "text-warning")}
 	>
 		{reading.value} <span class="text-xs text-muted-foreground">{reading.unit}</span>
 	</p>

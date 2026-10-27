@@ -1,5 +1,5 @@
 use tauri::{
-    AppHandle, Manager, WindowEvent,
+    AppHandle, Emitter, Manager, WindowEvent,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
@@ -8,9 +8,14 @@ use tauri_plugin_positioner::{Position, WindowExt};
 
 mod folders;
 mod ports;
+mod settings;
+#[cfg(desktop)]
+mod shortcut;
 
 const MAIN_WINDOW: &str = "main";
 const TRAY_WINDOW: &str = "tray";
+/// Asks the main window to show its settings page. Must match `src/routes/+layout.svelte`.
+const SETTINGS_EVENT: &str = "ports://open-settings";
 
 fn show_main(app: &AppHandle) {
     if let Some(window) = app.get_webview_window(TRAY_WINDOW) {
@@ -47,40 +52,18 @@ fn open_main_window(app: AppHandle) {
     show_main(&app);
 }
 
+/// Settings are a page of the main window, so the popover's gear opens them there.
+#[tauri::command]
+fn open_settings(app: AppHandle) {
+    show_main(&app);
+    if let Err(error) = app.emit_to(MAIN_WINDOW, SETTINGS_EVENT, ()) {
+        eprintln!("could not open the settings: {error}");
+    }
+}
+
 #[tauri::command]
 fn quit_app(app: AppHandle) {
     app.exit(0);
-}
-
-/// ⌥⌘P on macOS, Ctrl+Alt+P elsewhere, toggles the popover like a tray click.
-#[cfg(desktop)]
-fn register_popover_shortcut(app: &tauri::App) -> tauri::Result<()> {
-    use tauri_plugin_global_shortcut::{
-        Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
-    };
-
-    let modifiers = if cfg!(target_os = "macos") {
-        Modifiers::SUPER | Modifiers::ALT
-    } else {
-        Modifiers::CONTROL | Modifiers::ALT
-    };
-    app.handle().plugin(
-        tauri_plugin_global_shortcut::Builder::new()
-            .with_handler(|app, _shortcut, event| {
-                if event.state == ShortcutState::Pressed {
-                    toggle_tray_window(app);
-                }
-            })
-            .build(),
-    )?;
-    // Another app may own the combination; Ports still works from the tray.
-    if let Err(error) = app
-        .global_shortcut()
-        .register(Shortcut::new(Some(modifiers), Code::KeyP))
-    {
-        eprintln!("could not register the popover shortcut: {error}");
-    }
-    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -92,12 +75,18 @@ pub fn run() {
             MacosLauncher::LaunchAgent,
             None,
         ))
+        .plugin(tauri_plugin_store::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             #[cfg(desktop)]
-            register_popover_shortcut(app)?;
+            shortcut::init(app, toggle_tray_window)?;
 
-            app.manage(ports::Monitor::new(app.path().home_dir()?));
+            app.manage(ports::Monitor::new(
+                app.path().home_dir()?,
+                settings::alerts(app.handle()),
+            ));
             ports::start(app.handle())?;
+            ports::open_alerts_on_click(app.handle(), show_main);
 
             let quick_view =
                 MenuItem::with_id(app, "quick-view", "Quick View", true, None::<&str>)?;
@@ -147,6 +136,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             open_main_window,
+            open_settings,
             quit_app,
             folders::open_in_editor,
             folders::open_in_terminal,
@@ -156,6 +146,9 @@ pub fn run() {
             ports::set_refresh_interval,
             ports::stop_server,
             ports::restart_server,
+            settings::get_settings,
+            settings::set_alerts,
+            settings::set_shortcut,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

@@ -1,44 +1,58 @@
 <script lang="ts">
 	import { onMount, type Component } from "svelte";
+	import { goto } from "$app/navigation";
+	import { resolve } from "$app/paths";
+	import { page } from "$app/state";
 	import { flip } from "svelte/animate";
 	import { cubicOut } from "svelte/easing";
 	import { prefersReducedMotion } from "svelte/motion";
 	import { fade } from "svelte/transition";
+	import ArrowDownIcon from "@lucide/svelte/icons/arrow-down";
+	import ArrowUpDownIcon from "@lucide/svelte/icons/arrow-up-down";
+	import ArrowUpIcon from "@lucide/svelte/icons/arrow-up";
 	import ArrowUpRightIcon from "@lucide/svelte/icons/arrow-up-right";
-	import CodeIcon from "@lucide/svelte/icons/code";
-	import CopyIcon from "@lucide/svelte/icons/copy";
+	import ClockIcon from "@lucide/svelte/icons/clock";
 	import CpuIcon from "@lucide/svelte/icons/cpu";
-	import EllipsisIcon from "@lucide/svelte/icons/ellipsis";
-	import FolderOpenIcon from "@lucide/svelte/icons/folder-open";
+	import FolderIcon from "@lucide/svelte/icons/folder";
 	import HashIcon from "@lucide/svelte/icons/hash";
-	import InfoIcon from "@lucide/svelte/icons/info";
 	import LayersIcon from "@lucide/svelte/icons/layers";
 	import MemoryStickIcon from "@lucide/svelte/icons/memory-stick";
+	import PinIcon from "@lucide/svelte/icons/pin";
 	import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
 	import ServerIcon from "@lucide/svelte/icons/server";
 	import SquareIcon from "@lucide/svelte/icons/square";
-	import SquareTerminalIcon from "@lucide/svelte/icons/square-terminal";
+	import WifiIcon from "@lucide/svelte/icons/wifi";
 	import XIcon from "@lucide/svelte/icons/x";
 	import { Badge } from "$lib/components/ui/badge";
 	import { Button } from "$lib/components/ui/button";
 	import * as Card from "$lib/components/ui/card";
 	import * as Drawer from "$lib/components/ui/drawer";
+	import { ScrollArea } from "$lib/components/ui/scroll-area";
 	import * as DropdownMenu from "$lib/components/ui/dropdown-menu";
 	import * as Table from "$lib/components/ui/table";
 	import * as Tooltip from "$lib/components/ui/tooltip";
+	import CleanUpButton from "$lib/components/ports/clean-up-button.svelte";
+	import CleanUpDialog from "$lib/components/ports/clean-up-dialog.svelte";
 	import NoResults from "$lib/components/ports/no-results.svelte";
 	import PortLabel from "$lib/components/ports/port-label.svelte";
 	import ServerDetails from "$lib/components/ports/server-details.svelte";
+	import RenameDialog from "$lib/components/ports/rename-dialog.svelte";
 	import ServerFilter from "$lib/components/ports/server-filter.svelte";
 	import ServerSearch from "$lib/components/ports/server-search.svelte";
-	import SettingsMenu from "$lib/components/ports/settings-menu.svelte";
+	import SettingsButton from "$lib/components/ports/settings-button.svelte";
 	import Sparkline from "$lib/components/ports/sparkline.svelte";
 	import ConfirmDialog from "$lib/components/ports/confirm-dialog.svelte";
 	import UsageSummary from "$lib/components/ports/usage-summary.svelte";
-	import { canStop, formatBytesText, isMeasured, serverActivity, serverProcessId } from "$lib/ports/format";
-	import { fileManagerName } from "$lib/platform";
-	import { PortsStore } from "$lib/ports/ports-store.svelte";
-	import { editorLabel, preferences } from "$lib/ports/preferences.svelte";
+	import {
+		canStop,
+		formatBytesText,
+		formatDuration,
+		isMeasured,
+		serverActivity,
+		serverProcessId,
+	} from "$lib/ports/format";
+	import { PortsStore, type ServerGroup } from "$lib/ports/ports-store.svelte";
+	import { preferences, sortKeys, type SortKey } from "$lib/ports/preferences.svelte";
 	import type { Server, ServerStatus } from "$lib/ports/types";
 	import { cn } from "$lib/utils";
 
@@ -64,6 +78,35 @@
 		lastSelected = server;
 		store.select(server.port);
 	}
+
+	// `/?details=5173` opens a server's details, e.g. after a click on its memory
+	// alert; it waits for the first snapshot, then drops the parameter.
+	$effect(() => {
+		const port = Number(page.url.searchParams.get("details"));
+		const server = port ? store.servers.find((s) => s.port === port) : undefined;
+		if (!server) return;
+		showDetails(server);
+		void goto(resolve("/"), { replaceState: true, noScroll: true, keepFocus: true });
+	});
+
+	/** A new column sorts in its natural direction; the current one flips. */
+	function sortBy(key: SortKey) {
+		const sort = preferences.sort.current;
+		const descending =
+			sort.key === key ? !sort.descending : (sortKeys.find((k) => k.value === key)?.descending ?? false);
+		preferences.sort.current = { key, descending };
+	}
+
+	type Row = { key: number; server: Server; group?: never } | { key: string; group: ServerGroup; server?: never };
+
+	const rows = $derived<Row[]>(
+		preferences.groupByProject.current
+			? store.groups.flatMap((group) => [
+					{ key: `group:${group.folder ?? ""}`, group },
+					...group.servers.map((server) => ({ key: server.port, server })),
+				])
+			: store.filtered.map((server) => ({ key: server.port, server })),
+	);
 </script>
 
 {#snippet action(label: string, Icon: Component, onclick: () => void, disabled = false)}
@@ -89,56 +132,164 @@
 	</Tooltip.Root>
 {/snippet}
 
-{#snippet more(server: Server)}
+{#snippet head(label: string, Icon: Component, className = "", key?: SortKey)}
+	{@const sort = preferences.sort.current}
+	{@const active = key !== undefined && sort.key === key}
+	{@const Arrow = sort.descending ? ArrowDownIcon : ArrowUpIcon}
+	<Table.Head
+		class={cn("h-10 content-center text-xs font-normal text-muted-foreground", className)}
+		aria-sort={active ? (sort.descending ? "descending" : "ascending") : undefined}
+	>
+		{#if key}
+			<Button
+				variant="ghost"
+				size="xs"
+				class={cn("-mx-2 gap-1.5 font-normal whitespace-nowrap text-muted-foreground", active && "text-foreground")}
+				onclick={() => sortBy(key)}
+			>
+				<Icon class="size-3.5 opacity-70" />
+				{label}
+				<Arrow class={cn("size-3 transition-opacity", !active && "opacity-0")} />
+			</Button>
+		{:else}
+			<span class="inline-flex items-center gap-1.5">
+				<Icon class="size-3.5 opacity-70" />
+				{label}
+			</span>
+		{/if}
+	</Table.Head>
+{/snippet}
+
+{#snippet sortMenu()}
 	<DropdownMenu.Root>
 		<DropdownMenu.Trigger>
 			{#snippet child({ props })}
-				<Button
-					{...props}
-					variant="ghost"
-					size="icon-sm"
-					aria-label="More actions for {server.name}"
-					onclick={(event: MouseEvent) => event.stopPropagation()}
-				>
-					<EllipsisIcon />
+				<Button {...props} variant="ghost" size="icon-sm" aria-label="Sort and group">
+					<ArrowUpDownIcon />
 				</Button>
 			{/snippet}
 		</DropdownMenu.Trigger>
-		<DropdownMenu.Content align="end" class="w-48">
-			{#if server.folder}
-				<DropdownMenu.Item disabled={store.isBusy(server, "editor")} onSelect={() => store.openInEditor(server)}>
-					<CodeIcon />
-					Open in {editorLabel(preferences.editor.current)}
-				</DropdownMenu.Item>
-				<DropdownMenu.Item disabled={store.isBusy(server, "terminal")} onSelect={() => store.openInTerminal(server)}>
-					<SquareTerminalIcon />
-					Open in Terminal
-				</DropdownMenu.Item>
-				<DropdownMenu.Item disabled={store.isBusy(server, "folder")} onSelect={() => store.revealFolder(server)}>
-					<FolderOpenIcon />
-					Show in {fileManagerName}
-				</DropdownMenu.Item>
-				<DropdownMenu.Separator />
-			{/if}
-			<DropdownMenu.Item onSelect={() => store.copyUrl(server)}>
-				<CopyIcon />
-				Copy URL
-			</DropdownMenu.Item>
-			<DropdownMenu.Item onSelect={() => showDetails(server)}>
-				<InfoIcon />
-				Details
-			</DropdownMenu.Item>
+		<DropdownMenu.Content align="end" class="w-52">
+			<DropdownMenu.Group>
+				<DropdownMenu.GroupHeading>Sort by</DropdownMenu.GroupHeading>
+				<DropdownMenu.RadioGroup bind:value={() => preferences.sort.current.key, (key) => sortBy(key as SortKey)}>
+					{#each sortKeys as key (key.value)}
+						<DropdownMenu.RadioItem value={key.value} closeOnSelect={false}>{key.label}</DropdownMenu.RadioItem>
+					{/each}
+				</DropdownMenu.RadioGroup>
+			</DropdownMenu.Group>
+			<DropdownMenu.Separator />
+			<DropdownMenu.RadioGroup
+				bind:value={
+					() => (preferences.sort.current.descending ? "descending" : "ascending"),
+					(order) => (preferences.sort.current = { ...preferences.sort.current, descending: order === "descending" })
+				}
+			>
+				<DropdownMenu.RadioItem value="ascending" closeOnSelect={false}>Ascending</DropdownMenu.RadioItem>
+				<DropdownMenu.RadioItem value="descending" closeOnSelect={false}>Descending</DropdownMenu.RadioItem>
+			</DropdownMenu.RadioGroup>
+			<DropdownMenu.Separator />
+			<DropdownMenu.CheckboxItem bind:checked={preferences.groupByProject.current}>
+				Group by project
+			</DropdownMenu.CheckboxItem>
 		</DropdownMenu.Content>
 	</DropdownMenu.Root>
 {/snippet}
 
-{#snippet head(label: string, Icon: Component, className = "")}
-	<Table.Head class={cn("h-10 content-center text-xs font-normal text-muted-foreground", className)}>
-		<span class={cn("inline-flex items-center gap-1.5", className.includes("text-right") && "justify-end")}>
-			<Icon class="size-3.5 opacity-70" />
-			{label}
-		</span>
-	</Table.Head>
+{#snippet groupCell(group: ServerGroup)}
+	<td class="col-span-full flex min-w-0 items-center gap-2 px-5 py-2 text-xs text-muted-foreground">
+		<FolderIcon class="size-3.5 shrink-0 opacity-70" />
+		{#if group.folder}
+			<span class="shrink-0 font-medium text-foreground">{group.folder.split("/").at(-1)}</span>
+			<span class="truncate">{group.folder}</span>
+		{:else}
+			<span class="font-medium text-foreground">Outside a project</span>
+		{/if}
+		<span class="ml-auto font-mono tabular-nums">{group.servers.length}</span>
+	</td>
+{/snippet}
+
+{#snippet serverCells(server: Server)}
+	{@const attention = server.status === "attention"}
+	{@const leaking = attention && server.responding}
+	<Table.Cell class="py-3.5 pl-5">
+		<PortLabel port={server.port} class="text-[15px]" />
+	</Table.Cell>
+	<Table.Cell class="min-w-0">
+		<div class="flex items-center gap-3">
+			<span class={cn("size-2 shrink-0 rounded-full", statusDot[server.status])} title={server.status}></span>
+			<div class="flex min-w-0 flex-col gap-0.5">
+				<span class="flex items-center gap-1.5 font-medium">
+					{#if store.isPinned(server)}
+						<PinIcon class="size-3.5 shrink-0 text-muted-foreground" aria-label="Pinned" />
+					{/if}
+					<span class="truncate">{server.name}</span>
+					{#if server.exposed}
+						<Tooltip.Root>
+							<Tooltip.Trigger>
+								{#snippet child({ props })}
+									<WifiIcon
+										{...props}
+										class="size-3.5 shrink-0 text-muted-foreground"
+										aria-label="Reachable from the network"
+									/>
+								{/snippet}
+							</Tooltip.Trigger>
+							<Tooltip.Content>Reachable from other devices on the network</Tooltip.Content>
+						</Tooltip.Root>
+					{/if}
+				</span>
+				<span
+					class={cn("truncate text-xs", attention || !server.responding ? "text-warning" : "text-muted-foreground")}
+				>
+					{server.branch ? `${server.branch} · ` : ""}{serverActivity(server)}
+				</span>
+			</div>
+		</div>
+	</Table.Cell>
+	<Table.Cell>
+		<div class="flex flex-col gap-0.5">
+			<span>{server.framework ?? server.process}</span>
+			<span class="font-mono text-xs text-muted-foreground">{serverProcessId(server)}</span>
+		</div>
+	</Table.Cell>
+	<Table.Cell class="text-right font-mono text-muted-foreground tabular-nums">
+		{formatDuration(Date.now() - server.startedAt)}
+	</Table.Cell>
+	{#if !isMeasured(server)}
+		<Table.Cell class="text-right text-muted-foreground">–</Table.Cell>
+		<Table.Cell class="text-right text-muted-foreground">–</Table.Cell>
+	{:else}
+		<Table.Cell class="text-right font-mono tabular-nums">
+			{Math.round(server.cpuPercent)}%
+		</Table.Cell>
+		<Table.Cell>
+			<div class="flex items-center justify-end gap-3">
+				<Sparkline
+					values={server.memoryHistory}
+					class={cn("h-4 w-14", leaking ? "text-warning" : "text-muted-foreground")}
+				/>
+				<span class={cn("w-16 text-right font-mono tabular-nums", leaking && "text-warning")}>
+					{formatBytesText(server.memoryBytes)}
+				</span>
+			</div>
+		</Table.Cell>
+	{/if}
+	<Table.Cell class="pr-5">
+		<div
+			class="flex justify-end gap-0.5 opacity-0 transition-opacity duration-150 will-change-[opacity] group-hover/row:opacity-100 focus-within:opacity-100 has-data-[state=open]:opacity-100"
+		>
+			{@render action(`Open localhost:${server.port}`, ArrowUpRightIcon, () => store.open(server))}
+			{#if canStop(server)}
+				{@render action(
+					`Stop ${server.name}`,
+					SquareIcon,
+					() => store.request("stop", server),
+					store.isBusy(server, "control"),
+				)}
+			{/if}
+		</div>
+	</Table.Cell>
 {/snippet}
 
 <svelte:window bind:scrollY />
@@ -157,8 +308,10 @@
 		<div class="ml-auto flex items-center gap-2">
 			<ServerSearch bind:value={store.query} class="w-64" />
 			<ServerFilter {store} />
+			{@render sortMenu()}
+			<CleanUpButton {store} />
 			{@render action("Refresh", RefreshCwIcon, store.refresh)}
-			<SettingsMenu />
+			<SettingsButton />
 		</div>
 	</header>
 
@@ -177,86 +330,38 @@
 			>
 				<div bind:clientHeight={tableHeight} class="[&>[data-slot=table-container]]:overflow-visible">
 					<!-- Rows are grids on shared tracks so a row leaving the flow mid-animation keeps its columns. -->
-					<Table.Root class="grid [--cols:7rem_minmax(0,1fr)_9rem_5rem_11rem_8rem]">
+					<Table.Root class="grid [--cols:6rem_minmax(0,1fr)_8rem_7rem_5.5rem_10rem_5.5rem]">
 						<Table.Header class="grid bg-muted/60">
 							<Table.Row class="grid grid-cols-(--cols) items-center hover:bg-transparent">
-								{@render head("Port", HashIcon, "pl-5")}
-								{@render head("Server", ServerIcon)}
+								{@render head("Port", HashIcon, "pl-5", "port")}
+								{@render head("Server", ServerIcon, "", "name")}
 								{@render head("Framework", LayersIcon)}
-								{@render head("CPU", CpuIcon, "text-right")}
-								{@render head("Memory", MemoryStickIcon, "text-right")}
+								{@render head("Uptime", ClockIcon, "text-right", "uptime")}
+								{@render head("CPU", CpuIcon, "text-right", "cpu")}
+								{@render head("Memory", MemoryStickIcon, "text-right", "memory")}
 								<Table.Head class="pr-5"><span class="sr-only">Actions</span></Table.Head>
 							</Table.Row>
 						</Table.Header>
 						<Table.Body class="grid">
-							{#each store.filtered as server (server.port)}
-								{@const attention = server.status === "attention"}
+							{#each rows as row (row.key)}
+								{@const server = row.server}
 								<!-- A plain <tr> because animate: and transitions need an element, not a component. -->
 								<tr
 									data-slot="table-row"
-									class="group/row grid cursor-default grid-cols-(--cols) items-center border-b transition-colors hover:bg-muted/60 data-[state=selected]:bg-muted"
-									data-state={store.selectedPort === server.port ? "selected" : undefined}
-									onclick={() => showDetails(server)}
+									class={server
+										? "group/row grid cursor-default grid-cols-(--cols) items-center border-b transition-colors hover:bg-muted/60 data-[state=selected]:bg-muted"
+										: "grid grid-cols-(--cols) border-b bg-muted/30"}
+									data-state={server && store.selectedPort === server.port ? "selected" : undefined}
+									onclick={server ? () => showDetails(server) : undefined}
 									animate:flip={{ duration: 220 * motion, easing: cubicOut }}
 									in:fade={{ duration: 180 * motion, delay: 60 * motion }}
 									out:fade={{ duration: 120 * motion }}
 								>
-									<Table.Cell class="py-3.5 pl-5">
-										<PortLabel port={server.port} class="text-[15px]" />
-									</Table.Cell>
-									<Table.Cell class="min-w-0">
-										<div class="flex items-center gap-3">
-											<span class={cn("size-2 shrink-0 rounded-full", statusDot[server.status])} title={server.status}
-											></span>
-											<div class="flex min-w-0 flex-col gap-0.5">
-												<span class="truncate font-medium">{server.name}</span>
-												<span class={cn("truncate text-xs", attention ? "text-warning" : "text-muted-foreground")}>
-													{server.branch ? `${server.branch} · ` : ""}{serverActivity(server)}
-												</span>
-											</div>
-										</div>
-									</Table.Cell>
-									<Table.Cell>
-										<div class="flex flex-col gap-0.5">
-											<span>{server.framework ?? server.process}</span>
-											<span class="font-mono text-xs text-muted-foreground">{serverProcessId(server)}</span>
-										</div>
-									</Table.Cell>
-									{#if !isMeasured(server)}
-										<Table.Cell class="text-right text-muted-foreground">–</Table.Cell>
-										<Table.Cell class="text-right text-muted-foreground">–</Table.Cell>
-									{:else}
-										<Table.Cell class="text-right font-mono tabular-nums">
-											{Math.round(server.cpuPercent)}%
-										</Table.Cell>
-										<Table.Cell>
-											<div class="flex items-center justify-end gap-3">
-												<Sparkline
-													values={server.memoryHistory}
-													class={cn("h-4 w-14", attention ? "text-warning" : "text-muted-foreground")}
-												/>
-												<span class={cn("w-16 text-right font-mono tabular-nums", attention && "text-warning")}>
-													{formatBytesText(server.memoryBytes)}
-												</span>
-											</div>
-										</Table.Cell>
+									{#if server}
+										{@render serverCells(server)}
+									{:else if row.group}
+										{@render groupCell(row.group)}
 									{/if}
-									<Table.Cell class="pr-5">
-										<div
-											class="flex justify-end gap-0.5 opacity-0 transition-opacity duration-150 will-change-[opacity] group-hover/row:opacity-100 focus-within:opacity-100 has-data-[state=open]:opacity-100"
-										>
-											{@render action(`Open localhost:${server.port}`, ArrowUpRightIcon, () => store.open(server))}
-											{@render more(server)}
-											{#if canStop(server)}
-												{@render action(
-													`Stop ${server.name}`,
-													SquareIcon,
-													() => store.request("stop", server),
-													store.isBusy(server, "control"),
-												)}
-											{/if}
-										</div>
-									</Table.Cell>
 								</tr>
 							{/each}
 						</Table.Body>
@@ -293,9 +398,13 @@
 			{/snippet}
 		</Drawer.Close>
 		{#if shown}
-			<ServerDetails server={shown} {store} class="min-h-0 flex-1 overflow-y-auto p-3" />
+			<ScrollArea class="min-h-0 flex-1">
+				<ServerDetails server={shown} {store} class="p-3" />
+			</ScrollArea>
 		{/if}
 	</Drawer.Content>
 </Drawer.Root>
 
 <ConfirmDialog {store} />
+<CleanUpDialog {store} />
+<RenameDialog {store} />

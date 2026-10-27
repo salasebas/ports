@@ -3,6 +3,21 @@ import type { ServerKind } from "./types";
 
 export type Metric = "memory" | "cpu";
 
+export type SortKey = "port" | "name" | "memory" | "cpu" | "uptime";
+
+export interface Sort {
+	key: SortKey;
+	descending: boolean;
+}
+
+export const sortKeys: { value: SortKey; label: string; descending: boolean }[] = [
+	{ value: "port", label: "Port", descending: false },
+	{ value: "name", label: "Name", descending: false },
+	{ value: "memory", label: "Memory", descending: true },
+	{ value: "cpu", label: "CPU", descending: true },
+	{ value: "uptime", label: "Uptime", descending: true },
+];
+
 /** Must match `folders::Editor` in the Rust backend. */
 export type Editor = "cursor" | "vscode" | "zed";
 
@@ -28,6 +43,18 @@ export const preferences = {
 	editor: new PersistedState<Editor>("ports.editor", "cursor"),
 	/** How often the backend samples the servers, in milliseconds; 0 only on request. */
 	refreshInterval: new PersistedState<number>("ports.refreshInterval", 2000),
+	/** Order of both lists, after the pinned servers. */
+	sort: new PersistedState<Sort>("ports.sort", { key: "port", descending: false }),
+	/** Groups the main window's table by project folder. */
+	groupByProject: new PersistedState("ports.groupByProject", false),
+	/** Servers listed first, by `serverKey`. */
+	pinned: new PersistedState<string[]>("ports.pinned", []),
+	/** Names the user gave ports, by port number. */
+	names: new PersistedState<Record<string, string>>("ports.names", {}),
+	/** Ports (`port:5000`) and processes (`process:ControlCenter`) left out of the lists. */
+	hidden: new PersistedState<string[]>("ports.hidden", []),
+	/** The user's choice of which servers clean up skips, by `serverKey`, over the default (databases). */
+	protection: new PersistedState<Record<string, boolean>>("ports.protection", {}),
 };
 
 export const refreshIntervals: { value: number; label: string }[] = [

@@ -10,12 +10,15 @@
 	import { Button } from "$lib/components/ui/button";
 	import { ScrollArea } from "$lib/components/ui/scroll-area";
 	import { Separator } from "$lib/components/ui/separator";
+	import CleanUpButton from "$lib/components/ports/clean-up-button.svelte";
+	import CleanUpDialog from "$lib/components/ports/clean-up-dialog.svelte";
 	import NoResults from "$lib/components/ports/no-results.svelte";
+	import RenameDialog from "$lib/components/ports/rename-dialog.svelte";
 	import ServerDetails from "$lib/components/ports/server-details.svelte";
 	import ServerFilter from "$lib/components/ports/server-filter.svelte";
 	import ServerRow from "$lib/components/ports/server-row.svelte";
 	import ServerSearch from "$lib/components/ports/server-search.svelte";
-	import SettingsMenu from "$lib/components/ports/settings-menu.svelte";
+	import SettingsButton from "$lib/components/ports/settings-button.svelte";
 	import ConfirmDialog from "$lib/components/ports/confirm-dialog.svelte";
 	import UsageSummary from "$lib/components/ports/usage-summary.svelte";
 	import { PortsStore } from "$lib/ports/ports-store.svelte";
@@ -83,7 +86,8 @@
 					Open Ports
 				</Button>
 				<div class="flex items-center gap-0.5">
-					<SettingsMenu side="top" />
+					<CleanUpButton {store} />
+					<SettingsButton />
 					<Button variant="ghost" size="icon-sm" aria-label="Quit Ports" onclick={() => invoke("quit_app")}>
 						<PowerIcon />
 					</Button>
@@ -94,3 +98,5 @@
 </div>
 
 <ConfirmDialog {store} />
+<CleanUpDialog {store} />
+<RenameDialog {store} />

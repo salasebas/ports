@@ -46,6 +46,9 @@
 	/* Notion's yellow (#d8a32f) is 2.3:1 on white; this keeps its hue at 4.6:1. */
 	--warning: #a8650f;
 	--surface-translucent: rgb(255 255 255 / 75%);
+	/* QR codes need dark modules on a light ground in both themes for phone cameras to read them. */
+	--qr: #000000;
+	--qr-background: #ffffff;
 	--port-1: #387dc9;
 	--port-2: #9a6bb4;
 	--port-3: #c14c8a;
@@ -92,6 +95,8 @@
 	--success: #46a171;
 	--warning: #d8a32f;
 	--surface-translucent: rgb(37 37 37 / 78%);
+	--qr: #000000;
+	--qr-background: #ffffff;
 	--port-1: #5e9fe8;
 	--port-2: #bf8eda;
 	--port-3: #df84a8;
@@ -113,6 +118,8 @@
 	--color-success: var(--success);
 	--color-warning: var(--warning);
 	--color-surface-translucent: var(--surface-translucent);
+	--color-qr: var(--qr);
+	--color-qr-background: var(--qr-background);
 	--color-port-1: var(--port-1);
 	--color-port-2: var(--port-2);
 	--color-port-3: var(--port-3);
@@ -162,6 +169,12 @@
 @layer base {
 	* {
 		@apply border-border outline-ring/50;
+	}
+	/* Native scrollbars that remain, e.g. in menus and dialogs, stay thin like the ScrollArea ones. */
+	html,
+	* {
+		scrollbar-width: thin;
+		scrollbar-color: var(--border) transparent;
 	}
 	body {
 		@apply bg-background text-foreground;
