@@ -3,7 +3,10 @@ use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
+use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_positioner::{Position, WindowExt};
+
+mod folders;
 
 const MAIN_WINDOW: &str = "main";
 const TRAY_WINDOW: &str = "tray";
@@ -48,13 +51,52 @@ fn quit_app(app: AppHandle) {
     app.exit(0);
 }
 
+/// ⌥⌘P on macOS, Ctrl+Alt+P elsewhere, toggles the popover like a tray click.
+#[cfg(desktop)]
+fn register_popover_shortcut(app: &tauri::App) -> tauri::Result<()> {
+    use tauri_plugin_global_shortcut::{
+        Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
+    };
+
+    let modifiers = if cfg!(target_os = "macos") {
+        Modifiers::SUPER | Modifiers::ALT
+    } else {
+        Modifiers::CONTROL | Modifiers::ALT
+    };
+    app.handle().plugin(
+        tauri_plugin_global_shortcut::Builder::new()
+            .with_handler(|app, _shortcut, event| {
+                if event.state == ShortcutState::Pressed {
+                    toggle_tray_window(app);
+                }
+            })
+            .build(),
+    )?;
+    // Another app may own the combination; Ports still works from the tray.
+    if let Err(error) = app
+        .global_shortcut()
+        .register(Shortcut::new(Some(modifiers), Code::KeyP))
+    {
+        eprintln!("could not register the popover shortcut: {error}");
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_positioner::init())
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            None,
+        ))
         .setup(|app| {
-            let quick_view = MenuItem::with_id(app, "quick-view", "Quick View", true, None::<&str>)?;
+            #[cfg(desktop)]
+            register_popover_shortcut(app)?;
+
+            let quick_view =
+                MenuItem::with_id(app, "quick-view", "Quick View", true, None::<&str>)?;
             let open = MenuItem::with_id(app, "open", "Open Ports", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit Ports", true, Some("CmdOrCtrl+Q"))?;
             let separator = PredefinedMenuItem::separator(app)?;
@@ -97,7 +139,13 @@ pub fn run() {
             }
             _ => {}
         })
-        .invoke_handler(tauri::generate_handler![open_main_window, quit_app])
+        .invoke_handler(tauri::generate_handler![
+            open_main_window,
+            quit_app,
+            folders::open_in_editor,
+            folders::open_in_terminal,
+            folders::reveal_folder,
+        ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 

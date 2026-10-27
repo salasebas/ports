@@ -1,0 +1,16 @@
+{
+	"$schema": "./node_modules/oxlint/configuration_schema.json",
+	"plugins": ["typescript", "unicorn", "import", "oxc"],
+	"env": {
+		"browser": true,
+		"es2024": true
+	},
+	"categories": {
+		"correctness": "error",
+		"suspicious": "warn"
+	},
+	"rules": {
+		"import/no-unassigned-import": ["warn", { "allow": ["**/*.css"] }]
+	},
+	"ignorePatterns": ["build/**", ".svelte-kit/**", "src-tauri/**", "src/lib/components/ui/**"]
+}

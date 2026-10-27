@@ -26,7 +26,9 @@ export interface Server {
 	cpuHistory: number[];
 }
 
-export interface SystemMemory {
+export interface SystemUsage {
 	totalBytes: number;
 	otherAppsBytes: number;
+	/** Share of the whole machine's CPU, like `Server.cpuPercent`. */
+	otherAppsCpuPercent: number;
 }

@@ -9,12 +9,13 @@
 	import { Button } from "$lib/components/ui/button";
 	import { ScrollArea } from "$lib/components/ui/scroll-area";
 	import { Separator } from "$lib/components/ui/separator";
-	import MemorySummary from "$lib/components/ports/memory-summary.svelte";
 	import NoResults from "$lib/components/ports/no-results.svelte";
 	import ServerDetails from "$lib/components/ports/server-details.svelte";
 	import ServerRow from "$lib/components/ports/server-row.svelte";
 	import ServerSearch from "$lib/components/ports/server-search.svelte";
 	import SettingsMenu from "$lib/components/ports/settings-menu.svelte";
+	import StopDialog from "$lib/components/ports/stop-dialog.svelte";
+	import UsageSummary from "$lib/components/ports/usage-summary.svelte";
 	import { PortsStore } from "$lib/ports/ports-store.svelte";
 
 	const store = new PortsStore();
@@ -27,7 +28,8 @@
 	});
 
 	function onkeydown(event: KeyboardEvent) {
-		if (event.key !== "Escape") return;
+		// Overlays such as the stop dialog handle Escape first and prevent default.
+		if (event.key !== "Escape" || event.defaultPrevented) return;
 		if (store.selected) store.select(null);
 		else getCurrentWindow().hide();
 	}
@@ -37,7 +39,7 @@
 
 <div
 	data-surface="tray"
-	class="bg-surface-translucent text-foreground grid h-screen overflow-hidden rounded-[14px] border *:col-start-1 *:row-start-1"
+	class="grid h-screen overflow-hidden rounded-[14px] border bg-surface-translucent text-foreground *:col-start-1 *:row-start-1"
 >
 	{#if store.selected}
 		<div class="flex min-h-0 flex-col" in:fly={slide(1)} out:fly={slide(1)}>
@@ -49,7 +51,7 @@
 		<div class="flex min-h-0 flex-col" in:fly={slide(-1)} out:fly={slide(-1)}>
 			<header class="flex flex-col gap-4 px-4 pt-3 pb-4">
 				<h1 class="text-center text-sm font-semibold">Ports</h1>
-				<MemorySummary {store} />
+				<UsageSummary {store} />
 				<ServerSearch bind:value={store.query} />
 			</header>
 
@@ -84,3 +86,5 @@
 		</div>
 	{/if}
 </div>
+
+<StopDialog {store} />

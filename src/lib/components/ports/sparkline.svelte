@@ -4,6 +4,7 @@
 	let {
 		values,
 		fromZero = false,
+		max,
 		threshold,
 		area = false,
 		class: className,
@@ -11,6 +12,8 @@
 		values: number[];
 		/** Scale from 0 instead of zooming into the data range. */
 		fromZero?: boolean;
+		/** Fixed 0 to `max` scale, so series with a known range (like percentages) compare across rows. */
+		max?: number;
 		/** Draws a dashed reference line, e.g. a memory warning limit. */
 		threshold?: number;
 		area?: boolean;
@@ -21,6 +24,7 @@
 	const H = 32;
 
 	const domain = $derived.by(() => {
+		if (max !== undefined) return { lo: 0, hi: max };
 		const hi = Math.max(...values, threshold ?? 0);
 		if (fromZero) return { lo: 0, hi: hi * 1.15 || 1 };
 		const lo = Math.min(...values);
@@ -37,12 +41,7 @@
 	);
 </script>
 
-<svg
-	viewBox="0 0 {W} {H}"
-	preserveAspectRatio="none"
-	class={cn("overflow-visible", className)}
-	aria-hidden="true"
->
+<svg viewBox="0 0 {W} {H}" preserveAspectRatio="none" class={cn("overflow-visible", className)} aria-hidden="true">
 	{#if threshold !== undefined}
 		<line
 			x1="0"

@@ -1,4 +1,4 @@
-@import 'tailwindcss';
+@import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn-svelte/tailwind.css";
 @import "@fontsource-variable/inter";
@@ -102,7 +102,7 @@
 }
 
 @theme inline {
-	--font-sans: system-ui, -apple-system, 'Inter Variable', sans-serif;
+	--font-sans: system-ui, -apple-system, "Inter Variable", sans-serif;
 	--color-success: var(--success);
 	--color-warning: var(--warning);
 	--color-surface-translucent: var(--surface-translucent);
@@ -165,8 +165,8 @@
 		scrollbar-gutter: stable;
 	}
 	/* The menu bar popover window is transparent so the native material shows through. */
-	html:has([data-surface='tray']),
-	html:has([data-surface='tray']) body {
+	html:has([data-surface="tray"]),
+	html:has([data-surface="tray"]) body {
 		background: transparent;
 		scrollbar-gutter: auto;
 	}

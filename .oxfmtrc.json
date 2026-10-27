@@ -1,0 +1,21 @@
+{
+	"$schema": "./node_modules/oxfmt/configuration_schema.json",
+	"useTabs": true,
+	"printWidth": 120,
+	"svelte": true,
+	"sortTailwindcss": {
+		"stylesheet": "./src/routes/layout.css",
+		"functions": ["cn", "tv"]
+	},
+	"ignorePatterns": [
+		"build/**",
+		".svelte-kit/**",
+		"src-tauri/**",
+		"src/lib/components/ui/**",
+		".agents/**",
+		".claude/**",
+		".vscode/**",
+		"bun.lock",
+		"skills-lock.json"
+	]
+}

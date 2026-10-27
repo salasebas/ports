@@ -1,8 +1,21 @@
+import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "svelte-sonner";
 import { serverUrl } from "./format";
-import { mockServers, mockSystemMemory } from "./mock";
-import type { Server, SystemMemory } from "./types";
+import { mockServers, mockSystemUsage } from "./mock";
+import { preferences } from "./preferences.svelte";
+import type { Server, SystemUsage } from "./types";
+
+/** Runs a system action and reports its failure, e.g. a missing folder or editor, as a toast. */
+async function attempt(action: Promise<unknown>): Promise<boolean> {
+	try {
+		await action;
+		return true;
+	} catch (error) {
+		toast.error(String(error));
+		return false;
+	}
+}
 
 /**
  * UI state for the server list. Data comes from mocks for now; the Rust
@@ -10,9 +23,11 @@ import type { Server, SystemMemory } from "./types";
  */
 export class PortsStore {
 	servers = $state.raw<Server[]>(mockServers());
-	system = $state.raw<SystemMemory>(mockSystemMemory);
+	system = $state.raw<SystemUsage>(mockSystemUsage);
 	query = $state("");
 	selectedPort = $state<number | null>(null);
+	/** Server waiting for the user to confirm the stop. */
+	pendingStop = $state.raw<Server | null>(null);
 
 	filtered = $derived.by(() => {
 		const q = this.query.trim().toLowerCase();
@@ -41,6 +56,20 @@ export class PortsStore {
 		await openUrl(serverUrl(server.port));
 	};
 
+	copyUrl = async (server: Server) => {
+		const url = serverUrl(server.port);
+		if (await attempt(navigator.clipboard.writeText(url))) {
+			toast.success("Copied", { id: "copy-url", description: url });
+		}
+	};
+
+	openInEditor = (server: Server) =>
+		attempt(invoke("open_in_editor", { folder: server.folder, editor: preferences.editor.current }));
+
+	openInTerminal = (server: Server) => attempt(invoke("open_in_terminal", { folder: server.folder }));
+
+	revealFolder = (server: Server) => attempt(invoke("reveal_folder", { folder: server.folder }));
+
 	restart = (server: Server) => {
 		toast.success(`Restarted ${server.name}`, {
 			id: `restart-${server.port}`,
@@ -48,18 +77,19 @@ export class PortsStore {
 		});
 	};
 
+	/** Entry point for every stop button: asks first when the preference is on. */
+	requestStop = (server: Server) => {
+		if (preferences.confirmStop.current) this.pendingStop = server;
+		else this.stop(server);
+	};
+
 	stop = (server: Server) => {
+		this.pendingStop = null;
 		this.servers = this.servers.filter((s) => s.port !== server.port);
 		if (this.selectedPort === server.port) this.selectedPort = null;
 		toast.success(`Stopped ${server.name}`, {
 			id: `stop-${server.port}`,
 			description: `:${server.port} is free`,
-			action: {
-				label: "Undo",
-				onClick: () => {
-					this.servers = [...this.servers, server].sort((a, b) => a.port - b.port);
-				},
-			},
 		});
 	};
 }

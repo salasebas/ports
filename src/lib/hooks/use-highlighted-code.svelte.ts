@@ -1,8 +1,4 @@
-import {
-	loadHighlighter,
-	type Highlighter,
-	type HighlightedLine,
-} from "$lib/highlighter.js";
+import { loadHighlighter, type Highlighter, type HighlightedLine } from "$lib/highlighter.js";
 import type { GrammarState } from "shiki/core";
 
 /**
@@ -66,7 +62,7 @@ export function useHighlightedCode(value: () => string, language: () => string) 
 		let next = done;
 
 		if (next.highlighter !== highlighter || !code.startsWith(next.text)) {
-			next = { highlighter, text:"", lines: [] };
+			next = { highlighter, text: "", lines: [] };
 		}
 
 		const end = code.lastIndexOf("\n") + 1;

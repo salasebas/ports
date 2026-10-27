@@ -5,7 +5,11 @@
 	import { prefersReducedMotion } from "svelte/motion";
 	import { fade } from "svelte/transition";
 	import ArrowUpRightIcon from "@lucide/svelte/icons/arrow-up-right";
+	import CodeIcon from "@lucide/svelte/icons/code";
+	import CopyIcon from "@lucide/svelte/icons/copy";
 	import CpuIcon from "@lucide/svelte/icons/cpu";
+	import EllipsisIcon from "@lucide/svelte/icons/ellipsis";
+	import FolderOpenIcon from "@lucide/svelte/icons/folder-open";
 	import HashIcon from "@lucide/svelte/icons/hash";
 	import InfoIcon from "@lucide/svelte/icons/info";
 	import LayersIcon from "@lucide/svelte/icons/layers";
@@ -13,22 +17,27 @@
 	import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
 	import ServerIcon from "@lucide/svelte/icons/server";
 	import SquareIcon from "@lucide/svelte/icons/square";
+	import SquareTerminalIcon from "@lucide/svelte/icons/square-terminal";
 	import XIcon from "@lucide/svelte/icons/x";
 	import { Badge } from "$lib/components/ui/badge";
 	import { Button } from "$lib/components/ui/button";
 	import * as Card from "$lib/components/ui/card";
 	import * as Drawer from "$lib/components/ui/drawer";
+	import * as DropdownMenu from "$lib/components/ui/dropdown-menu";
 	import * as Table from "$lib/components/ui/table";
 	import * as Tooltip from "$lib/components/ui/tooltip";
-	import MemorySummary from "$lib/components/ports/memory-summary.svelte";
 	import NoResults from "$lib/components/ports/no-results.svelte";
 	import PortLabel from "$lib/components/ports/port-label.svelte";
 	import ServerDetails from "$lib/components/ports/server-details.svelte";
 	import ServerSearch from "$lib/components/ports/server-search.svelte";
 	import SettingsMenu from "$lib/components/ports/settings-menu.svelte";
 	import Sparkline from "$lib/components/ports/sparkline.svelte";
+	import StopDialog from "$lib/components/ports/stop-dialog.svelte";
+	import UsageSummary from "$lib/components/ports/usage-summary.svelte";
 	import { formatBytesText, serverActivity } from "$lib/ports/format";
+	import { fileManagerName } from "$lib/platform";
 	import { PortsStore } from "$lib/ports/ports-store.svelte";
+	import { editorLabel, preferences } from "$lib/ports/preferences.svelte";
 	import type { Server, ServerStatus } from "$lib/ports/types";
 	import { cn } from "$lib/utils";
 
@@ -77,8 +86,51 @@
 	</Tooltip.Root>
 {/snippet}
 
+{#snippet more(server: Server)}
+	<DropdownMenu.Root>
+		<DropdownMenu.Trigger>
+			{#snippet child({ props })}
+				<Button
+					{...props}
+					variant="ghost"
+					size="icon-sm"
+					aria-label="More actions for {server.name}"
+					onclick={(event: MouseEvent) => event.stopPropagation()}
+				>
+					<EllipsisIcon />
+				</Button>
+			{/snippet}
+		</DropdownMenu.Trigger>
+		<DropdownMenu.Content align="end" class="w-48">
+			{#if server.folder}
+				<DropdownMenu.Item onSelect={() => store.openInEditor(server)}>
+					<CodeIcon />
+					Open in {editorLabel(preferences.editor.current)}
+				</DropdownMenu.Item>
+				<DropdownMenu.Item onSelect={() => store.openInTerminal(server)}>
+					<SquareTerminalIcon />
+					Open in Terminal
+				</DropdownMenu.Item>
+				<DropdownMenu.Item onSelect={() => store.revealFolder(server)}>
+					<FolderOpenIcon />
+					Show in {fileManagerName}
+				</DropdownMenu.Item>
+				<DropdownMenu.Separator />
+			{/if}
+			<DropdownMenu.Item onSelect={() => store.copyUrl(server)}>
+				<CopyIcon />
+				Copy URL
+			</DropdownMenu.Item>
+			<DropdownMenu.Item onSelect={() => showDetails(server)}>
+				<InfoIcon />
+				Details
+			</DropdownMenu.Item>
+		</DropdownMenu.Content>
+	</DropdownMenu.Root>
+{/snippet}
+
 {#snippet head(label: string, Icon: Component, className = "")}
-	<Table.Head class={cn("text-muted-foreground h-10 content-center text-xs font-normal", className)}>
+	<Table.Head class={cn("h-10 content-center text-xs font-normal text-muted-foreground", className)}>
 		<span class={cn("inline-flex items-center gap-1.5", className.includes("text-right") && "justify-end")}>
 			<Icon class="size-3.5 opacity-70" />
 			{label}
@@ -91,7 +143,7 @@
 <div class="flex min-h-screen flex-col">
 	<header
 		class={cn(
-			"bg-background/80 sticky top-0 z-10 flex flex-wrap items-center gap-3 border-b px-6 py-3 backdrop-blur-xl backdrop-saturate-150 transition-colors duration-200",
+			"sticky top-0 z-10 flex flex-wrap items-center gap-3 border-b bg-background/80 px-6 py-3 backdrop-blur-xl backdrop-saturate-150 transition-colors duration-200",
 			scrollY > 0 ? "border-border" : "border-transparent",
 		)}
 	>
@@ -108,25 +160,21 @@
 
 	<main class="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-6 p-6">
 		<Card.Root>
-			<Card.Header>
-				<Card.Title>Memory</Card.Title>
-				<Card.Description>Used by {store.servers.length} servers listening on this machine</Card.Description>
-			</Card.Header>
 			<Card.Content>
-				<MemorySummary {store} />
+				<UsageSummary {store} />
 			</Card.Content>
 		</Card.Root>
 
 		{#if store.servers.length}
 			<!-- Height follows the content with a transition so rows sliding into place are not clipped. -->
 			<div
-				class="bg-card overflow-hidden rounded-2xl border transition-[height] duration-200 ease-out motion-reduce:transition-none"
+				class="overflow-hidden rounded-2xl border bg-card transition-[height] duration-200 ease-out motion-reduce:transition-none"
 				style:height={tableHeight ? `${tableHeight + 2}px` : undefined}
 			>
 				<div bind:clientHeight={tableHeight} class="[&>[data-slot=table-container]]:overflow-visible">
 					<!-- Rows are grids on shared tracks so a row leaving the flow mid-animation keeps its columns. -->
 					<Table.Root class="grid [--cols:7rem_minmax(0,1fr)_9rem_5rem_11rem_8rem]">
-						<Table.Header class="bg-muted/60 grid">
+						<Table.Header class="grid bg-muted/60">
 							<Table.Row class="grid grid-cols-(--cols) items-center hover:bg-transparent">
 								{@render head("Port", HashIcon, "pl-5")}
 								{@render head("Server", ServerIcon)}
@@ -142,7 +190,7 @@
 								<!-- A plain <tr> because animate: and transitions need an element, not a component. -->
 								<tr
 									data-slot="table-row"
-									class="group/row hover:bg-muted/60 data-[state=selected]:bg-muted grid cursor-default grid-cols-(--cols) items-center border-b transition-colors"
+									class="group/row grid cursor-default grid-cols-(--cols) items-center border-b transition-colors hover:bg-muted/60 data-[state=selected]:bg-muted"
 									data-state={store.selectedPort === server.port ? "selected" : undefined}
 									onclick={() => showDetails(server)}
 									animate:flip={{ duration: 220 * motion, easing: cubicOut }}
@@ -154,15 +202,11 @@
 									</Table.Cell>
 									<Table.Cell class="min-w-0">
 										<div class="flex items-center gap-3">
-											<span
-												class={cn("size-2 shrink-0 rounded-full", statusDot[server.status])}
-												title={server.status}
+											<span class={cn("size-2 shrink-0 rounded-full", statusDot[server.status])} title={server.status}
 											></span>
 											<div class="flex min-w-0 flex-col gap-0.5">
 												<span class="truncate font-medium">{server.name}</span>
-												<span
-													class={cn("truncate text-xs", attention ? "text-warning" : "text-muted-foreground")}
-												>
+												<span class={cn("truncate text-xs", attention ? "text-warning" : "text-muted-foreground")}>
 													{server.branch ? `${server.branch} · ` : ""}{serverActivity(server)}
 												</span>
 											</div>
@@ -171,7 +215,7 @@
 									<Table.Cell>
 										<div class="flex flex-col gap-0.5">
 											<span>{server.framework ?? server.process}</span>
-											<span class="text-muted-foreground font-mono text-xs">PID {server.pid}</span>
+											<span class="font-mono text-xs text-muted-foreground">PID {server.pid}</span>
 										</div>
 									</Table.Cell>
 									<Table.Cell class="text-right font-mono tabular-nums">
@@ -190,11 +234,11 @@
 									</Table.Cell>
 									<Table.Cell class="pr-5">
 										<div
-											class="flex justify-end gap-0.5 opacity-0 transition-opacity duration-150 group-hover/row:opacity-100 focus-within:opacity-100"
+											class="flex justify-end gap-0.5 opacity-0 transition-opacity duration-150 will-change-[opacity] group-hover/row:opacity-100 focus-within:opacity-100 has-data-[state=open]:opacity-100"
 										>
 											{@render action(`Open localhost:${server.port}`, ArrowUpRightIcon, () => store.open(server))}
-											{@render action("Details", InfoIcon, () => showDetails(server))}
-											{@render action(`Stop ${server.name}`, SquareIcon, () => store.stop(server))}
+											{@render more(server)}
+											{@render action(`Stop ${server.name}`, SquareIcon, () => store.requestStop(server))}
 										</div>
 									</Table.Cell>
 								</tr>
@@ -237,3 +281,5 @@
 		{/if}
 	</Drawer.Content>
 </Drawer.Root>
+
+<StopDialog {store} />

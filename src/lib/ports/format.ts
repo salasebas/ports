@@ -16,6 +16,10 @@ export function formatBytesText(bytes: number): string {
 	return `${value} ${unit}`;
 }
 
+export function formatPercent(percent: number): string {
+	return `${Math.round(percent)}%`;
+}
+
 export function formatDuration(ms: number): string {
 	const minutes = Math.floor(ms / 60_000);
 	if (minutes < 1) return "now";

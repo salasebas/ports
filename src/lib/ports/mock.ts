@@ -1,4 +1,4 @@
-import type { Server, SystemMemory } from "./types";
+import type { Server, SystemUsage } from "./types";
 
 const MB = 1024 ** 2;
 const GB = 1024 ** 3;
@@ -136,10 +136,11 @@ export function mockServers(now = Date.now()): Server[] {
 			cpuHistory: cpuSeries(0.3, 6),
 		},
 	];
-	return servers.sort((a, b) => a.port - b.port);
+	return servers.toSorted((a, b) => a.port - b.port);
 }
 
-export const mockSystemMemory: SystemMemory = {
+export const mockSystemUsage: SystemUsage = {
 	totalBytes: 16 * GB,
 	otherAppsBytes: 7 * GB,
+	otherAppsCpuPercent: 14,
 };
