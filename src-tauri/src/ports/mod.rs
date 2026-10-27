@@ -13,6 +13,7 @@ mod sampler;
 mod sockets;
 
 pub use alerts::AlertSettings;
+use containers::ContainerTarget;
 use control::Target;
 
 use std::collections::HashSet;
@@ -41,6 +42,12 @@ const INTERVALS_MS: RangeInclusive<u64> = 500..=60_000;
 /// While every window is hidden, sampling slows down instead of stopping, so
 /// idle times and memory leaks stay accurate for the next time Ports opens.
 const HIDDEN_INTERVAL_MS: u64 = 30_000;
+
+/// A control target resolved once: the process tree it ends, or a container.
+enum Located {
+    Process(Box<control::Service>),
+    Container(ContainerTarget),
+}
 
 /// Samples the servers on an interval and keeps the latest snapshot, so
 /// every window shows the same data and history outlives a closed popover.
@@ -212,11 +219,17 @@ impl Monitor {
         &self,
         app: &AppHandle,
         target: &Target,
-        work: impl FnOnce() -> Result<(), String>,
+        work: impl FnOnce(Located) -> Result<(), String>,
     ) -> Result<Snapshot, String> {
-        let keys = match target {
-            Target::Process(target) => control::scope(target)?,
-            Target::Container(_) => vec![target.key()],
+        let located = match target {
+            Target::Process(target) => {
+                Located::Process(Box::new(control::Service::locate(target)?))
+            }
+            Target::Container(container) => Located::Container(container.clone()),
+        };
+        let keys = match &located {
+            Located::Process(service) => service.keys(),
+            Located::Container(_) => vec![target.key()],
         };
         {
             let mut stopping = lock(&self.stopping);
@@ -225,7 +238,7 @@ impl Monitor {
             }
             stopping.extend(keys.iter().cloned());
         }
-        let result = work();
+        let result = work(located);
         let snapshot = self.publish(app);
         lock(&self.stopping).retain(|key| !keys.contains(key));
         result?;
@@ -332,58 +345,65 @@ pub async fn stop_server(
 ) -> Result<Snapshot, String> {
     blocking(move || {
         let monitor = app.state::<Monitor>();
-        monitor.control(&app, &target, || {
-            if only_if_idle.unwrap_or(false) {
-                let fresh = monitor.sample()?;
-                let selected = fresh
-                    .servers
-                    .iter()
-                    .find(|server| {
-                        server.target.as_ref().is_some_and(|current| {
-                            current.key() == target.key() && current.port() == target.port()
-                        })
-                    })
-                    .ok_or("The idle server changed; refresh before cleaning up")?;
-                let affected = fresh.servers.iter().filter(|other| {
-                    other
-                        .target
-                        .as_ref()
-                        .is_some_and(|current| current.key() == target.key())
-                        || other.resources.iter().any(|resource| {
-                            selected
-                                .resources
-                                .iter()
-                                .any(|ours| ours.process == resource.process)
-                        })
-                });
-                if affected.into_iter().any(|server| {
-                    server.status != history::Status::Idle
-                        || !allowed_ids
-                            .as_ref()
-                            .is_some_and(|ids| ids.contains(&server.id))
-                }) {
-                    return Err(
-                        "The service is active or its affected ports changed; it was left running"
-                            .into(),
-                    );
-                }
-            }
-            match &target {
-                Target::Process(target) => control::stop(target),
-                Target::Container(target) => containers::stop(&monitor.home, target),
-            }
+        // Sample before locating, so the stop ends what the idle check saw.
+        if only_if_idle.unwrap_or(false) {
+            ensure_idle(&monitor, &target, allowed_ids.as_deref())?;
+        }
+        monitor.control(&app, &target, |located| match located {
+            Located::Process(service) => service.stop(),
+            Located::Container(target) => containers::stop(&monitor.home, &target),
         })
     })
     .await
+}
+
+/// Clean up stops a service only if every port it would end is still idle
+/// and was offered to the user.
+fn ensure_idle(
+    monitor: &Monitor,
+    target: &Target,
+    allowed_ids: Option<&[String]>,
+) -> Result<(), String> {
+    let fresh = monitor.sample()?;
+    let selected = fresh
+        .servers
+        .iter()
+        .find(|server| {
+            server.target.as_ref().is_some_and(|current| {
+                current.key() == target.key() && current.port() == target.port()
+            })
+        })
+        .ok_or("The idle server changed; refresh before cleaning up")?;
+    let affected = fresh.servers.iter().filter(|other| {
+        other
+            .target
+            .as_ref()
+            .is_some_and(|current| current.key() == target.key())
+            || other.resources.iter().any(|resource| {
+                selected
+                    .resources
+                    .iter()
+                    .any(|ours| ours.process == resource.process)
+            })
+    });
+    if affected.into_iter().any(|server| {
+        server.status != history::Status::Idle
+            || !allowed_ids.is_some_and(|ids| ids.contains(&server.id))
+    }) {
+        return Err(
+            "The service is active or its affected ports changed; it was left running".into(),
+        );
+    }
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn restart_server(app: AppHandle, target: Target) -> Result<Snapshot, String> {
     blocking(move || {
         let monitor = app.state::<Monitor>();
-        monitor.control(&app, &target, || match &target {
-            Target::Process(target) => control::restart(target),
-            Target::Container(target) => containers::restart(&monitor.home, target),
+        monitor.control(&app, &target, |located| match located {
+            Located::Process(service) => service.restart(),
+            Located::Container(target) => containers::restart(&monitor.home, &target),
         })
     })
     .await

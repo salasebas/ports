@@ -67,14 +67,19 @@ pub fn is_exposed(addresses: &[IpAddr]) -> bool {
 }
 
 /// The URL another device opens the server at, when it can reach it.
-pub fn lan_url(port: u16, addresses: &[IpAddr], lan_ip: Option<IpAddr>) -> Option<String> {
-    // `::` is dual-stack by default on macOS and Linux (Node's `listen(port)`),
-    // so it also answers on the IPv4 LAN address; `0.0.0.0` only on IPv4.
+/// A `::` socket answers IPv4 too (Node's `listen(port)`) unless `v6only`.
+pub fn lan_url(
+    port: u16,
+    addresses: &[IpAddr],
+    lan_ip: Option<IpAddr>,
+    v6only: bool,
+) -> Option<String> {
     let ip = lan_ip
         .filter(|lan| {
-            addresses
-                .iter()
-                .any(|bound| bound.is_unspecified() && (bound.is_ipv6() || lan.is_ipv4()))
+            addresses.iter().any(|bound| {
+                bound.is_unspecified()
+                    && (bound.is_ipv4() == lan.is_ipv4() || bound.is_ipv6() && !v6only)
+            })
         })
         .or_else(|| {
             addresses
@@ -110,7 +115,7 @@ mod tests {
     fn loopback_stays_on_this_machine() {
         let vite = ips(&["127.0.0.1", "::1"]);
         assert!(!is_exposed(&vite));
-        assert_eq!(lan_url(5173, &vite, LAN), None);
+        assert_eq!(lan_url(5173, &vite, LAN, false), None);
     }
 
     #[test]
@@ -118,17 +123,28 @@ mod tests {
         for wildcard in [ips(&["0.0.0.0"]), ips(&["::"]), ips(&["0.0.0.0", "::"])] {
             assert!(is_exposed(&wildcard));
             assert_eq!(
-                lan_url(5173, &wildcard, LAN).as_deref(),
+                lan_url(5173, &wildcard, LAN, false).as_deref(),
                 Some("http://192.168.1.20:5173")
             );
         }
-        assert_eq!(lan_url(5173, &ips(&["0.0.0.0"]), None), None);
+        assert_eq!(lan_url(5173, &ips(&["0.0.0.0"]), None, false), None);
         assert_eq!(
-            lan_url(5173, &ips(&["0.0.0.0"]), Some("fd00::5".parse().unwrap())),
+            lan_url(
+                5173,
+                &ips(&["0.0.0.0"]),
+                Some("fd00::5".parse().unwrap()),
+                false
+            ),
             None
         );
+        // nginx's `listen [::]` is IPv6-only: the IPv4 LAN address can't reach it.
+        assert_eq!(lan_url(5173, &ips(&["::"]), LAN, true), None);
         assert_eq!(
-            lan_url(5173, &ips(&["::"]), Some("fd00::5".parse().unwrap())).as_deref(),
+            lan_url(5173, &ips(&["0.0.0.0", "::"]), LAN, true).as_deref(),
+            Some("http://192.168.1.20:5173")
+        );
+        assert_eq!(
+            lan_url(5173, &ips(&["::"]), Some("fd00::5".parse().unwrap()), true).as_deref(),
             Some("http://[fd00::5]:5173")
         );
     }
@@ -138,11 +154,11 @@ mod tests {
         let bound = ips(&["10.0.0.5"]);
         assert!(is_exposed(&bound));
         assert_eq!(
-            lan_url(3000, &bound, LAN).as_deref(),
+            lan_url(3000, &bound, LAN, false).as_deref(),
             Some("http://10.0.0.5:3000")
         );
         assert_eq!(
-            lan_url(3000, &ips(&["fd00::5"]), LAN).as_deref(),
+            lan_url(3000, &ips(&["fd00::5"]), LAN, false).as_deref(),
             Some("http://[fd00::5]:3000")
         );
     }

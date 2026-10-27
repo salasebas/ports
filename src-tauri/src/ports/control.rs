@@ -10,7 +10,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::ffi::OsString;
 use std::net::IpAddr;
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -53,40 +53,66 @@ impl Target {
     }
 }
 
-/// Reserve every affected process, since a parent and child listener can
-/// have different roots while their destructive scopes still overlap.
-pub fn scope(target: &ProcessTarget) -> Result<Vec<String>, String> {
-    let mut keys = vec![format!("process:{}", target.root.key())];
-    if let Some((job, _)) = locate(target)? {
-        keys.extend(
-            job.pids
-                .into_iter()
-                .filter_map(ProcessIdentity::read)
-                .map(|id| format!("process:{}", id.key())),
-        );
+/// A process target checked against the live system once, then reserved
+/// and stopped or restarted from that same lookup.
+pub struct Service {
+    target: ProcessTarget,
+    job: Option<(Job, System)>,
+}
+
+impl Service {
+    pub fn locate(target: &ProcessTarget) -> Result<Self, String> {
+        Ok(Self {
+            target: target.clone(),
+            job: locate(target)?,
+        })
     }
-    keys.sort();
-    keys.dedup();
-    Ok(keys)
+
+    /// Every affected process, since a parent and child listener can have
+    /// different roots while their destructive scopes still overlap.
+    pub fn keys(&self) -> Vec<String> {
+        let mut keys = vec![format!("process:{}", self.target.root.key())];
+        if let Some((job, _)) = &self.job {
+            keys.extend(
+                job.pids
+                    .iter()
+                    .filter_map(|pid| ProcessIdentity::read(*pid))
+                    .map(|id| format!("process:{}", id.key())),
+            );
+        }
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
+    pub fn stop(self) -> Result<(), String> {
+        let Some((job, system)) = self.job else {
+            return Ok(());
+        };
+        end(&job, &system, &self.target)?;
+        ensure_free(&self.target)
+    }
+
+    pub fn restart(self) -> Result<(), String> {
+        let Some((job, mut system)) = self.job else {
+            return Err(format!("Nothing listens on :{} anymore", self.target.port));
+        };
+        let launch = Launch::capture(job.root, &mut system)?;
+        end(&job, &system, &self.target)?;
+        ensure_free(&self.target)?;
+        let child = launch.spawn()?;
+        wait_until_listening(&self.target, child, &launch.name, LISTEN_TIMEOUT)
+    }
 }
 
-pub fn stop(target: &ProcessTarget) -> Result<(), String> {
-    let Some((job, system)) = locate(target)? else {
-        return Ok(());
-    };
-    end(&job, &system, target)?;
-    ensure_free(target)
+#[cfg(test)]
+fn stop(target: &ProcessTarget) -> Result<(), String> {
+    Service::locate(target)?.stop()
 }
 
-pub fn restart(target: &ProcessTarget) -> Result<(), String> {
-    let Some((job, mut system)) = locate(target)? else {
-        return Err(format!("Nothing listens on :{} anymore", target.port));
-    };
-    let launch = Launch::capture(job.root, &mut system)?;
-    end(&job, &system, target)?;
-    ensure_free(target)?;
-    let child = launch.spawn()?;
-    wait_until_listening(target, child, &launch.name, LISTEN_TIMEOUT)
+#[cfg(test)]
+fn restart(target: &ProcessTarget) -> Result<(), String> {
+    Service::locate(target)?.restart()
 }
 
 const FORWARDERS: [&str; 8] = [
@@ -197,6 +223,32 @@ fn end(job: &Job, system: &System, selected: &ProcessTarget) -> Result<(), Strin
             }
         })
         .collect();
+    // A shared group (an editor's, the terminal's) can't be swept, but a child
+    // that a shutdown handler forks keeps the group and the program when its
+    // parent exits. Daemons the group's app starts meanwhile run other programs.
+    let shared_group = job
+        .group
+        .is_none()
+        .then(|| OsGroups.pgid(selected.listener.pid))
+        .flatten()
+        .filter(|group| *group > 1);
+    let earlier: BTreeSet<_> = shared_group
+        .map(|group| {
+            system
+                .processes()
+                .keys()
+                .map(|pid| pid.as_u32())
+                .filter(|pid| OsGroups.pgid(*pid) == Some(group))
+                .filter_map(ProcessIdentity::read)
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut programs: HashSet<_> = job
+        .pids
+        .iter()
+        .filter_map(|pid| system.process(Pid::from_u32(*pid))?.exe())
+        .map(Path::to_path_buf)
+        .collect();
     for (signal, grace) in [(libc::SIGTERM, TERM_GRACE), (libc::SIGKILL, KILL_GRACE)] {
         let deadline = Instant::now() + grace;
         let mut sent = HashSet::new();
@@ -207,7 +259,6 @@ fn end(job: &Job, system: &System, selected: &ProcessTarget) -> Result<(), Strin
             let leader_now = ProcessIdentity::read(leader.pid);
             let group_not_reused = leader_now.as_ref().is_none_or(|id| id == &leader);
             // Children forked while a known member still lives are its descendants.
-            // Only an isolated group also catches one already reparented.
             let descendants: BTreeSet<_> = targets
                 .iter()
                 .filter(|target| target.is_current())
@@ -221,11 +272,24 @@ fn end(job: &Job, system: &System, selected: &ProcessTarget) -> Result<(), Strin
                         .is_some_and(|group| OsGroups.pgid(pid) == Some(group))
                     && OsGroups.sid(pid) == session
                     && process.user_id().map(|uid| **uid) == uid;
-                if (in_group || descendants.contains(&pid))
+                // New since the shutdown began and orphaned out of the group:
+                // other members' children keep a parent inside it.
+                let escaped = shared_group.is_some_and(|group| {
+                    process.exe().is_some_and(|exe| programs.contains(exe))
+                        && OsGroups.pgid(pid) == Some(group)
+                        && process
+                            .parent()
+                            .is_none_or(|parent| OsGroups.pgid(parent.as_u32()) != Some(group))
+                        && OsGroups.sid(pid) == session
+                        && process.user_id().map(|uid| **uid) == uid
+                        && ProcessIdentity::read(pid).is_some_and(|id| !earlier.contains(&id))
+                });
+                if (in_group || escaped || descendants.contains(&pid))
                     && process.status() != ProcessStatus::Zombie
                     && let Some(identity) = ProcessIdentity::read(pid)
                 {
                     targets.insert(identity);
+                    programs.extend(process.exe().map(Path::to_path_buf));
                 }
             }
             let living = alive(&targets);
@@ -536,7 +600,7 @@ time.sleep(60)
         let port = free_port();
         let (mut server, worker) = start(port, dir.path(), &[]);
         let selected = target(port, server.id());
-        let keys = scope(&selected).unwrap();
+        let keys = Service::locate(&selected).unwrap().keys();
         let worker_key = format!("process:{}", ProcessIdentity::read(worker).unwrap().key());
         stop(&selected).unwrap();
         server.wait().unwrap();
@@ -592,11 +656,17 @@ time.sleep(60)
         assert!(!children_alive);
     }
 
+    /// Servers spawned without their own group share the test runner's, so
+    /// one test's shutdown sweep could otherwise end the other's child.
+    static SHARED_GROUP: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
-    fn shutdown_cannot_leave_a_child_forked_by_a_term_handler_in_its_group() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("forked");
-        let code = r#"import os,signal,socket,time,sys
+    fn shutdown_cannot_leave_a_child_forked_by_a_term_handler_in_private_or_shared_groups() {
+        let _shared = SHARED_GROUP.lock().unwrap_or_else(|e| e.into_inner());
+        for private in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("forked");
+            let code = r#"import os,signal,socket,time,sys
 s=socket.socket();s.bind(('127.0.0.1',0));s.listen()
 def term(*args):
  p=os.fork()
@@ -609,35 +679,40 @@ signal.signal(signal.SIGTERM,term)
 print(s.getsockname()[1],flush=True)
 time.sleep(60)
 "#;
-        let mut server = Command::new("python3")
-            .args(["-c", code, path.to_str().unwrap()])
-            .stdout(Stdio::piped())
-            .process_group(0)
-            .spawn()
-            .unwrap();
-        let mut line = String::new();
-        BufReader::new(server.stdout.take().unwrap())
-            .read_line(&mut line)
-            .unwrap();
-        let port = line.trim().parse().unwrap();
-        let result = stop(&target(port, server.id()));
-        let forked = std::fs::read_to_string(path)
-            .ok()
-            .map(|pid| pid.parse::<u32>().unwrap());
-        let child_alive = forked.is_some_and(running);
-        if let Some(pid) = forked {
-            unsafe {
-                libc::kill(pid as i32, libc::SIGKILL);
+            let mut command = Command::new("python3");
+            command
+                .args(["-c", code, path.to_str().unwrap()])
+                .stdout(Stdio::piped());
+            // Without its own group, the server shares the test runner's.
+            if private {
+                command.process_group(0);
             }
+            let mut server = command.spawn().unwrap();
+            let mut line = String::new();
+            BufReader::new(server.stdout.take().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let port = line.trim().parse().unwrap();
+            let result = stop(&target(port, server.id()));
+            let forked = std::fs::read_to_string(path)
+                .ok()
+                .map(|pid| pid.parse::<u32>().unwrap());
+            let child_alive = forked.is_some_and(running);
+            if let Some(pid) = forked {
+                unsafe {
+                    libc::kill(pid as i32, libc::SIGKILL);
+                }
+            }
+            let _ = server.kill();
+            server.wait().unwrap();
+            result.unwrap();
+            assert!(!child_alive, "private group: {private}");
         }
-        let _ = server.kill();
-        server.wait().unwrap();
-        result.unwrap();
-        assert!(!child_alive);
     }
 
     #[test]
     fn a_server_in_a_shared_group_still_gets_to_shut_down_gracefully() {
+        let _shared = SHARED_GROUP.lock().unwrap_or_else(|e| e.into_inner());
         // Spawned without its own group, the server shares the test runner's
         // group, like a dev server started by an editor task.
         let dir = tempfile::tempdir().unwrap();
