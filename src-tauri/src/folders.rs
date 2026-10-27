@@ -53,9 +53,9 @@ fn existing_dir(home: &Path, folder: &str) -> Result<PathBuf, String> {
 
 /// `open -a` reports a missing app through its exit status, so wait for it.
 #[cfg(target_os = "macos")]
-async fn open_with(program: &str, path: &PathBuf) -> Result<(), String> {
+async fn open_with(program: &str, path: &Path) -> Result<(), String> {
     let program_owned = program.to_string();
-    let path = path.clone();
+    let path = path.to_path_buf();
     let status = tauri::async_runtime::spawn_blocking(move || {
         Command::new("open")
             .args(["-a", &program_owned])
