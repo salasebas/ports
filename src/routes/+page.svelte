@@ -1,156 +1,239 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
+	import type { Component } from "svelte";
+	import { flip } from "svelte/animate";
+	import { cubicOut } from "svelte/easing";
+	import { prefersReducedMotion } from "svelte/motion";
+	import { fade } from "svelte/transition";
+	import ArrowUpRightIcon from "@lucide/svelte/icons/arrow-up-right";
+	import CpuIcon from "@lucide/svelte/icons/cpu";
+	import HashIcon from "@lucide/svelte/icons/hash";
+	import InfoIcon from "@lucide/svelte/icons/info";
+	import LayersIcon from "@lucide/svelte/icons/layers";
+	import MemoryStickIcon from "@lucide/svelte/icons/memory-stick";
+	import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
+	import ServerIcon from "@lucide/svelte/icons/server";
+	import SquareIcon from "@lucide/svelte/icons/square";
+	import XIcon from "@lucide/svelte/icons/x";
+	import { Badge } from "$lib/components/ui/badge";
+	import { Button } from "$lib/components/ui/button";
+	import * as Card from "$lib/components/ui/card";
+	import * as Drawer from "$lib/components/ui/drawer";
+	import * as Table from "$lib/components/ui/table";
+	import * as Tooltip from "$lib/components/ui/tooltip";
+	import MemorySummary from "$lib/components/ports/memory-summary.svelte";
+	import NoResults from "$lib/components/ports/no-results.svelte";
+	import PortLabel from "$lib/components/ports/port-label.svelte";
+	import ServerDetails from "$lib/components/ports/server-details.svelte";
+	import ServerSearch from "$lib/components/ports/server-search.svelte";
+	import SettingsMenu from "$lib/components/ports/settings-menu.svelte";
+	import Sparkline from "$lib/components/ports/sparkline.svelte";
+	import { formatBytesText, serverActivity } from "$lib/ports/format";
+	import { PortsStore } from "$lib/ports/ports-store.svelte";
+	import type { Server, ServerStatus } from "$lib/ports/types";
+	import { cn } from "$lib/utils";
 
-  let name = $state("");
-  let greetMsg = $state("");
+	const store = new PortsStore();
 
-  async function greet(event: Event) {
-    event.preventDefault();
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    greetMsg = await invoke("greet", { name });
-  }
+	let scrollY = $state(0);
+	let tableHeight = $state(0);
+
+	const motion = $derived(prefersReducedMotion.current ? 0 : 1);
+
+	const statusDot: Record<ServerStatus, string> = {
+		running: "bg-success",
+		idle: "bg-muted-foreground/40",
+		attention: "bg-warning",
+	};
+
+	// Keeps the drawer populated while it animates out after a stop.
+	let lastSelected = $state.raw<Server | null>(null);
+	const shown = $derived(store.selected ?? lastSelected);
+
+	function showDetails(server: Server) {
+		lastSelected = server;
+		store.select(server.port);
+	}
 </script>
 
-<main class="container">
-  <h1>Welcome to Tauri + Svelte</h1>
+{#snippet action(label: string, Icon: Component, onclick: () => void)}
+	<Tooltip.Root>
+		<Tooltip.Trigger>
+			{#snippet child({ props })}
+				<Button
+					{...props}
+					variant="ghost"
+					size="icon-sm"
+					aria-label={label}
+					onclick={(event: MouseEvent) => {
+						event.stopPropagation();
+						onclick();
+					}}
+				>
+					<Icon />
+				</Button>
+			{/snippet}
+		</Tooltip.Trigger>
+		<Tooltip.Content>{label}</Tooltip.Content>
+	</Tooltip.Root>
+{/snippet}
 
-  <div class="row">
-    <a href="https://vite.dev" target="_blank">
-      <img src="/vite.svg" class="logo vite" alt="Vite Logo" />
-    </a>
-    <a href="https://tauri.app" target="_blank">
-      <img src="/tauri.svg" class="logo tauri" alt="Tauri Logo" />
-    </a>
-    <a href="https://svelte.dev" target="_blank">
-      <img src="/svelte.svg" class="logo svelte-kit" alt="SvelteKit Logo" />
-    </a>
-  </div>
-  <p>Click on the Tauri, Vite, and SvelteKit logos to learn more.</p>
+{#snippet head(label: string, Icon: Component, className = "")}
+	<Table.Head class={cn("text-muted-foreground h-10 content-center text-xs font-normal", className)}>
+		<span class={cn("inline-flex items-center gap-1.5", className.includes("text-right") && "justify-end")}>
+			<Icon class="size-3.5 opacity-70" />
+			{label}
+		</span>
+	</Table.Head>
+{/snippet}
 
-  <form class="row" onsubmit={greet}>
-    <input id="greet-input" placeholder="Enter a name..." bind:value={name} />
-    <button type="submit">Greet</button>
-  </form>
-  <p>{greetMsg}</p>
-</main>
+<svelte:window bind:scrollY />
 
-<style>
-.logo.vite:hover {
-  filter: drop-shadow(0 0 2em #747bff);
-}
+<div class="flex min-h-screen flex-col">
+	<header
+		class={cn(
+			"bg-background/80 sticky top-0 z-10 flex flex-wrap items-center gap-3 border-b px-6 py-3 backdrop-blur-xl backdrop-saturate-150 transition-colors duration-200",
+			scrollY > 0 ? "border-border" : "border-transparent",
+		)}
+	>
+		<div class="flex items-center gap-2">
+			<h1 class="text-lg font-semibold tracking-tight">Ports</h1>
+			<Badge variant="secondary">{store.servers.length}</Badge>
+		</div>
+		<div class="ml-auto flex items-center gap-2">
+			<ServerSearch bind:value={store.query} class="w-64" />
+			{@render action("Refresh", RefreshCwIcon, store.refresh)}
+			<SettingsMenu />
+		</div>
+	</header>
 
-.logo.svelte-kit:hover {
-  filter: drop-shadow(0 0 2em #ff3e00);
-}
+	<main class="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-6 p-6">
+		<Card.Root>
+			<Card.Header>
+				<Card.Title>Memory</Card.Title>
+				<Card.Description>Used by {store.servers.length} servers listening on this machine</Card.Description>
+			</Card.Header>
+			<Card.Content>
+				<MemorySummary {store} />
+			</Card.Content>
+		</Card.Root>
 
-:root {
-  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
-  font-size: 16px;
-  line-height: 24px;
-  font-weight: 400;
+		{#if store.servers.length}
+			<!-- Height follows the content with a transition so rows sliding into place are not clipped. -->
+			<div
+				class="bg-card overflow-hidden rounded-2xl border transition-[height] duration-200 ease-out motion-reduce:transition-none"
+				style:height={tableHeight ? `${tableHeight + 2}px` : undefined}
+			>
+				<div bind:clientHeight={tableHeight} class="[&>[data-slot=table-container]]:overflow-visible">
+					<!-- Rows are grids on shared tracks so a row leaving the flow mid-animation keeps its columns. -->
+					<Table.Root class="grid [--cols:7rem_minmax(0,1fr)_9rem_5rem_11rem_8rem]">
+						<Table.Header class="bg-muted/60 grid">
+							<Table.Row class="grid grid-cols-(--cols) items-center hover:bg-transparent">
+								{@render head("Port", HashIcon, "pl-5")}
+								{@render head("Server", ServerIcon)}
+								{@render head("Framework", LayersIcon)}
+								{@render head("CPU", CpuIcon, "text-right")}
+								{@render head("Memory", MemoryStickIcon, "text-right")}
+								<Table.Head class="pr-5"><span class="sr-only">Actions</span></Table.Head>
+							</Table.Row>
+						</Table.Header>
+						<Table.Body class="grid">
+							{#each store.filtered as server (server.port)}
+								{@const attention = server.status === "attention"}
+								<!-- A plain <tr> because animate: and transitions need an element, not a component. -->
+								<tr
+									data-slot="table-row"
+									class="group/row hover:bg-muted/60 data-[state=selected]:bg-muted grid cursor-default grid-cols-(--cols) items-center border-b transition-colors"
+									data-state={store.selectedPort === server.port ? "selected" : undefined}
+									onclick={() => showDetails(server)}
+									animate:flip={{ duration: 220 * motion, easing: cubicOut }}
+									in:fade={{ duration: 180 * motion, delay: 60 * motion }}
+									out:fade={{ duration: 120 * motion }}
+								>
+									<Table.Cell class="py-3.5 pl-5">
+										<PortLabel port={server.port} class="text-[15px]" />
+									</Table.Cell>
+									<Table.Cell class="min-w-0">
+										<div class="flex items-center gap-3">
+											<span
+												class={cn("size-2 shrink-0 rounded-full", statusDot[server.status])}
+												title={server.status}
+											></span>
+											<div class="flex min-w-0 flex-col gap-0.5">
+												<span class="truncate font-medium">{server.name}</span>
+												<span
+													class={cn("truncate text-xs", attention ? "text-warning" : "text-muted-foreground")}
+												>
+													{server.branch ? `${server.branch} · ` : ""}{serverActivity(server)}
+												</span>
+											</div>
+										</div>
+									</Table.Cell>
+									<Table.Cell>
+										<div class="flex flex-col gap-0.5">
+											<span>{server.framework ?? server.process}</span>
+											<span class="text-muted-foreground font-mono text-xs">PID {server.pid}</span>
+										</div>
+									</Table.Cell>
+									<Table.Cell class="text-right font-mono tabular-nums">
+										{Math.round(server.cpuPercent)}%
+									</Table.Cell>
+									<Table.Cell>
+										<div class="flex items-center justify-end gap-3">
+											<Sparkline
+												values={server.memoryHistory}
+												class={cn("h-4 w-14", attention ? "text-warning" : "text-muted-foreground")}
+											/>
+											<span class={cn("w-16 text-right font-mono tabular-nums", attention && "text-warning")}>
+												{formatBytesText(server.memoryBytes)}
+											</span>
+										</div>
+									</Table.Cell>
+									<Table.Cell class="pr-5">
+										<div
+											class="flex justify-end gap-0.5 opacity-0 transition-opacity duration-150 group-hover/row:opacity-100 focus-within:opacity-100"
+										>
+											{@render action(`Open localhost:${server.port}`, ArrowUpRightIcon, () => store.open(server))}
+											{@render action("Details", InfoIcon, () => showDetails(server))}
+											{@render action(`Stop ${server.name}`, SquareIcon, () => store.stop(server))}
+										</div>
+									</Table.Cell>
+								</tr>
+							{/each}
+						</Table.Body>
+					</Table.Root>
+					{#if !store.filtered.length}
+						<div in:fade={{ duration: 180 * motion, delay: 120 * motion }}>
+							<NoResults {store} class="py-10" />
+						</div>
+					{/if}
+				</div>
+			</div>
+		{:else}
+			<NoResults {store} class="flex-1" />
+		{/if}
+	</main>
+</div>
 
-  color: #0f0f0f;
-  background-color: #f6f6f6;
-
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  -webkit-text-size-adjust: 100%;
-}
-
-.container {
-  margin: 0;
-  padding-top: 10vh;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  text-align: center;
-}
-
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: 0.75s;
-}
-
-.logo.tauri:hover {
-  filter: drop-shadow(0 0 2em #24c8db);
-}
-
-.row {
-  display: flex;
-  justify-content: center;
-}
-
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-
-a:hover {
-  color: #535bf2;
-}
-
-h1 {
-  text-align: center;
-}
-
-input,
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  color: #0f0f0f;
-  background-color: #ffffff;
-  transition: border-color 0.25s;
-  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
-}
-
-button {
-  cursor: pointer;
-}
-
-button:hover {
-  border-color: #396cd8;
-}
-button:active {
-  border-color: #396cd8;
-  background-color: #e8e8e8;
-}
-
-input,
-button {
-  outline: none;
-}
-
-#greet-input {
-  margin-right: 5px;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #f6f6f6;
-    background-color: #2f2f2f;
-  }
-
-  a:hover {
-    color: #24c8db;
-  }
-
-  input,
-  button {
-    color: #ffffff;
-    background-color: #0f0f0f98;
-  }
-  button:active {
-    background-color: #0f0f0f69;
-  }
-}
-
-</style>
+<Drawer.Root
+	direction="right"
+	bind:open={
+		() => store.selected !== null,
+		(open) => {
+			if (!open) store.select(null);
+		}
+	}
+>
+	<Drawer.Content class="w-[26rem] sm:max-w-[26rem]">
+		<Drawer.Title class="sr-only">Server details</Drawer.Title>
+		<Drawer.Close>
+			{#snippet child({ props })}
+				<Button {...props} variant="ghost" size="icon-sm" class="absolute top-6 right-6" aria-label="Close">
+					<XIcon />
+				</Button>
+			{/snippet}
+		</Drawer.Close>
+		{#if shown}
+			<ServerDetails server={shown} {store} class="min-h-0 flex-1 overflow-y-auto p-3" />
+		{/if}
+	</Drawer.Content>
+</Drawer.Root>

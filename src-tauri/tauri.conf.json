@@ -10,11 +10,34 @@
     "frontendDist": "../build"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
-        "title": "ports",
-        "width": 800,
-        "height": 600
+        "label": "main",
+        "title": "Ports",
+        "url": "/",
+        "width": 980,
+        "height": 640,
+        "minWidth": 720,
+        "minHeight": 460
+      },
+      {
+        "label": "tray",
+        "title": "Ports",
+        "url": "/tray",
+        "width": 380,
+        "height": 560,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "resizable": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "windowEffects": {
+          "effects": ["popover"],
+          "state": "active",
+          "radius": 14
+        }
       }
     ],
     "security": {

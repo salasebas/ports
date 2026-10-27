@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "skills": {
+    "apple-design": {
+      "source": "emilkowalski/skills",
+      "sourceType": "github",
+      "skillPath": "skills/apple-design/SKILL.md",
+      "computedHash": "0190417d092a0df447b000154e39733ea6d97efad6d3bec8a6ce3845aeb88914"
+    },
+    "shadcn-svelte": {
+      "source": "huntabyte/shadcn-svelte",
+      "sourceType": "github",
+      "skillPath": "skills/shadcn-svelte/SKILL.md",
+      "computedHash": "32bb4ca39c2a92df85266148aeb02cbaa3b8d6ca893ae8ba27540173cffe6240"
+    },
+    "svelte-code-writer": {
+      "source": "sveltejs/ai-tools",
+      "sourceType": "github",
+      "skillPath": "plugins/claude/svelte/skills/svelte-code-writer/SKILL.md",
+      "computedHash": "abe888cce357ab0fa0104ff2266edaf9c3a8382320b303f920cd777762a6bc85"
+    },
+    "svelte-core-bestpractices": {
+      "source": "sveltejs/ai-tools",
+      "sourceType": "github",
+      "skillPath": "plugins/claude/svelte/skills/svelte-core-bestpractices/SKILL.md",
+      "computedHash": "3cd6c1f1a92b8bf52af8120e5cb3a93b5512f83b905fd902b895adafb7225456"
+    },
+    "tauri-v2": {
+      "source": "nodnarbnitram/claude-code-extensions",
+      "sourceType": "github",
+      "skillPath": ".claude/skills/tauri-v2/SKILL.md",
+      "computedHash": "377c61c46cf48c35b942042bc8abb9a039049a47f37d7f12b4f491d012777490"
+    }
+  }
+}
