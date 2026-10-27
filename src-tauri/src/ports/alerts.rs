@@ -60,17 +60,15 @@ impl Alerts {
                     let first = server.memory_history.first().copied().unwrap_or_default();
                     let growth = server.memory_bytes.saturating_sub(first);
                     format!("Grew by {} in 10 minutes and keeps growing.", bytes(growth))
-                } else if let Some(threshold) = settings
-                    .threshold_bytes
-                    .filter(|threshold| server.memory_bytes >= *threshold)
-                {
+                } else {
+                    let threshold = settings
+                        .threshold_bytes
+                        .filter(|threshold| server.memory_bytes >= *threshold)?;
                     format!(
                         "Uses {}, above your {} alert.",
                         bytes(server.memory_bytes),
                         bytes(threshold)
                     )
-                } else {
-                    return None;
                 };
                 if self.sent.contains_key(&key) {
                     return None;

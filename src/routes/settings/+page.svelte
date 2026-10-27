@@ -75,8 +75,9 @@
 </script>
 
 {#snippet section(title: string, fields: Snippet)}
-	<Field.Set class="gap-2">
-		<Field.Legend variant="label" class="mb-0 px-1 text-muted-foreground">{title}</Field.Legend>
+	<!-- A legend isn't a flex item of its fieldset, so its margin spaces it, not the gap. -->
+	<Field.Set>
+		<Field.Legend variant="label" class="mb-3 px-1 text-muted-foreground">{title}</Field.Legend>
 		<Card.Root size="sm" class="rounded-2xl">
 			<Card.Content>
 				<Field.Group class="gap-4">
