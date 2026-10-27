@@ -30,6 +30,7 @@ export function formatDuration(ms: number): string {
 }
 
 export function serverActivity(server: Server, now = Date.now()): string {
+	if (!server.responding) return "not responding";
 	if (server.status === "attention") {
 		const growth = server.memoryHistory.at(-1)! - server.memoryHistory[0];
 		return `+${formatBytesText(growth)} in 10 min`;
@@ -49,6 +50,31 @@ export function serverProcessId(server: Server): string {
 export const isMeasured = (server: Server) => server.pid !== undefined;
 
 export const canStop = (server: Server) => server.pid !== undefined || server.container !== undefined;
+
+/** How to start each framework's dev server on every interface instead of loopback only. */
+const exposeFlags: Record<string, string> = {
+	Vite: "--host",
+	SvelteKit: "--host",
+	Astro: "--host",
+	Nuxt: "--host",
+	Remix: "--host",
+	"React Router": "--host",
+	Angular: "--host 0.0.0.0",
+	"Next.js": "-H 0.0.0.0",
+	Gatsby: "-H 0.0.0.0",
+	Django: "0.0.0.0:8000",
+	Flask: "--host=0.0.0.0",
+	FastAPI: "--host 0.0.0.0",
+	Uvicorn: "--host 0.0.0.0",
+	Rails: "-b 0.0.0.0",
+	Puma: "-b tcp://0.0.0.0",
+	Laravel: "--host=0.0.0.0",
+	Hugo: "--bind 0.0.0.0",
+};
+
+/** The flag that exposes the server, e.g. `--host` for Vite, when Ports knows it. */
+export const exposeFlag = (server: Server): string | undefined =>
+	server.framework ? exposeFlags[server.framework] : undefined;
 
 export function serverUrl(port: number): string {
 	return `http://localhost:${port}`;

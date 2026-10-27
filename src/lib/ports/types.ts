@@ -26,7 +26,16 @@ export interface Server {
 	branch?: string;
 	framework?: string;
 	kind: ServerKind;
+	/** `attention` covers a memory leak and a server that stopped answering. */
 	status: ServerStatus;
+	/** False when the last health probe got no answer: the server holds its port but hangs. */
+	responding: boolean;
+	/** Bound addresses, e.g. `127.0.0.1` for this machine only or `0.0.0.0` for every interface. */
+	addresses: string[];
+	/** Reachable from other devices on the network. */
+	exposed: boolean;
+	/** Where another device on the network opens it, e.g. `http://192.168.1.20:5173`. */
+	lanUrl?: string;
 	/** Protected servers are skipped by bulk clean up. */
 	protected: boolean;
 	/** Ports can launch it again the same way; false for system services. */

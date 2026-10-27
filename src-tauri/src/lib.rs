@@ -8,6 +8,9 @@ use tauri_plugin_positioner::{Position, WindowExt};
 
 mod folders;
 mod ports;
+mod settings;
+#[cfg(desktop)]
+mod shortcut;
 
 const MAIN_WINDOW: &str = "main";
 const TRAY_WINDOW: &str = "tray";
@@ -52,37 +55,6 @@ fn quit_app(app: AppHandle) {
     app.exit(0);
 }
 
-/// ⌥⌘P on macOS, Ctrl+Alt+P elsewhere, toggles the popover like a tray click.
-#[cfg(desktop)]
-fn register_popover_shortcut(app: &tauri::App) -> tauri::Result<()> {
-    use tauri_plugin_global_shortcut::{
-        Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
-    };
-
-    let modifiers = if cfg!(target_os = "macos") {
-        Modifiers::SUPER | Modifiers::ALT
-    } else {
-        Modifiers::CONTROL | Modifiers::ALT
-    };
-    app.handle().plugin(
-        tauri_plugin_global_shortcut::Builder::new()
-            .with_handler(|app, _shortcut, event| {
-                if event.state == ShortcutState::Pressed {
-                    toggle_tray_window(app);
-                }
-            })
-            .build(),
-    )?;
-    // Another app may own the combination; Ports still works from the tray.
-    if let Err(error) = app
-        .global_shortcut()
-        .register(Shortcut::new(Some(modifiers), Code::KeyP))
-    {
-        eprintln!("could not register the popover shortcut: {error}");
-    }
-    Ok(())
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
@@ -92,12 +64,18 @@ pub fn run() {
             MacosLauncher::LaunchAgent,
             None,
         ))
+        .plugin(tauri_plugin_store::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             #[cfg(desktop)]
-            register_popover_shortcut(app)?;
+            shortcut::init(app, toggle_tray_window)?;
 
-            app.manage(ports::Monitor::new(app.path().home_dir()?));
+            app.manage(ports::Monitor::new(
+                app.path().home_dir()?,
+                settings::alerts(app.handle()),
+            ));
             ports::start(app.handle())?;
+            ports::open_alerts_on_click(app.handle(), show_main);
 
             let quick_view =
                 MenuItem::with_id(app, "quick-view", "Quick View", true, None::<&str>)?;
@@ -156,6 +134,9 @@ pub fn run() {
             ports::set_refresh_interval,
             ports::stop_server,
             ports::restart_server,
+            settings::get_settings,
+            settings::set_alerts,
+            settings::set_shortcut,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

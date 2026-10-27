@@ -2,7 +2,7 @@ import { emit } from "@tauri-apps/api/event";
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mockSnapshot } from "./mock";
-import { PortsStore, SNAPSHOT_EVENT } from "./ports-store.svelte";
+import { hiddenPort, hiddenProcess, PortsStore, SNAPSHOT_EVENT, unhide } from "./ports-store.svelte";
 import { preferences } from "./preferences.svelte";
 import type { Server } from "./types";
 
@@ -15,6 +15,9 @@ function server(overrides: Partial<Server>): Server {
 		name: "web",
 		kind: "dev",
 		status: "running",
+		responding: true,
+		addresses: ["127.0.0.1"],
+		exposed: false,
 		protected: false,
 		restartable: true,
 		startedAt: 0,
@@ -57,6 +60,11 @@ function backend(reply: (cmd: string) => unknown = () => undefined) {
 beforeEach(() => {
 	preferences.confirmActions.current = true;
 	preferences.shownKinds.current = ["dev", "database", "container"];
+	preferences.sort.current = { key: "port", descending: false };
+	preferences.pinned.current = [];
+	preferences.names.current = {};
+	preferences.hidden.current = [];
+	preferences.protection.current = {};
 	backend();
 });
 
@@ -210,5 +218,115 @@ describe("stopping a server", () => {
 		const store = storeWith(web, db);
 		await store.stop(db);
 		expect(store.servers).toEqual([web, db]);
+	});
+});
+
+describe("order", () => {
+	const light = server({ port: 3000, name: "light", memoryBytes: 100, cpuPercent: 9, startedAt: 30 });
+	const heavy = server({ port: 4000, pid: 201, name: "heavy", memoryBytes: 900, cpuPercent: 1, startedAt: 10 });
+	const medium = server({ port: 5000, pid: 202, name: "medium", memoryBytes: 500, cpuPercent: 5, startedAt: 20 });
+
+	// Clicking the Memory header should bring the heaviest server to the top.
+	it.each([
+		["memory", true, [heavy, medium, light]],
+		["cpu", true, [light, medium, heavy]],
+		["uptime", true, [heavy, medium, light]],
+		["name", false, [heavy, light, medium]],
+		["port", true, [medium, heavy, light]],
+	] as const)("sorts by %s", (key, descending, expected) => {
+		preferences.sort.current = { key, descending };
+		expect(storeWith(light, heavy, medium).filtered).toEqual(expected);
+	});
+
+	it("keeps pinned servers on top whatever the order", () => {
+		preferences.sort.current = { key: "memory", descending: true };
+		const store = storeWith(light, heavy, medium);
+		store.togglePin(light);
+		expect(store.filtered).toEqual([light, heavy, medium]);
+		store.togglePin(light);
+		expect(store.filtered).toEqual([heavy, medium, light]);
+	});
+
+	// Pinning the main app should pin its API port too.
+	it("pins every port of a project together", () => {
+		const app = server({ port: 3000, name: "shop", folder: "~/shop" });
+		const appApi = server({ port: 9000, pid: 201, name: "shop", folder: "~/shop" });
+		const store = storeWith(web, app, appApi);
+		store.togglePin(appApi);
+		expect(store.filtered).toEqual([app, appApi, web]);
+	});
+
+	it("groups servers by project, servers outside a project last", () => {
+		const loose = server({ port: 1000, pid: 203, name: "loose" });
+		const a1 = server({ port: 2000, name: "a", folder: "~/a" });
+		const b1 = server({ port: 3000, pid: 201, name: "b", folder: "~/b" });
+		const a2 = server({ port: 4000, pid: 202, name: "a", folder: "~/a" });
+		expect(storeWith(loose, a1, b1, a2).groups).toEqual([
+			{ folder: "~/a", servers: [a1, a2] },
+			{ folder: "~/b", servers: [b1] },
+			{ folder: undefined, servers: [loose] },
+		]);
+	});
+});
+
+describe("renaming and hiding", () => {
+	it("shows and finds a port by the name the user gave it", () => {
+		const store = storeWith(web, api);
+		store.rename(web.port, "  Storefront ");
+		expect(store.filtered[0].name).toBe("Storefront");
+		store.query = "storefront";
+		expect(store.filtered.map((s) => s.port)).toEqual([web.port]);
+		store.rename(web.port, "");
+		expect(store.filtered).toEqual([]);
+		expect(preferences.names.current).toEqual({});
+	});
+
+	// AirPlay's ControlCenter holds 5000 and 7000; hiding the process hides both.
+	it("hides a port or every port of a process until unhidden", () => {
+		const airplay = server({ port: 5000, pid: 500, process: "ControlCenter", kind: "dev" });
+		const airplay2 = server({ port: 7000, pid: 500, process: "ControlCenter", kind: "dev" });
+		const store = storeWith(web, airplay, airplay2);
+		store.hide(hiddenProcess("ControlCenter"));
+		expect(store.filtered).toEqual([web]);
+		store.hide(hiddenPort(web.port));
+		expect(store.filtered).toEqual([]);
+		unhide(hiddenProcess("ControlCenter"));
+		expect(store.filtered).toEqual([airplay, airplay2]);
+	});
+});
+
+describe("clean up", () => {
+	const idleWeb = server({ port: 5173, name: "web", status: "idle" });
+	const idleApi = server({ port: 8080, pid: 200, name: "api", status: "idle", folder: "~/api" });
+	const busy = server({ port: 3000, pid: 201, name: "busy" });
+	const idleDb = server({ port: 5432, pid: 300, kind: "database", status: "idle", protected: true });
+
+	it("stops every idle server after one confirmation, leaving the rest running", async () => {
+		const store = storeWith(idleWeb, idleApi, busy, idleDb);
+		store.cleanUp();
+		expect(store.cleaning).toEqual([idleWeb, idleApi]);
+		expect(calls).toEqual([]);
+		await store.confirmCleanUp();
+		expect(calls).toEqual([
+			["stop_server", { target: { port: 5173, pid: 100 } }],
+			["stop_server", { target: { port: 8080, pid: 200 } }],
+		]);
+		expect(store.servers).toEqual([busy, idleDb]);
+	});
+
+	it("skips what the user protects and stops a database the user unprotects", () => {
+		const store = storeWith(idleWeb, idleApi, idleDb);
+		store.setProtected(idleApi, true);
+		store.setProtected(idleDb, false);
+		expect(store.idle.map((s) => s.port)).toEqual([idleWeb.port, idleDb.port]);
+	});
+
+	// Desktop apps idle on ports too; clean up must not quit what the list doesn't show.
+	it("leaves hidden servers alone", () => {
+		const idleApp = server({ port: 44438, pid: 400, kind: "other", status: "idle" });
+		const store = storeWith(idleWeb, idleApp);
+		store.hide(hiddenPort(idleWeb.port));
+		store.cleanUp();
+		expect(store.cleaning).toBeNull();
 	});
 });

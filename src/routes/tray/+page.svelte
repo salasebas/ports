@@ -10,7 +10,10 @@
 	import { Button } from "$lib/components/ui/button";
 	import { ScrollArea } from "$lib/components/ui/scroll-area";
 	import { Separator } from "$lib/components/ui/separator";
+	import CleanUpButton from "$lib/components/ports/clean-up-button.svelte";
+	import CleanUpDialog from "$lib/components/ports/clean-up-dialog.svelte";
 	import NoResults from "$lib/components/ports/no-results.svelte";
+	import RenameDialog from "$lib/components/ports/rename-dialog.svelte";
 	import ServerDetails from "$lib/components/ports/server-details.svelte";
 	import ServerFilter from "$lib/components/ports/server-filter.svelte";
 	import ServerRow from "$lib/components/ports/server-row.svelte";
@@ -83,6 +86,7 @@
 					Open Ports
 				</Button>
 				<div class="flex items-center gap-0.5">
+					<CleanUpButton {store} />
 					<SettingsMenu side="top" />
 					<Button variant="ghost" size="icon-sm" aria-label="Quit Ports" onclick={() => invoke("quit_app")}>
 						<PowerIcon />
@@ -94,3 +98,5 @@
 </div>
 
 <ConfirmDialog {store} />
+<CleanUpDialog {store} />
+<RenameDialog {store} />

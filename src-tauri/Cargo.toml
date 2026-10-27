@@ -27,6 +27,9 @@ tauri-plugin-autostart = "2"
 listeners = "0.6"
 libc = "0.2"
 sysinfo = { version = "0.38", default-features = false, features = ["system", "user"] }
+tauri-plugin-notification = "2"
+tauri-plugin-store = "2"
+if-addrs = "0.15"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

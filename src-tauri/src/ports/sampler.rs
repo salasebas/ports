@@ -1,6 +1,7 @@
 //! Builds snapshots of the listening servers and the machine's memory and CPU.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -9,6 +10,7 @@ use sysinfo::{Pid, Process, ProcessRefreshKind, ProcessesToUpdate, System, Updat
 
 use super::containers::{self, Container};
 use super::history::{self, ACTIVE_CPU_PERCENT, History, Status};
+use super::network;
 use super::processes::{self, Job, OsGroups, ProcessTable};
 use super::project;
 use super::sockets::Sockets;
@@ -53,6 +55,19 @@ pub struct Server {
     pub framework: Option<&'static str>,
     pub kind: Kind,
     pub status: Status,
+    /// Memory kept growing over the last ten minutes. Part of `status`; kept
+    /// apart for the memory alerts.
+    #[serde(skip)]
+    pub leaking: bool,
+    /// False when the last health probe got no answer: the server holds its port but hangs.
+    pub responding: bool,
+    /// Bound addresses, e.g. `127.0.0.1` for this machine only or `0.0.0.0` for every interface.
+    pub addresses: Vec<IpAddr>,
+    /// Reachable from other devices on the network.
+    pub exposed: bool,
+    /// Where another device on the network opens it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lan_url: Option<String>,
     pub protected: bool,
     pub restartable: bool,
     pub started_at: u64,
@@ -200,6 +215,12 @@ impl Sampler {
             servers.sort_by_key(|server| server.port);
         }
         self.tracked.retain(|key, _| seen.contains(key));
+        let lan_ip = network::lan_ip();
+        for server in &mut servers {
+            server.addresses = sockets.addresses(server.port);
+            server.exposed = network::is_exposed(&server.addresses);
+            server.lan_url = network::lan_url(server.port, &server.addresses, lan_ip);
+        }
 
         let all: BTreeSet<u32> = kinds.values().flatten().copied().collect();
         let (servers_bytes, servers_cpu_percent) = usage(&self.system, &all);
@@ -246,11 +267,8 @@ fn describe(
     }
     tracked.history.record(now, memory_bytes, cpu_percent);
     let memory_history = tracked.history.memory();
-    let status = history::status(
-        history::is_leaking(&memory_history, tracked.history.span()),
-        now,
-        tracked.last_active_at,
-    );
+    let leaking = history::is_leaking(&memory_history, tracked.history.span());
+    let status = history::status(leaking, now, tracked.last_active_at);
 
     let folder = listener
         .cwd()
@@ -286,6 +304,11 @@ fn describe(
         restartable: can_relaunch(root, system),
         kind,
         status,
+        leaking,
+        responding: true,
+        addresses: Vec::new(),
+        exposed: false,
+        lan_url: None,
         process,
         command,
         started_at: root.start_time() * 1000,
@@ -320,6 +343,11 @@ fn unowned(port: u16, owner: String, first_seen: u64) -> Server {
         restartable: false,
         kind,
         status: Status::Running,
+        leaking: false,
+        responding: true,
+        addresses: Vec::new(),
+        exposed: false,
+        lan_url: None,
         started_at: first_seen,
         last_active_at: first_seen,
         memory_bytes: 0,
@@ -352,6 +380,11 @@ fn contained(port: u16, container: &Container) -> Server {
         restartable: true,
         kind: Kind::Container,
         status: Status::Running,
+        leaking: false,
+        responding: true,
+        addresses: Vec::new(),
+        exposed: false,
+        lan_url: None,
         started_at: container.started_at,
         last_active_at: container.started_at,
         memory_bytes: 0,
