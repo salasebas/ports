@@ -605,7 +605,8 @@ print(port,flush=True);time.sleep(60)
         let mut line = String::new();
         output.read_line(&mut line).unwrap();
         let port: u16 = line.trim().parse().unwrap();
-        let mut sampler = Sampler::new(home.path().to_path_buf());
+        // macOS reports cwd through /private/var, while tempdir may use /var.
+        let mut sampler = Sampler::new(home.path().canonicalize().unwrap());
         let initial = sampler
             .sample()
             .unwrap()
