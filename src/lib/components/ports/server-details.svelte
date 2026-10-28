@@ -125,11 +125,12 @@
 
 	const saved = $derived(store.projectFor(server));
 	let pull = $state<PullLookup | { state: "loading" } | null>(null);
+	// Each snapshot is a new `server` object; the lookup reruns only when these change.
+	const folder = $derived(server.folder);
+	const branch = $derived(server.branch);
+	const port = $derived(server.port);
 
 	$effect(() => {
-		const folder = server.folder;
-		const branch = server.branch;
-		const port = server.port;
 		if (!folder || !branch || !isTauri()) {
 			pull = null;
 			return;

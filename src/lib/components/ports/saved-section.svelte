@@ -12,7 +12,7 @@
 
 	function status(project: SavedProject): string {
 		if (project.folderMissing) return "Folder missing";
-		if (project.pid) return "Starting";
+		if (project.process) return "Starting";
 		if (project.lastResult?.outcome === "conflict") return "Port in use";
 		if (project.lastResult?.outcome === "failed") return "Failed";
 		return "Stopped";
@@ -36,7 +36,7 @@
 						</span>
 						<span class="w-full truncate text-xs text-muted-foreground">{status(project)} · {project.command}</span>
 					</button>
-					{#if project.pid}
+					{#if project.process}
 						<Button
 							variant="ghost"
 							size="icon-sm"

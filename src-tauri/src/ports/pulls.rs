@@ -12,12 +12,15 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::Value;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Manager};
 
+use super::blocking;
 use super::place;
 use super::project;
 
 const TTL: Duration = Duration::from_secs(5 * 60);
+/// A failure is kept briefly, so opening servers while offline does not run `gh` each time.
+const FAILURE_TTL: Duration = Duration::from_secs(30);
 const GH_LIMIT: &str = "100";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,11 +78,16 @@ pub enum Lookup {
 }
 
 impl Lookup {
-    fn cacheable(&self) -> bool {
-        matches!(
-            self,
-            Self::Found { .. } | Self::None { .. } | Self::Ambiguous { .. }
-        )
+    /// How long the answer stays true. A folder that is not a GitHub checkout is
+    /// answered without `gh`, so it is not kept.
+    fn ttl(&self) -> Option<Duration> {
+        match self {
+            Self::Found { .. } | Self::None { .. } | Self::Ambiguous { .. } => Some(TTL),
+            Self::Unauthenticated { .. } | Self::Offline { .. } | Self::Unavailable { .. } => {
+                Some(FAILURE_TTL)
+            }
+            Self::Unsupported { .. } => None,
+        }
     }
 }
 
@@ -120,7 +128,7 @@ impl PullCache {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let (at, value) = entries.get(key)?;
-        if at.elapsed() < TTL {
+        if value.ttl().is_some_and(|ttl| at.elapsed() < ttl) {
             Some(value.clone())
         } else {
             None
@@ -128,7 +136,7 @@ impl PullCache {
     }
 
     fn insert(&self, key: String, value: Lookup) {
-        if !value.cacheable() {
+        if value.ttl().is_none() {
             return;
         }
         let mut entries = self
@@ -329,43 +337,44 @@ fn head_belongs(head_owner: Option<&str>, origin_owner: Option<&str>, repo_owner
 }
 
 pub fn preview_from(checks: &[CheckLink], local_port: Option<u16>) -> Option<Preview> {
-    let mut ranked: Vec<_> = checks
+    // Only a deploy provider's check is a preview; any other https check is a CI page.
+    checks
         .iter()
         .filter(|check| is_remote_preview(&check.url, local_port))
-        .collect();
-    ranked.sort_by_key(|check| preview_rank(&check.url, check.name.as_deref()));
-    let check = ranked.first()?;
-    let (provider, label) = preview_label(&check.url, check.name.as_deref());
-    Some(Preview {
-        provider,
-        url: check.url.clone(),
-        label,
-    })
+        .filter_map(|check| Some((provider(&check.url, check.name.as_deref())?, check)))
+        .min_by_key(|(provider, _)| *provider)
+        .map(|(provider, check)| Preview {
+            provider: provider.name().into(),
+            url: check.url.clone(),
+            label: format!("{} preview", provider.name()),
+        })
 }
 
-fn preview_rank(url: &str, name: Option<&str>) -> u8 {
-    let host = url.to_ascii_lowercase();
-    let name = name.unwrap_or("").to_ascii_lowercase();
-    if host.contains("vercel") || name.contains("vercel") {
-        0
-    } else if host.contains("netlify") || name.contains("netlify") {
-        1
-    } else {
-        2
+/// The deploy providers whose checks are previews, Vercel first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Provider {
+    Vercel,
+    Netlify,
+}
+
+impl Provider {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Vercel => "Vercel",
+            Self::Netlify => "Netlify",
+        }
     }
 }
 
-fn preview_label(url: &str, name: Option<&str>) -> (String, String) {
+fn provider(url: &str, name: Option<&str>) -> Option<Provider> {
     let host = url.to_ascii_lowercase();
-    let name_lower = name.unwrap_or("").to_ascii_lowercase();
-    if host.contains("vercel") || name_lower.contains("vercel") {
-        ("Vercel".into(), "Vercel preview".into())
-    } else if host.contains("netlify") || name_lower.contains("netlify") {
-        ("Netlify".into(), "Netlify preview".into())
+    let name = name.unwrap_or("").to_ascii_lowercase();
+    if host.contains("vercel") || name.contains("vercel") {
+        Some(Provider::Vercel)
+    } else if host.contains("netlify") || name.contains("netlify") {
+        Some(Provider::Netlify)
     } else {
-        let provider = name.unwrap_or("Preview").to_string();
-        let label = format!("{provider} preview");
-        (provider, label)
+        None
     }
 }
 
@@ -530,14 +539,18 @@ fn folder_path(app: &AppHandle, folder: &str) -> Result<std::path::PathBuf, Stri
     Ok(project::canonical(&path))
 }
 
+/// Runs `gh` for up to 8 seconds, so it stays off the main thread.
 #[tauri::command]
-pub fn pull_request(
+pub async fn pull_request(
     app: AppHandle,
-    cache: State<'_, PullCache>,
     folder: String,
     port: Option<u16>,
-) -> Lookup {
-    let Ok(path) = folder_path(&app, &folder) else {
+) -> Result<Lookup, String> {
+    blocking(move || Ok(lookup(&app, &app.state::<PullCache>(), &folder, port))).await
+}
+
+fn lookup(app: &AppHandle, cache: &PullCache, folder: &str, port: Option<u16>) -> Lookup {
+    let Ok(path) = folder_path(app, folder) else {
         return Lookup::Unsupported {
             message: "The project folder is missing.".into(),
         };
@@ -698,6 +711,12 @@ mod tests {
         let preview = preview_from(&checks, Some(5173)).unwrap();
         assert_eq!(preview.provider, "Netlify");
         assert!(preview.label.contains("preview"));
+        // A CI status links to its logs, not to a deployment.
+        let ci = [CheckLink {
+            name: Some("ci/circleci: build".into()),
+            url: "https://app.circleci.com/pipelines/github/acme/shop/1".into(),
+        }];
+        assert!(preview_from(&ci, Some(5173)).is_none());
 
         let offline = interpret(
             "main",

@@ -95,6 +95,9 @@ function repositoryRows(servers: Server[], collapsed: readonly string[]): ListRo
 		const repo =
 			repos.get(repoKey) ?? bucket(repoKey, server.repositoryName ?? "Outside a repository", server.repository);
 		repo.servers.push(server);
+		repos.set(repoKey, repo);
+		// Outside a repository there are no worktrees: the servers sit under its header.
+		if (!repoId) continue;
 		const treeId = server.worktreePath ?? server.folder ?? server.id;
 		const treeKey = `worktree:${repoId}:${treeId}`;
 		const tree =
@@ -107,10 +110,10 @@ function repositoryRows(servers: Server[], collapsed: readonly string[]): ListRo
 			);
 		tree.servers.push(server);
 		repo.children.set(treeKey, tree);
-		repos.set(repoKey, repo);
 	}
 	const ordered = [...repos.values()].toSorted((a, b) => Number(a.key === "repo:") - Number(b.key === "repo:"));
 	return ordered.flatMap((repo) => {
+		if (repo.key === "repo:") return headerAndServers("repository", repo, 0, collapsed);
 		const rows: ListRow[] = [groupRow("repository", repo, 0)];
 		if (collapsed.includes(repo.key)) return rows;
 		for (const tree of repo.children.values()) {

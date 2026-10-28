@@ -11,6 +11,8 @@ import { allocateUsage, controlKey, sharesControl } from "./resources";
 
 /** Must match `SNAPSHOT_EVENT` in `src-tauri/src/ports/mod.rs`. */
 export const SNAPSHOT_EVENT = "ports://snapshot";
+/** Must match `PROJECTS_EVENT` in `src-tauri/src/ports/saved.rs`. */
+export const PROJECTS_EVENT = "ports://projects";
 
 /** Runs a system action and reports its failure, e.g. a missing folder or editor, as a toast. */
 async function attempt(action: Promise<unknown>): Promise<boolean> {
@@ -93,12 +95,6 @@ const ascending: Record<SortKey, (a: Server, b: Server) => number> = {
 	uptime: (a, b) => b.startedAt - a.startedAt,
 };
 
-/** The servers of one project folder; `folder` is undefined for servers outside any project. */
-export interface ServerGroup {
-	folder?: string;
-	servers: Server[];
-}
-
 /** The server with the name and protection the user gave it, or the same object when there are none. */
 function customize(server: Server): Server {
 	const name = preferences.names.current[server.port];
@@ -126,6 +122,8 @@ export class PortsStore {
 	servers = $state.raw<Server[]>([]);
 	system = $state.raw<SystemUsage>({ totalBytes: 0, usedBytes: 0, cpuPercent: 0 });
 	#revision = -1;
+	/** The listener ids of the last snapshot, to refresh saved projects when they change. */
+	#listeners: string | null = null;
 	query = $state("");
 	selectedId = $state<string | null>(null);
 	/** Saved project open in the drawer. Separate from a live server: Start is not Restart. */
@@ -175,17 +173,6 @@ export class PortsStore {
 		return matching.toSorted(
 			(a, b) => rank(a) - rank(b) || (descending ? -1 : 1) * ascending[key](a, b) || ascending.port(a, b),
 		);
-	});
-
-	/** `filtered` by project folder, in the order of each group's first server; servers outside a project come last. */
-	groups = $derived.by(() => {
-		const groups = new Map<string | undefined, ServerGroup>();
-		for (const server of this.filtered) {
-			const group = groups.get(server.folder) ?? { folder: server.folder, servers: [] };
-			group.servers.push(server);
-			groups.set(server.folder, group);
-		}
-		return [...groups.values()].toSorted((a, b) => Number(!a.folder) - Number(!b.folder));
 	});
 
 	selected = $derived(this.#customized.find((server) => server.id === this.selectedId) ?? null);
@@ -241,6 +228,10 @@ export class PortsStore {
 		const unlisten = listen<Snapshot>(SNAPSHOT_EVENT, (event) => {
 			if (connected) this.apply(event.payload);
 		});
+		// A run Ports started can exit before it ever listens, which no snapshot shows.
+		const unlistenProjects = listen(PROJECTS_EVENT, () => {
+			if (connected) void this.refreshSaved();
+		});
 		void unlisten
 			.then(() => (connected ? invoke<Snapshot>("snapshot") : null))
 			.then((snapshot) => {
@@ -250,10 +241,10 @@ export class PortsStore {
 				if (connected) toast.error(String(error));
 			});
 		void attempt(invoke("set_refresh_interval", { ms: preferences.refreshInterval.current }));
-		void this.refreshSaved();
 		return () => {
 			connected = false;
 			void unlisten.then((stop) => stop()).catch(() => {});
+			void unlistenProjects.then((stop) => stop()).catch(() => {});
 		};
 	};
 
@@ -262,6 +253,15 @@ export class PortsStore {
 		this.#revision = snapshot.revision;
 		this.servers = snapshot.servers;
 		this.system = snapshot.system;
+		// A saved project's match is computed against the listeners, so it changes with them.
+		const listeners = snapshot.servers
+			.map((server) => server.id)
+			.toSorted()
+			.join("\n");
+		if (listeners !== this.#listeners) {
+			this.#listeners = listeners;
+			void this.refreshSaved();
+		}
 	};
 
 	select = (id: string | null) => {

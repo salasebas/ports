@@ -103,6 +103,41 @@ describe("repository grouping", () => {
 		expect(toggleCollapsed([treeKey], treeKey)).toEqual([]);
 	});
 
+	it("lists servers outside a repository under one header, without worktrees", () => {
+		const postgres = server({ port: 5432, name: "postgres", kind: "database" });
+		const redis = server({ port: 6379, name: "redis", kind: "database" });
+		const rows = listRows([web, postgres, redis], "repository", []);
+		expect(named(rows, "worktree").map((row) => row.name)).toEqual(["repo"]);
+		expect(rows.slice(-3)).toMatchObject([
+			{ kind: "repository", name: "Outside a repository", count: 2 },
+			{ kind: "server", key: postgres.id },
+			{ kind: "server", key: redis.id },
+		]);
+	});
+
+	// The list arrives pinned first; grouping may gather servers but never drop or reorder a pin.
+	it.each(["project", "repository"] as const)(
+		"keeps every server and the pinned one first when grouped by %s",
+		(mode) => {
+			const loose = server({ port: 1000, name: "loose" });
+			const servers = [hotfix, web, loose, api];
+			const rows = listRows(servers, mode, []);
+			const listed = rows.flatMap((row) => (row.kind === "server" ? [row.server.id] : []));
+			expect(listed.toSorted()).toEqual(servers.map((item) => item.id).toSorted());
+			expect(listed[0]).toBe(hotfix.id);
+		},
+	);
+
+	it("lists project groups in the order of their first server, servers outside a project last", () => {
+		const loose = server({ port: 1000, name: "loose" });
+		const a1 = server({ port: 2000, name: "a", folder: "~/a" });
+		const b1 = server({ port: 3000, name: "b", folder: "~/b" });
+		const a2 = server({ port: 4000, name: "a", folder: "~/a" });
+		const rows = listRows([loose, a1, b1, a2], "project", []);
+		expect(named(rows, "project").map((row) => row.name)).toEqual(["a", "b", "Outside a project"]);
+		expect(rows.flatMap((row) => (row.kind === "server" ? [row.server.port] : []))).toEqual([2000, 4000, 3000, 1000]);
+	});
+
 	it("sums the same servers in project groups", () => {
 		const rows = listRows([web, api], "project", []);
 		const totals = named(rows, "project").reduce((sum, row) => sum + row.memoryBytes, 0);

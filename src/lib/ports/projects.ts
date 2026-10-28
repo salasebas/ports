@@ -1,5 +1,7 @@
 /** Shapes of `list_projects` and `pull_request`. Keep them in sync with the Rust commands. */
 
+import type { ProcessIdentity } from "./types";
+
 export type Recovery = "manual";
 
 export type LaunchOutcome = "started" | "exited" | "failed" | "conflict" | "missingFolder" | "stopped";
@@ -40,7 +42,7 @@ export interface SavedProject {
 	recovery: Recovery;
 	lastResult?: LaunchResult;
 	/** Process Ports started, when it may still be running. */
-	pid?: number;
+	process?: ProcessIdentity;
 	manager: "npm" | "pnpm" | "yarn" | "bun";
 	scripts: ScriptView[];
 	folderMissing: boolean;

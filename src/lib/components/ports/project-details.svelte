@@ -36,7 +36,7 @@
 
 	const title = $derived(projectName(project));
 	const result = $derived(project.lastResult);
-	const starting = $derived(Boolean(project.pid) && !project.matchedServerId);
+	const starting = $derived(Boolean(project.process) && !project.matchedServerId);
 
 	function saveCommand(form: HTMLFormElement) {
 		const command = String(new FormData(form).get("command") ?? "");
@@ -92,7 +92,7 @@
 			<Button class="flex-1" onclick={() => store.select(project.matchedServerId ?? null)}>
 				Show the running server
 			</Button>
-		{:else if project.pid}
+		{:else if project.process}
 			<Button class="flex-1" variant="destructive" onclick={() => store.stopSaved(project)}>
 				<SquareIcon data-icon="inline-start" class="fill-current" />
 				Stop

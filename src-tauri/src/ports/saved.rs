@@ -2,8 +2,9 @@
 //!
 //! Projects, favorite scripts, the expected binding, the manual recovery policy
 //! and the last launch result live in `projects.json` through tauri-plugin-store
-//! (the app data directory). Logs of those runs are capped text files in the
-//! app log directory. Ports stores no environment and no secrets: a launch
+//! (the app data directory). Logs of those runs are text files in the app log
+//! directory, trimmed while Ports is open and the next time it lists them;
+//! the window shows the newest 64 KB. Ports stores no environment and no secrets: a launch
 //! inherits the app's own environment.
 //!
 //! Script discovery reads `package.json` and chooses npm, pnpm, yarn or bun
@@ -11,28 +12,37 @@
 //! Recovery is manual, and it is not Restart: when a run Ports started exits,
 //! the result is recorded and nothing starts it again.
 //!
-//! A run is detached (`setsid`, and SIGPIPE ignored) so it keeps going after
-//! Ports quits. The pid is stored so the next time Ports opens it can see
-//! whether that process is still alive.
+//! A run is detached (`setsid`) and writes straight to its log file, so it
+//! keeps going after Ports quits. Its process identity (pid and start time) is
+//! stored so the next time Ports opens it can tell that process from a new one
+//! that reused the pid.
 
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_store::StoreExt;
 
+use super::blocking;
+use super::identity::ProcessIdentity;
 use super::project;
 use super::sampler::now_ms;
 use crate::ports::Monitor;
 
 const STORE: &str = "projects.json";
 const KEY: &str = "projects";
+/// Tells the windows a saved project changed without a command of theirs.
+const PROJECTS_EVENT: &str = "ports://projects";
 const LOG_LIMIT: usize = 64 * 1024;
+/// How often a run's log is checked for trimming while Ports is open.
+const TRIM_EVERY: Duration = Duration::from_secs(1);
+/// How often the wait thread checks whether a run exited. Stop waits on it.
+const REAP_EVERY: Duration = Duration::from_millis(50);
 const COMMAND_LIMIT: usize = 4_096;
 
 /// What starts a saved project again after it exits. Only manual recovery is
@@ -92,7 +102,7 @@ pub struct SavedProject {
     pub last_result: Option<LaunchResult>,
     /// The process Ports started, when it may still be running.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub pid: Option<u32>,
+    pub process: Option<ProcessIdentity>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -346,95 +356,97 @@ pub fn stable_id(canonical: &Path) -> String {
     format!("{hash:016x}")
 }
 
-#[derive(Debug)]
-struct LogBuf {
-    data: Vec<u8>,
-    truncated: bool,
+/// The run Ports started is still this process, not a new one that reused its pid.
+fn alive(process: &ProcessIdentity) -> bool {
+    process.pid > 1 && process.is_current()
 }
 
-impl LogBuf {
-    fn push(&mut self, chunk: &[u8]) {
-        self.data.extend_from_slice(chunk);
-        if self.data.len() > LOG_LIMIT {
-            let drop = self.data.len() - LOG_LIMIT;
-            self.data.drain(..drop);
-            self.truncated = true;
-        }
-    }
-}
-
-fn alive(pid: u32) -> bool {
-    pid > 1 && unsafe { libc::kill(pid as libc::pid_t, 0) } == 0
-}
-
-fn stop_pid(pid: u32) {
-    if !alive(pid) {
+/// Ends the run's process group. The leader's identity is checked before each
+/// signal, so a reused pid never reaches another app.
+fn stop_run(process: &ProcessIdentity) {
+    if !alive(process) {
         return;
     }
-    unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGTERM) };
+    let group = -(process.pid as libc::pid_t);
+    unsafe { libc::kill(group, libc::SIGTERM) };
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while std::time::Instant::now() < deadline {
-        if !alive(pid) {
+        if !alive(process) {
             return;
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
-}
-
-struct SharedLog {
-    buf: Mutex<LogBuf>,
-    path: PathBuf,
-}
-
-impl SharedLog {
-    fn push(&self, chunk: &[u8]) {
-        let mut buf = self
-            .buf
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        buf.push(chunk);
-        let _ = fs::write(&self.path, &buf.data);
+    if alive(process) {
+        unsafe { libc::kill(group, libc::SIGKILL) };
     }
 }
 
-/// Starts `command` in `folder`, detached from Ports, and writes a capped log.
-/// The returned pid is the leader of the new session. `on_exit` runs once,
-/// with the exit code, and must not start the command again.
+/// Cuts a run's log back to its newest `LOG_LIMIT` bytes once it grows past
+/// twice that. `project_log` shows only the newest `LOG_LIMIT`, so the slack
+/// is never seen, and trims stay rare: the run keeps appending through its
+/// own descriptor, so output written during a trim can be lost or land
+/// before the kept tail.
+fn trim_log(path: &Path) {
+    let Ok(mut file) = fs::OpenOptions::new().read(true).append(true).open(path) else {
+        return;
+    };
+    let Ok(len) = file.metadata().map(|meta| meta.len()) else {
+        return;
+    };
+    let limit = LOG_LIMIT as u64;
+    if len <= 2 * limit || file.seek(SeekFrom::Start(len - limit)).is_err() {
+        return;
+    }
+    let mut tail = Vec::with_capacity(LOG_LIMIT);
+    if Read::by_ref(&mut file)
+        .take(limit)
+        .read_to_end(&mut tail)
+        .is_err()
+    {
+        return;
+    }
+    if file.set_len(0).is_ok() {
+        let _ = file.write_all(&tail);
+    }
+}
+
+/// Starts `command` in `folder`, detached from Ports, with its output going
+/// straight to `log_path`: the run never writes to a pipe Ports holds, so it
+/// keeps going after Ports quits. While Ports is open the log is trimmed
+/// (see `trim_log`). `on_exit` runs once, with the exit code, and must not
+/// start the command again.
 pub fn spawn_logged(
     folder: &Path,
     command: &str,
     log_path: &Path,
     on_exit: impl FnOnce(Option<i32>) + Send + 'static,
-) -> Result<u32, String> {
+) -> Result<ProcessIdentity, String> {
     if let Some(parent) = log_path.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
-    let _ = fs::write(log_path, b"");
-    let shared = Arc::new(SharedLog {
-        buf: Mutex::new(LogBuf {
-            data: Vec::new(),
-            truncated: false,
-        }),
-        path: log_path.to_path_buf(),
-    });
+    let log = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .and_then(|log| log.set_len(0).map(|()| log))
+        .map_err(|error| format!("Couldn't open the project's log: {error}"))?;
+    let errors = log.try_clone().map_err(|error| error.to_string())?;
     let mut process = Command::new("sh");
     process
         .arg("-c")
         .arg(command)
         .current_dir(folder)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    // Safety: `setsid` and `signal` are async-signal-safe, and the closure
-    // runs in the forked child before exec.
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(errors));
+    // Safety: `setsid` is async-signal-safe, and the closure runs in the
+    // forked child before exec.
     unsafe {
         use std::os::unix::process::CommandExt;
         process.pre_exec(|| {
             if libc::setsid() == -1 {
                 return Err(std::io::Error::last_os_error());
             }
-            libc::signal(libc::SIGPIPE, libc::SIG_IGN);
             Ok(())
         });
     }
@@ -442,32 +454,31 @@ pub fn spawn_logged(
         format!("Couldn't start the project: {error}. Check that the command can run from a shell.")
     })?;
     let pid = child.id();
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    let out_log = Arc::clone(&shared);
-    let err_log = Arc::clone(&shared);
-    let stdout_thread = std::thread::spawn(move || copy_pipe(stdout, &out_log));
-    let stderr_thread = std::thread::spawn(move || copy_pipe(stderr, &err_log));
+    // Until this thread reaps it, the child exists (at least as a zombie), so
+    // its start time can be read even if it already exited.
+    let identity = ProcessIdentity::read(pid).ok_or("Couldn't read the started process.")?;
+    let log_path = log_path.to_path_buf();
     std::thread::spawn(move || {
-        let status = child.wait().ok();
-        let _ = stdout_thread.join();
-        let _ = stderr_thread.join();
+        // Reaped promptly: until then an exited leader is a zombie that still
+        // looks alive, and Stop would escalate to SIGKILL.
+        let mut trimmed = std::time::Instant::now();
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) => {
+                    if trimmed.elapsed() >= TRIM_EVERY {
+                        trim_log(&log_path);
+                        trimmed = std::time::Instant::now();
+                    }
+                    std::thread::sleep(REAP_EVERY);
+                }
+                Err(_) => break None,
+            }
+        };
+        trim_log(&log_path);
         on_exit(status.and_then(|status| status.code()));
     });
-    Ok(pid)
-}
-
-fn copy_pipe(pipe: Option<impl Read>, log: &SharedLog) {
-    let Some(mut pipe) = pipe else {
-        return;
-    };
-    let mut chunk = [0_u8; 4096];
-    loop {
-        match pipe.read(&mut chunk) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => log.push(&chunk[..n]),
-        }
-    }
+    Ok(identity)
 }
 
 fn home_of(app: &AppHandle) -> Result<PathBuf, String> {
@@ -564,7 +575,7 @@ fn view_of(home: &Path, project: &SavedProject, listeners: &[Listener]) -> Proje
         listener.port == project.expected_port
             && listener.folder.as_deref() == Some(project.folder.as_str())
     });
-    let running = matched.is_some() || project.pid.is_some_and(alive);
+    let running = matched.is_some() || project.process.as_ref().is_some_and(alive);
     ProjectView {
         project: project.clone(),
         manager,
@@ -604,148 +615,185 @@ fn check_binding(port: u16, address: &str) -> Result<String, String> {
     Ok(address.to_string())
 }
 
-fn reconcile(projects: &mut [SavedProject], now: u64) {
+/// Clears runs that ended while nobody watched. Returns whether anything changed.
+fn reconcile(projects: &mut [SavedProject], now: u64) -> bool {
+    let mut changed = false;
     for project in projects {
-        if project.pid.is_some_and(|pid| !alive(pid)) {
+        if project
+            .process
+            .as_ref()
+            .is_some_and(|process| !alive(process))
+        {
             let stopped = project
                 .last_result
                 .as_ref()
                 .is_some_and(|result| result.outcome == Outcome::Stopped);
-            project.pid = None;
+            project.process = None;
             if !stopped {
                 project.last_result = Some(plan_exit(None, false, now).result);
             }
+            changed = true;
         }
     }
+    changed
 }
 
 #[tauri::command]
-pub fn list_projects(app: AppHandle) -> Result<Vec<ProjectView>, String> {
-    let projects = app.state::<Projects>();
-    let _guard = projects.lock();
-    let home = home_of(&app)?;
-    let mut saved = load(&app);
-    reconcile(&mut saved, now_ms());
-    save(&app, &saved)?;
-    let listeners = listeners_of(&app);
-    Ok(saved
-        .iter()
-        .map(|project| view_of(&home, project, &listeners))
-        .collect())
+pub async fn list_projects(app: AppHandle) -> Result<Vec<ProjectView>, String> {
+    blocking(move || {
+        let projects = app.state::<Projects>();
+        let _guard = projects.lock();
+        let home = home_of(&app)?;
+        let mut saved = load(&app);
+        if reconcile(&mut saved, now_ms()) {
+            save(&app, &saved)?;
+        }
+        // A run keeps writing while Ports is closed; trim what it wrote meanwhile.
+        for project in &saved {
+            trim_log(&projects.log_dir.join(format!("{}.log", project.id)));
+        }
+        let listeners = listeners_of(&app);
+        Ok(saved
+            .iter()
+            .map(|project| view_of(&home, project, &listeners))
+            .collect())
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn save_project(app: AppHandle, request: SaveRequest) -> Result<ProjectView, String> {
-    check_command(&request.command)?;
-    let address = check_binding(
-        request.expected_port,
-        request.expected_address.as_deref().unwrap_or("127.0.0.1"),
-    )?;
-    let projects = app.state::<Projects>();
-    let _guard = projects.lock();
-    let home = home_of(&app)?;
-    let path = resolve_folder(&home, &request.folder);
-    if !path.is_dir() {
-        return Err(format!(
-            "The project folder {} is missing.",
-            request.folder.trim()
-        ));
-    }
-    let folder = display_folder(&home, &path);
-    let id = stable_id(&path);
-    let mut saved = load(&app);
-    if let Some(existing) = saved.iter_mut().find(|project| project.id == id) {
-        existing.folder = folder;
-        existing.command = request.command.trim().to_string();
-        existing.expected_port = request.expected_port;
-        existing.expected_address = address;
-        existing.recovery = Recovery::Manual;
-    } else {
-        saved.push(SavedProject {
-            id,
-            folder,
-            command: request.command.trim().to_string(),
-            favorites: Vec::new(),
-            expected_port: request.expected_port,
-            expected_address: address,
-            recovery: Recovery::Manual,
-            last_result: None,
-            pid: None,
-        });
-    }
-    save(&app, &saved)?;
-    let project = saved
-        .iter()
-        .find(|project| project.id == stable_id(&path))
-        .unwrap();
-    Ok(view_of(&home, project, &listeners_of(&app)))
-}
-
-#[tauri::command]
-pub fn forget_project(app: AppHandle, id: String) -> Result<(), String> {
-    let projects = app.state::<Projects>();
-    let _guard = projects.lock();
-    let mut saved = load(&app);
-    let before = saved.len();
-    saved.retain(|project| project.id != id);
-    if saved.len() == before {
-        return Err("That saved project is no longer on this Mac.".into());
-    }
-    save(&app, &saved)?;
-    let _ = fs::remove_file(projects.log_dir.join(format!("{id}.log")));
-    Ok(())
-}
-
-#[tauri::command]
-pub fn set_favorite(app: AppHandle, request: FavoriteRequest) -> Result<ProjectView, String> {
-    if !is_script_name(&request.script) {
-        return Err("That script name can't be saved.".into());
-    }
-    let projects = app.state::<Projects>();
-    let _guard = projects.lock();
-    let home = home_of(&app)?;
-    let mut saved = load(&app);
-    {
-        let project = require(&mut saved, &request.id)?;
-        if request.favorite {
-            if !project
-                .favorites
-                .iter()
-                .any(|favorite| favorite == &request.script)
-            {
-                project.favorites.push(request.script);
-            }
+pub async fn save_project(app: AppHandle, request: SaveRequest) -> Result<ProjectView, String> {
+    blocking(move || {
+        check_command(&request.command)?;
+        let address = check_binding(
+            request.expected_port,
+            request.expected_address.as_deref().unwrap_or("127.0.0.1"),
+        )?;
+        let projects = app.state::<Projects>();
+        let _guard = projects.lock();
+        let home = home_of(&app)?;
+        let path = resolve_folder(&home, &request.folder);
+        if !path.is_dir() {
+            return Err(format!(
+                "The project folder {} is missing.",
+                request.folder.trim()
+            ));
+        }
+        let folder = display_folder(&home, &path);
+        let id = stable_id(&path);
+        let mut saved = load(&app);
+        if let Some(existing) = saved.iter_mut().find(|project| project.id == id) {
+            existing.folder = folder;
+            existing.command = request.command.trim().to_string();
+            existing.expected_port = request.expected_port;
+            existing.expected_address = address;
+            existing.recovery = Recovery::Manual;
         } else {
-            project
-                .favorites
-                .retain(|favorite| favorite != &request.script);
+            saved.push(SavedProject {
+                id,
+                folder,
+                command: request.command.trim().to_string(),
+                favorites: Vec::new(),
+                expected_port: request.expected_port,
+                expected_address: address,
+                recovery: Recovery::Manual,
+                last_result: None,
+                process: None,
+            });
         }
-    }
-    save(&app, &saved)?;
-    let project = saved
-        .iter()
-        .find(|project| project.id == request.id)
-        .unwrap();
-    Ok(view_of(&home, project, &listeners_of(&app)))
+        save(&app, &saved)?;
+        let project = saved
+            .iter()
+            .find(|project| project.id == stable_id(&path))
+            .unwrap();
+        Ok(view_of(&home, project, &listeners_of(&app)))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn set_project_command(app: AppHandle, request: CommandRequest) -> Result<ProjectView, String> {
-    check_command(&request.command)?;
-    update_project(&app, &request.id, |project| {
-        project.command = request.command.trim().to_string();
+pub async fn forget_project(app: AppHandle, id: String) -> Result<(), String> {
+    blocking(move || {
+        let projects = app.state::<Projects>();
+        let _guard = projects.lock();
+        let mut saved = load(&app);
+        let before = saved.len();
+        saved.retain(|project| project.id != id);
+        if saved.len() == before {
+            return Err("That saved project is no longer on this Mac.".into());
+        }
+        save(&app, &saved)?;
+        let _ = fs::remove_file(projects.log_dir.join(format!("{id}.log")));
         Ok(())
     })
+    .await
 }
 
 #[tauri::command]
-pub fn set_project_binding(app: AppHandle, request: BindingRequest) -> Result<ProjectView, String> {
-    let address = check_binding(request.expected_port, &request.expected_address)?;
-    update_project(&app, &request.id, |project| {
-        project.expected_port = request.expected_port;
-        project.expected_address = address;
-        Ok(())
+pub async fn set_favorite(app: AppHandle, request: FavoriteRequest) -> Result<ProjectView, String> {
+    blocking(move || {
+        if !is_script_name(&request.script) {
+            return Err("That script name can't be saved.".into());
+        }
+        let projects = app.state::<Projects>();
+        let _guard = projects.lock();
+        let home = home_of(&app)?;
+        let mut saved = load(&app);
+        {
+            let project = require(&mut saved, &request.id)?;
+            if request.favorite {
+                if !project
+                    .favorites
+                    .iter()
+                    .any(|favorite| favorite == &request.script)
+                {
+                    project.favorites.push(request.script);
+                }
+            } else {
+                project
+                    .favorites
+                    .retain(|favorite| favorite != &request.script);
+            }
+        }
+        save(&app, &saved)?;
+        let project = saved
+            .iter()
+            .find(|project| project.id == request.id)
+            .unwrap();
+        Ok(view_of(&home, project, &listeners_of(&app)))
     })
+    .await
+}
+
+#[tauri::command]
+pub async fn set_project_command(
+    app: AppHandle,
+    request: CommandRequest,
+) -> Result<ProjectView, String> {
+    blocking(move || {
+        check_command(&request.command)?;
+        update_project(&app, &request.id, |project| {
+            project.command = request.command.trim().to_string();
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn set_project_binding(
+    app: AppHandle,
+    request: BindingRequest,
+) -> Result<ProjectView, String> {
+    blocking(move || {
+        let address = check_binding(request.expected_port, &request.expected_address)?;
+        update_project(&app, &request.id, |project| {
+            project.expected_port = request.expected_port;
+            project.expected_address = address;
+            Ok(())
+        })
+    })
+    .await
 }
 
 fn update_project(
@@ -764,87 +812,94 @@ fn update_project(
 }
 
 #[tauri::command]
-pub fn start_project(app: AppHandle, id: String) -> Result<ProjectView, String> {
-    let projects = app.state::<Projects>();
-    let _guard = projects.lock();
-    let home = home_of(&app)?;
-    let mut saved = load(&app);
-    let path = {
+pub async fn start_project(app: AppHandle, id: String) -> Result<ProjectView, String> {
+    blocking(move || {
+        let projects = app.state::<Projects>();
+        let _guard = projects.lock();
+        let home = home_of(&app)?;
+        let mut saved = load(&app);
+        let path = {
+            let project = require(&mut saved, &id)?;
+            resolve_folder(&home, &project.folder)
+        };
+        let folder_label = {
+            let project = saved.iter().find(|project| project.id == id).unwrap();
+            project.folder.clone()
+        };
+        if !path.is_dir() {
+            let project = require(&mut saved, &id)?;
+            project.last_result = Some(LaunchResult {
+                at: now_ms(),
+                outcome: Outcome::MissingFolder,
+                message: format!("The project folder {folder_label} is missing."),
+                exit_code: None,
+                owner: None,
+            });
+            save(&app, &saved)?;
+            return Err(format!("The project folder {folder_label} is missing."));
+        }
+        let listeners = listeners_of(&app);
+        let (command, port, process) = {
+            let project = saved.iter().find(|project| project.id == id).unwrap();
+            (
+                project.command.clone(),
+                project.expected_port,
+                project.process.clone(),
+            )
+        };
+        if process.as_ref().is_some_and(alive) {
+            return Err("Ports already started this project. Stop it before starting it again.".into());
+        }
+        match classify_port(&folder_label, port, &listeners) {
+            PortState::AlreadyServing { .. } => {
+                return Err(format!(
+                    "This project is already listening on :{port}. Restart stays on that server; Start is for when it is stopped."
+                ));
+            }
+            PortState::Conflict(owner) => {
+                let message = match owner.pid {
+                    Some(pid) => format!(
+                        "Port {port} is already used by {} (PID {pid}). Ports left it running.",
+                        owner.name
+                    ),
+                    None => format!(
+                        "Port {port} is already used by {}. Ports left it running.",
+                        owner.name
+                    ),
+                };
+                let project = require(&mut saved, &id)?;
+                project.last_result = Some(LaunchResult {
+                    at: now_ms(),
+                    outcome: Outcome::Conflict,
+                    message: message.clone(),
+                    exit_code: None,
+                    owner: Some(owner),
+                });
+                save(&app, &saved)?;
+                return Err(message);
+            }
+            PortState::Free => {}
+        }
+        let log_path = projects.log_dir.join(format!("{id}.log"));
+        let app_for_exit = app.clone();
+        let id_for_exit = id.clone();
+        let process = spawn_logged(&path, &command, &log_path, move |code| {
+            finish_run(&app_for_exit, &id_for_exit, code);
+        })?;
         let project = require(&mut saved, &id)?;
-        resolve_folder(&home, &project.folder)
-    };
-    let folder_label = {
-        let project = saved.iter().find(|project| project.id == id).unwrap();
-        project.folder.clone()
-    };
-    if !path.is_dir() {
-        let project = require(&mut saved, &id)?;
+        project.process = Some(process);
         project.last_result = Some(LaunchResult {
             at: now_ms(),
-            outcome: Outcome::MissingFolder,
-            message: format!("The project folder {folder_label} is missing."),
+            outcome: Outcome::Started,
+            message: format!("Started in {folder_label}."),
             exit_code: None,
             owner: None,
         });
         save(&app, &saved)?;
-        return Err(format!("The project folder {folder_label} is missing."));
-    }
-    let listeners = listeners_of(&app);
-    let (command, port, pid) = {
         let project = saved.iter().find(|project| project.id == id).unwrap();
-        (project.command.clone(), project.expected_port, project.pid)
-    };
-    if pid.is_some_and(alive) {
-        return Err("Ports already started this project. Stop it before starting it again.".into());
-    }
-    match classify_port(&folder_label, port, &listeners) {
-        PortState::AlreadyServing { .. } => {
-            return Err(format!(
-                "This project is already listening on :{port}. Restart stays on that server; Start is for when it is stopped."
-            ));
-        }
-        PortState::Conflict(owner) => {
-            let message = match owner.pid {
-                Some(pid) => format!(
-                    "Port {port} is already used by {} (PID {pid}). Ports left it running.",
-                    owner.name
-                ),
-                None => format!(
-                    "Port {port} is already used by {}. Ports left it running.",
-                    owner.name
-                ),
-            };
-            let project = require(&mut saved, &id)?;
-            project.last_result = Some(LaunchResult {
-                at: now_ms(),
-                outcome: Outcome::Conflict,
-                message: message.clone(),
-                exit_code: None,
-                owner: Some(owner),
-            });
-            save(&app, &saved)?;
-            return Err(message);
-        }
-        PortState::Free => {}
-    }
-    let log_path = projects.log_dir.join(format!("{id}.log"));
-    let app_for_exit = app.clone();
-    let id_for_exit = id.clone();
-    let pid = spawn_logged(&path, &command, &log_path, move |code| {
-        finish_run(&app_for_exit, &id_for_exit, code);
-    })?;
-    let project = require(&mut saved, &id)?;
-    project.pid = Some(pid);
-    project.last_result = Some(LaunchResult {
-        at: now_ms(),
-        outcome: Outcome::Started,
-        message: format!("Started in {folder_label}."),
-        exit_code: None,
-        owner: None,
-    });
-    save(&app, &saved)?;
-    let project = saved.iter().find(|project| project.id == id).unwrap();
-    Ok(view_of(&home, project, &listeners))
+        Ok(view_of(&home, project, &listeners))
+    })
+    .await
 }
 
 fn finish_run(app: &AppHandle, id: &str, code: Option<i32>) {
@@ -860,61 +915,70 @@ fn finish_run(app: &AppHandle, id: &str, code: Option<i32>) {
         .is_some_and(|result| result.outcome == Outcome::Stopped);
     let plan = plan_exit(code, stopped, now_ms());
     // `relaunch` is false for manual recovery. A finished run is only recorded.
-    project.pid = None;
+    project.process = None;
     if !stopped && !plan.relaunch {
         project.last_result = Some(plan.result);
     }
     let _ = save(app, &saved);
+    if let Err(error) = app.emit(PROJECTS_EVENT, ()) {
+        eprintln!("could not announce a finished run: {error}");
+    }
 }
 
 #[tauri::command]
-pub fn stop_project(app: AppHandle, id: String) -> Result<ProjectView, String> {
-    let projects = app.state::<Projects>();
-    let _guard = projects.lock();
-    let home = home_of(&app)?;
-    let mut saved = load(&app);
-    let pid = require(&mut saved, &id)?.pid;
-    {
+pub async fn stop_project(app: AppHandle, id: String) -> Result<ProjectView, String> {
+    blocking(move || {
+        let projects = app.state::<Projects>();
+        let _guard = projects.lock();
+        let home = home_of(&app)?;
+        let mut saved = load(&app);
+        let process = require(&mut saved, &id)?.process.clone();
+        {
+            let project = require(&mut saved, &id)?;
+            project.last_result = Some(plan_exit(None, true, now_ms()).result);
+        }
+        save(&app, &saved)?;
+        drop(_guard);
+        if let Some(process) = process {
+            stop_run(&process);
+        }
+        let projects = app.state::<Projects>();
+        let _guard = projects.lock();
+        let mut saved = load(&app);
+        if let Some(project) = saved.iter_mut().find(|project| project.id == id) {
+            project.process = None;
+            project.last_result = Some(plan_exit(None, true, now_ms()).result);
+        }
+        save(&app, &saved)?;
         let project = require(&mut saved, &id)?;
-        project.last_result = Some(plan_exit(None, true, now_ms()).result);
-    }
-    save(&app, &saved)?;
-    drop(_guard);
-    if let Some(pid) = pid {
-        stop_pid(pid);
-    }
-    let projects = app.state::<Projects>();
-    let _guard = projects.lock();
-    let mut saved = load(&app);
-    if let Some(project) = saved.iter_mut().find(|project| project.id == id) {
-        project.pid = None;
-        project.last_result = Some(plan_exit(None, true, now_ms()).result);
-    }
-    save(&app, &saved)?;
-    let project = require(&mut saved, &id)?;
-    Ok(view_of(&home, project, &listeners_of(&app)))
+        Ok(view_of(&home, project, &listeners_of(&app)))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn project_log(app: AppHandle, id: String) -> Result<ProjectLog, String> {
-    let projects = app.state::<Projects>();
-    let path = projects.log_dir.join(format!("{id}.log"));
-    let Ok(bytes) = fs::read(&path) else {
-        return Ok(ProjectLog {
-            text: String::new(),
-            truncated: false,
-        });
-    };
-    let truncated = bytes.len() >= LOG_LIMIT;
-    let bytes = if truncated {
-        &bytes[bytes.len() - LOG_LIMIT..]
-    } else {
-        &bytes[..]
-    };
-    Ok(ProjectLog {
-        text: String::from_utf8_lossy(bytes).into_owned(),
-        truncated,
+pub async fn project_log(app: AppHandle, id: String) -> Result<ProjectLog, String> {
+    blocking(move || {
+        let projects = app.state::<Projects>();
+        let path = projects.log_dir.join(format!("{id}.log"));
+        let Ok(bytes) = fs::read(&path) else {
+            return Ok(ProjectLog {
+                text: String::new(),
+                truncated: false,
+            });
+        };
+        let truncated = bytes.len() >= LOG_LIMIT;
+        let bytes = if truncated {
+            &bytes[bytes.len() - LOG_LIMIT..]
+        } else {
+            &bytes[..]
+        };
+        Ok(ProjectLog {
+            text: String::from_utf8_lossy(bytes).into_owned(),
+            truncated,
+        })
     })
+    .await
 }
 
 #[cfg(test)]
@@ -995,7 +1059,7 @@ mod tests {
             expected_address: "127.0.0.1".into(),
             recovery: Recovery::Manual,
             last_result: None,
-            pid: None,
+            process: None,
         };
         let json = serde_json::to_string(&project).unwrap();
         let back: SavedProject = serde_json::from_str(&json).unwrap();
@@ -1005,34 +1069,47 @@ mod tests {
 
     #[test]
     fn the_log_keeps_only_the_newest_bytes() {
-        let mut log = LogBuf {
-            data: Vec::new(),
-            truncated: false,
-        };
-        log.push(&vec![b'a'; LOG_LIMIT]);
-        log.push(b"tail");
-        assert_eq!(log.data.len(), LOG_LIMIT);
-        assert!(log.truncated);
-        assert!(log.data.ends_with(b"tail"));
+        let dir = tempfile::TempDir::new().unwrap();
+        let log = dir.path().join("run.log");
+        let mut text = vec![b'a'; 2 * LOG_LIMIT];
+        text.extend_from_slice(b"tail");
+        fs::write(&log, &text).unwrap();
+        trim_log(&log);
+        let kept = fs::read(&log).unwrap();
+        assert_eq!(kept.len(), LOG_LIMIT);
+        assert!(kept.ends_with(b"tail"));
+
+        // Within the slack the file is left alone.
+        let within = vec![b'b'; LOG_LIMIT + 4];
+        fs::write(&log, &within).unwrap();
+        trim_log(&log);
+        assert_eq!(fs::read(&log).unwrap(), within);
     }
 
+    // A run that wrote to a pipe Ports reads would hit EPIPE, and Node exit,
+    // once Ports quits. The log file has to be the run's own output.
     #[test]
-    fn a_detached_run_records_its_output_and_exit_without_spawning_again() {
+    fn a_detached_run_writes_to_its_log_and_records_its_exit_without_spawning_again() {
         let dir = tempfile::TempDir::new().unwrap();
         let log = dir.path().join("run.log");
         let (sender, receiver) = std::sync::mpsc::channel();
-        let pid = spawn_logged(dir.path(), "echo hello-from-ports", &log, move |code| {
-            let _ = sender.send(code);
-        })
+        let process = spawn_logged(
+            dir.path(),
+            "echo hello-from-ports; [ -p /dev/stdout ] && echo stdout-is-a-pipe; true",
+            &log,
+            move |code| {
+                let _ = sender.send(code);
+            },
+        )
         .unwrap();
-        assert!(pid > 1);
+        assert!(process.pid > 1);
         let code = receiver
             .recv_timeout(Duration::from_secs(5))
             .expect("the run should exit");
         assert_eq!(code, Some(0));
         let text = fs::read_to_string(&log).unwrap();
         assert!(text.contains("hello-from-ports"));
-        assert!(text.len() <= LOG_LIMIT);
+        assert!(!text.contains("stdout-is-a-pipe"));
         let plan = plan_exit(code, false, 1);
         assert!(!plan.relaunch);
     }
@@ -1042,9 +1119,9 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let log = dir.path().join("run.log");
         let (sender, receiver) = std::sync::mpsc::channel();
-        let pid = spawn_logged(
+        let process = spawn_logged(
             dir.path(),
-            "dd if=/dev/zero bs=1024 count=80 status=none; echo done",
+            "dd if=/dev/zero bs=1024 count=160 status=none; echo done; sleep 30",
             &log,
             move |code| {
                 let _ = sender.send(code);
@@ -1052,15 +1129,43 @@ mod tests {
         )
         .unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut trimmed = false;
         while std::time::Instant::now() < deadline {
-            if fs::metadata(&log).is_ok_and(|meta| meta.len() as usize >= LOG_LIMIT) {
+            let text = fs::read(&log).unwrap_or_default();
+            if text.len() == LOG_LIMIT && text.ends_with(b"done\n") {
+                trimmed = true;
                 break;
             }
-            std::thread::sleep(Duration::from_millis(20));
+            std::thread::sleep(Duration::from_millis(50));
         }
-        assert!(fs::metadata(&log).unwrap().len() as usize <= LOG_LIMIT);
-        stop_pid(pid);
+        assert!(trimmed, "the log should be trimmed to its newest bytes");
+        assert!(alive(&process));
+        stop_run(&process);
         let _ = receiver.recv_timeout(Duration::from_secs(3));
-        assert!(!alive(pid));
+        assert!(!alive(&process));
+    }
+
+    // After a reboot the stored pid can belong to another app. Stop must not reach it.
+    #[test]
+    fn a_reused_pid_is_not_the_run_and_is_not_stopped() {
+        use std::os::unix::process::CommandExt;
+        // Its own group leader, like an app launchd started, so a group signal would reach it.
+        let mut other = Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let reused = ProcessIdentity {
+            pid: other.id(),
+            start: "0:0".into(),
+        };
+        assert!(!alive(&reused));
+        stop_run(&reused);
+        assert!(
+            other.try_wait().unwrap().is_none(),
+            "the other process should keep running"
+        );
+        let _ = other.kill();
+        let _ = other.wait();
     }
 }
