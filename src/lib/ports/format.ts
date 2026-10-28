@@ -1,4 +1,5 @@
-import type { Server } from "./types";
+import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
+import type { Evidence, Server } from "./types";
 
 const MB = 1024 ** 2;
 const GB = 1024 ** 3;
@@ -78,13 +79,56 @@ export const exposeFlag = (server: Server): string | undefined =>
 
 const reachesLocalhost = (ip: string) => ["0.0.0.0", "::", "127.0.0.1", "::1"].includes(ip);
 
-/** `localhost` whenever it reaches the server, since apps set up cookies, CORS and OAuth for that origin. */
-export function serverUrl(server: Pick<Server, "port" | "addresses">): string {
+/** The scheme of the page Ports found; plain HTTP when it found none, which is what most servers speak. */
+const scheme = (server: Pick<Server, "web">) => (server.web.state === "page" ? server.web.scheme : "http");
+
+/** The server's page, when Ports verified it answers HTTPS or HTTP. */
+export const verifiedPage = (server: Pick<Server, "web">) => (server.web.state === "page" ? server.web : undefined);
+
+/**
+ * Where Open and Copy go: `localhost` whenever it reaches the server, since
+ * apps set up cookies, CORS and OAuth for that origin, with the verified scheme.
+ */
+export function serverUrl(server: Pick<Server, "port" | "addresses" | "web">): string {
 	const concrete =
 		server.addresses.length && !server.addresses.some(reachesLocalhost) ? server.addresses[0] : "localhost";
 	const host = concrete.includes(":") ? `[${concrete}]` : concrete;
-	return `http://${host}:${server.port}`;
+	return `${scheme(server)}://${host}:${server.port}`;
 }
+
+/** Where another device opens the server, with the same scheme as `serverUrl`. */
+export const lanUrl = (server: Pick<Server, "lanHost" | "web">) =>
+	server.lanHost ? `${scheme(server)}://${server.lanHost}` : undefined;
+
+/** The framework when its command or image names it; a guess from dependencies stays in the details. */
+export const confirmedFramework = (server: Server) =>
+	server.attribution.confidence === "confirmed" ? server.framework : undefined;
+
+/** `SvelteKit 2.21.0`, or the framework alone when its version is unknown. */
+export const frameworkLabel = (server: Server) =>
+	server.framework && [server.framework, server.frameworkVersion].filter(Boolean).join(" ");
+
+/** One line of the details' "Identified by" list. */
+export function describeEvidence(evidence: Evidence): string {
+	switch (evidence.source) {
+		case "marker":
+			return `${evidence.file} marks the project folder`;
+		case "command":
+			return `Runs ${evidence.name}`;
+		case "dependency":
+			return `${evidence.manifest} depends on ${evidence.name}`;
+		case "image":
+			return `Container image ${evidence.name}`;
+		case "wellKnownPort":
+			return `Port ${evidence.port} usually belongs to it`;
+	}
+}
+
+/** Must match `SCHEME` in `src-tauri/src/ports/icons.rs`. */
+const ICON_SCHEME = "ports-icon";
+
+/** The URL of a page's or project's icon; a plain browser tab has no backend to serve it. */
+export const iconUrl = (key: string | undefined) => (key && isTauri() ? convertFileSrc(key, ICON_SCHEME) : undefined);
 
 /** Stable color slot so a port keeps its color across refreshes. */
 export function portColor(port: number): string {

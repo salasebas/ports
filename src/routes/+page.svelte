@@ -19,7 +19,7 @@
 	import MemoryStickIcon from "@lucide/svelte/icons/memory-stick";
 	import PinIcon from "@lucide/svelte/icons/pin";
 	import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
-	import ServerIcon from "@lucide/svelte/icons/server";
+	import ServerColumnIcon from "@lucide/svelte/icons/server";
 	import SquareIcon from "@lucide/svelte/icons/square";
 	import WifiIcon from "@lucide/svelte/icons/wifi";
 	import XIcon from "@lucide/svelte/icons/x";
@@ -36,6 +36,7 @@
 	import NoResults from "$lib/components/ports/no-results.svelte";
 	import PortLabel from "$lib/components/ports/port-label.svelte";
 	import ServerDetails from "$lib/components/ports/server-details.svelte";
+	import ServerIcon from "$lib/components/ports/server-icon.svelte";
 	import RenameDialog from "$lib/components/ports/rename-dialog.svelte";
 	import ServerFilter from "$lib/components/ports/server-filter.svelte";
 	import ServerSearch from "$lib/components/ports/server-search.svelte";
@@ -45,6 +46,7 @@
 	import UsageSummary from "$lib/components/ports/usage-summary.svelte";
 	import {
 		canStop,
+		confirmedFramework,
 		formatBytesText,
 		formatDuration,
 		isMeasured,
@@ -220,6 +222,7 @@
 			<span class={cn("size-2 shrink-0 rounded-full", statusDot[server.status])} title={server.status}></span>
 			<div class="flex min-w-0 flex-col gap-0.5">
 				<span class="flex items-center gap-1.5 font-medium">
+					<ServerIcon {server} class="size-4" />
 					{#if store.isPinned(server)}
 						<PinIcon class="size-3.5 shrink-0 text-muted-foreground" aria-label="Pinned" />
 					{/if}
@@ -249,8 +252,9 @@
 	</Table.Cell>
 	<!-- Grid cells keep their content width by default; long process names truncate instead. -->
 	<Table.Cell class="min-w-0">
-		<div class="flex min-w-0 flex-col gap-0.5" title={server.framework ?? server.process}>
-			<span class="truncate">{server.framework ?? server.process}</span>
+		{@const runs = confirmedFramework(server) ?? server.process}
+		<div class="flex min-w-0 flex-col gap-0.5" title={runs}>
+			<span class="truncate">{runs}</span>
 			<span class="truncate font-mono text-xs text-muted-foreground">{serverProcessId(server)}</span>
 		</div>
 	</Table.Cell>
@@ -335,7 +339,7 @@
 						<Table.Header class="grid bg-muted/60">
 							<Table.Row class="grid grid-cols-(--cols) items-center hover:bg-transparent">
 								{@render head("Port", HashIcon, "pl-5", "port")}
-								{@render head("Server", ServerIcon, "", "name")}
+								{@render head("Server", ServerColumnIcon, "", "name")}
 								{@render head("Framework", LayersIcon)}
 								{@render head("Uptime", ClockIcon, "text-right", "uptime")}
 								{@render head("CPU", CpuIcon, "text-right", "cpu")}

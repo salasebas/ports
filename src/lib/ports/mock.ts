@@ -24,7 +24,7 @@ function cpuSeries(base: number, seed: number): number[] {
 }
 
 export function mockServers(now = Date.now()): Server[] {
-	const servers: Omit<Server, "id" | "target" | "resources">[] = [
+	const servers: (Omit<Server, "id" | "target" | "resources" | "attribution" | "web"> & Partial<Server>)[] = [
 		{
 			port: 1420,
 			pid: 48211,
@@ -85,7 +85,7 @@ export function mockServers(now = Date.now()): Server[] {
 			responding: true,
 			addresses: ["0.0.0.0"],
 			exposed: true,
-			lanUrl: "http://192.168.1.20:5173",
+			lanHost: "192.168.1.20:5173",
 			protected: false,
 			restartable: true,
 			startedAt: now - 9 * HOUR,
@@ -165,6 +165,14 @@ export function mockServers(now = Date.now()): Server[] {
 		.map((server): Server => {
 			const process = { pid: server.pid!, start: String(server.startedAt) };
 			return {
+				attribution: {
+					confidence: server.framework ? "confirmed" : "unknown",
+					evidence: [
+						...(server.folder ? [{ source: "marker" as const, file: "package.json" }] : []),
+						{ source: "command", name: server.command.split(" ")[0] },
+					],
+				},
+				web: server.kind === "dev" ? { state: "page", scheme: "http", title: server.name } : { state: "unknown" },
 				...server,
 				id: `${server.port}:${process.pid}:${process.start}`,
 				target: { kind: "process", port: server.port, listener: process, root: process, addresses: server.addresses },

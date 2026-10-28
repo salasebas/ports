@@ -5,8 +5,10 @@ mod containers;
 mod control;
 mod health;
 mod history;
+mod icons;
 mod identity;
 mod network;
+mod pages;
 mod processes;
 mod project;
 mod sampler;
@@ -16,6 +18,7 @@ mod supervisors;
 pub use alerts::AlertSettings;
 use containers::ContainerTarget;
 use control::{Preview, Shutdown, Target};
+pub use icons::SCHEME as ICON_SCHEME;
 use identity::ProcessIdentity;
 
 use std::collections::HashSet;
@@ -23,14 +26,17 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
 
+use tauri::http::Response;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_notification::NotificationExt;
 
 use alerts::Alerts;
+use icons::Icons;
+use pages::Pages;
 use sampler::{Sampler, Snapshot, now_ms};
 
 /// Carries a `Snapshot` to every window. Must match `src/lib/ports/ports-store.svelte.ts`.
@@ -63,6 +69,8 @@ pub struct Monitor {
     wake: Condvar,
     stopping: Mutex<HashSet<String>>,
     health: Mutex<Health>,
+    pages: Mutex<Pages>,
+    icons: Arc<Icons>,
     alerts: Mutex<Alerts>,
     alert_settings: Mutex<AlertSettings>,
     stop_grace_secs: AtomicU64,
@@ -84,8 +92,9 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 impl Monitor {
     pub fn new(home: PathBuf, alert_settings: AlertSettings, stop_grace_secs: u64) -> Self {
+        let icons = Arc::new(Icons::default());
         Self {
-            sampler: Mutex::new(Sampler::new(home.clone())),
+            sampler: Mutex::new(Sampler::new(home.clone(), icons.clone())),
             publication: Mutex::new(()),
             home,
             latest: Mutex::new(None),
@@ -94,6 +103,8 @@ impl Monitor {
             wake: Condvar::new(),
             stopping: Mutex::new(HashSet::new()),
             health: Mutex::new(Health::default()),
+            pages: Mutex::new(Pages::default()),
+            icons,
             alerts: Mutex::new(Alerts::default()),
             alert_settings: Mutex::new(alert_settings),
             stop_grace_secs: AtomicU64::new(clamp_grace(stop_grace_secs)),
@@ -102,6 +113,7 @@ impl Monitor {
 
     fn sample(&self) -> Result<Snapshot, String> {
         let mut snapshot = lock(&self.sampler).sample()?;
+        lock(&self.pages).apply(&mut snapshot.servers);
         health::apply(&lock(&self.health).unresponsive, &mut snapshot.servers);
         Ok(snapshot)
     }
@@ -115,6 +127,7 @@ impl Monitor {
         }
         self.alert(app, &snapshot);
         self.probe_if_due(app, &snapshot);
+        self.check_pages_if_due(app, &snapshot);
         Ok(snapshot)
     }
 
@@ -196,6 +209,30 @@ impl Monitor {
         if let Err(error) = spawned {
             eprintln!("could not probe the servers: {error}");
             lock(&self.health).probing = false;
+        }
+    }
+
+    /// Checks in the background which new servers serve a page, and samples
+    /// again when one's page, title or icon changed.
+    fn check_pages_if_due(&self, app: &AppHandle, snapshot: &Snapshot) {
+        let targets = snapshot.servers.iter().filter_map(pages::target).collect();
+        let Some(due) = lock(&self.pages).due(targets, now_ms()) else {
+            return;
+        };
+        let app = app.clone();
+        let spawned = thread::Builder::new()
+            .name("ports-pages".into())
+            .spawn(move || {
+                let monitor = app.state::<Monitor>();
+                let results = pages::check_all(&due, &monitor.icons);
+                // Also with refreshing off: the round belongs to the sample that started it.
+                if lock(&monitor.pages).finish(results, now_ms()) {
+                    monitor.wake();
+                }
+            });
+        if let Err(error) = spawned {
+            eprintln!("could not check the servers' pages: {error}");
+            lock(&self.pages).cancel();
         }
     }
 
@@ -334,6 +371,11 @@ async fn blocking<T: Send + 'static>(
     tauri::async_runtime::spawn_blocking(work)
         .await
         .map_err(|error| error.to_string())?
+}
+
+/// Answers the windows' `ports-icon://` requests with a project's or page's icon.
+pub fn serve_icon(app: &AppHandle, path: &str) -> Response<Vec<u8>> {
+    app.state::<Monitor>().icons.respond(path)
 }
 
 #[tauri::command]

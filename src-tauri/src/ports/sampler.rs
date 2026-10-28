@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -11,10 +12,12 @@ use sysinfo::{Pid, Process, ProcessRefreshKind, ProcessesToUpdate, System, Updat
 use super::containers::{self, Container, ContainerTarget};
 use super::control::{self, ProcessTarget, Target};
 use super::history::{self, ACTIVE_CPU_PERCENT, History, Status};
+use super::icons::{self, Icons};
 use super::identity::ProcessIdentity;
 use super::network;
+use super::pages::Web;
 use super::processes::{self, Job, OsGroups, ProcessTable};
-use super::project;
+use super::project::{self, Attribution, Evidence};
 use super::sockets::Sockets;
 use super::supervisors::{self, LaunchdJobs, Supervisor};
 
@@ -56,12 +59,29 @@ pub struct Server {
     pub process: String,
     pub command: String,
     pub name: String,
+    /// The project's root folder.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub folder: Option<String>,
+    /// Where the process runs, which may be below `folder` or outside any project.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// The name the project's manifest gives it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub framework: Option<&'static str>,
+    /// The installed version of `framework`, when the project pins one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub framework_version: Option<String>,
+    /// Why Ports names the project and framework.
+    pub attribution: Attribution,
+    /// Whether it serves a web page, and over which scheme.
+    pub web: Web,
+    /// Key of the page's or the project's icon, served under `ports-icon://`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
     pub kind: Kind,
     pub status: Status,
     /// Memory kept growing over the last ten minutes. Part of `status`; kept
@@ -74,9 +94,9 @@ pub struct Server {
     pub addresses: Vec<IpAddr>,
     /// Reachable from other devices on the network.
     pub exposed: bool,
-    /// Where another device on the network opens it.
+    /// The `host:port` another device on the network opens it at.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub lan_url: Option<String>,
+    pub lan_host: Option<String>,
     pub protected: bool,
     pub restartable: bool,
     /// What starts it again when it exits, such as Homebrew or PM2.
@@ -137,10 +157,37 @@ struct Tracked {
 
 pub struct Sampler {
     system: System,
+    /// Canonical, like the working directories it is compared with.
     home: PathBuf,
     /// Keyed by service and kernel start identity, so replacements start fresh.
     tracked: HashMap<String, Tracked>,
+    projects: ProjectFiles,
     revision: u64,
+}
+
+/// Project files read again only when they change: icons, shared with the
+/// windows through `Icons`, and lockfiles.
+struct ProjectFiles {
+    icons: Arc<Icons>,
+    files: icons::Files,
+    used: Vec<PathBuf>,
+    lockfiles: project::Lockfiles,
+}
+
+impl ProjectFiles {
+    fn key(&mut self, folder: &Path) -> Option<String> {
+        let path = project::icon_file(folder)?;
+        let icon = self.files.icon(&path, &self.icons);
+        self.used.push(path);
+        icon.map(|icon| icon.key.clone())
+    }
+
+    /// Lets go of the files of projects that no longer run.
+    fn finish(&mut self) {
+        self.files.retain(&self.used);
+        self.used.clear();
+        self.lockfiles.finish();
+    }
 }
 
 pub fn now_ms() -> u64 {
@@ -150,11 +197,17 @@ pub fn now_ms() -> u64 {
 }
 
 impl Sampler {
-    pub fn new(home: PathBuf) -> Self {
+    pub fn new(home: PathBuf, icons: Arc<Icons>) -> Self {
         Self {
             system: System::new(),
-            home,
+            home: project::canonical(&home),
             tracked: HashMap::new(),
+            projects: ProjectFiles {
+                icons,
+                files: icons::Files::default(),
+                used: Vec::new(),
+                lockfiles: project::Lockfiles::default(),
+            },
             revision: 0,
         }
     }
@@ -275,6 +328,7 @@ impl Sampler {
             if let Some(server) = describe(
                 &self.system,
                 &self.home,
+                &mut self.projects,
                 &sockets,
                 Service {
                     supervisor,
@@ -328,10 +382,11 @@ impl Sampler {
             }
         }
         self.tracked.retain(|key, _| seen.contains(key));
+        self.projects.finish();
         let lan_ip = network::lan_ip();
         for server in &mut servers {
             server.exposed = network::is_exposed(&server.addresses);
-            server.lan_url = network::lan_url(
+            server.lan_host = network::lan_host(
                 server.port,
                 &server.addresses,
                 lan_ip,
@@ -366,6 +421,7 @@ struct Service {
 fn describe(
     system: &System,
     home: &Path,
+    projects: &mut ProjectFiles,
     sockets: &Sockets,
     service: Service,
     tracked: &mut Tracked,
@@ -396,20 +452,33 @@ fn describe(
     let leaking = history::is_leaking(&memory_history, tracked.history.span());
     let status = history::status(leaking, now, tracked.last_active_at);
 
-    let folder = listener
+    let cwd = listener
         .cwd()
         .or_else(|| root.cwd())
         .filter(|_| !listener.exe().is_some_and(project::is_app_bundle))
+        .map(project::canonical);
+    let project = cwd
+        .as_deref()
         .and_then(|cwd| project::project_folder(cwd, home));
+    let folder = project.as_ref().map(|project| project.root.as_path());
     // The root (`php artisan serve`) names the framework; only the listener's
     // own command proves it speaks HTTP, since a job can run TCP helpers too.
-    let framework = project::framework(
+    let mut detection = project::framework(
         &project::command_words([listener.cmd(), root.cmd()]),
-        folder.as_deref(),
+        folder,
     );
+    if let Some(project) = &project {
+        detection.attribution.evidence.insert(
+            0,
+            Evidence::Marker {
+                file: project.marker,
+            },
+        );
+    }
+    let framework = detection.framework;
     let http = project::is_http_command(&project::command_words([listener.cmd()]));
     let process = listener.name().to_string_lossy().into_owned();
-    let kind = match (framework, &folder) {
+    let kind = match (framework, folder) {
         (Some(name), _) if project::is_database(name) => Kind::Database,
         (_, Some(_)) => Kind::Dev,
         _ => Kind::Other,
@@ -437,12 +506,19 @@ fn describe(
         owner: None,
         container: None,
         name: folder
-            .as_deref()
             .and_then(Path::file_name)
             .map_or_else(|| process.clone(), |n| n.to_string_lossy().into_owned()),
-        branch: folder.as_deref().and_then(|f| project::git_branch(f, home)),
-        folder: folder.as_deref().map(|f| project::display_path(f, home)),
+        branch: folder.and_then(|f| project::git_branch(f, home)),
+        folder: folder.map(|f| project::display_path(f, home)),
+        cwd: cwd.as_deref().map(|cwd| project::display_path(cwd, home)),
+        project_name: folder.and_then(project::manifest_name),
         framework,
+        framework_version: framework.zip(folder).and_then(|(framework, folder)| {
+            project::framework_version(framework, folder, &mut projects.lockfiles)
+        }),
+        attribution: detection.attribution,
+        web: Web::Unknown,
+        icon: folder.and_then(|folder| projects.key(folder)),
         protected: matches!(kind, Kind::Database),
         // A supervisor restarts what it runs; Ports only through one it supports.
         restartable: supervisor
@@ -456,7 +532,7 @@ fn describe(
         responding: true,
         addresses,
         exposed: false,
-        lan_url: None,
+        lan_host: None,
         process,
         command,
         // sysinfo reports 0 for another user's process, such as launchd.
@@ -477,7 +553,9 @@ fn describe(
 /// A listening port whose process belongs to another user and can't be
 /// inspected: only the port, the owner and what usually listens there are known.
 fn unowned(port: u16, owner: String, first_seen: u64) -> Server {
-    let (name, framework) = project::well_known(port).unwrap_or((&owner, None));
+    let name = project::well_known(port).map_or(owner.as_str(), |(name, _)| name);
+    let detection = project::port_detection(port);
+    let framework = detection.framework;
     let kind = match framework {
         Some(name) if project::is_database(name) => Kind::Database,
         _ => Kind::Other,
@@ -495,8 +573,14 @@ fn unowned(port: u16, owner: String, first_seen: u64) -> Server {
         owner: Some(owner),
         container: None,
         folder: None,
+        cwd: None,
+        project_name: None,
         branch: None,
         framework,
+        framework_version: None,
+        attribution: detection.attribution,
+        web: Web::Unknown,
+        icon: None,
         protected: matches!(kind, Kind::Database),
         restartable: false,
         supervisor: None,
@@ -507,7 +591,7 @@ fn unowned(port: u16, owner: String, first_seen: u64) -> Server {
         responding: true,
         addresses: Vec::new(),
         exposed: false,
-        lan_url: None,
+        lan_host: None,
         started_at: first_seen,
         last_active_at: first_seen,
         memory_bytes: 0,
@@ -521,7 +605,8 @@ fn unowned(port: u16, owner: String, first_seen: u64) -> Server {
 /// the container's own memory and CPU aren't known here.
 fn contained(port: u16, container: &Container) -> Server {
     let image = containers::image_name(&container.image);
-    let framework = project::image_framework(image);
+    let detection = project::image_detection(image);
+    let framework = detection.framework;
     let addresses: Vec<_> = container
         .bindings
         .iter()
@@ -550,8 +635,14 @@ fn contained(port: u16, container: &Container) -> Server {
         process: image.to_string(),
         command: container.image.clone(),
         folder: None,
+        cwd: None,
+        project_name: None,
         branch: None,
         framework,
+        framework_version: None,
+        attribution: detection.attribution,
+        web: Web::Unknown,
+        icon: None,
         protected: framework.is_some_and(project::is_database),
         restartable: true,
         supervisor: None,
@@ -562,7 +653,7 @@ fn contained(port: u16, container: &Container) -> Server {
         responding: true,
         addresses,
         exposed: false,
-        lan_url: None,
+        lan_host: None,
         started_at: container.started_at,
         last_active_at: container.started_at,
         memory_bytes: 0,
@@ -624,7 +715,7 @@ mod tests {
     #[test]
     fn retains_a_binding_when_its_process_cannot_be_inspected() {
         let home = tempfile::tempdir().unwrap();
-        let mut sampler = Sampler::new(home.path().to_path_buf());
+        let mut sampler = Sampler::new(home.path().to_path_buf(), Arc::default());
         let sockets = Sockets::from_entries([(
             "127.0.0.1:3000".parse().unwrap(),
             u32::MAX,
@@ -682,8 +773,7 @@ print(port,flush=True);time.sleep(60)
         let mut line = String::new();
         output.read_line(&mut line).unwrap();
         let port: u16 = line.trim().parse().unwrap();
-        // macOS reports cwd through /private/var, while tempdir may use /var.
-        let mut sampler = Sampler::new(home.path().canonicalize().unwrap());
+        let mut sampler = Sampler::new(home.path().to_path_buf(), Arc::default());
         let initial = sampler
             .sample()
             .unwrap()
@@ -713,7 +803,7 @@ print(port,flush=True);time.sleep(60)
     #[test]
     fn includes_nat_published_containers_without_host_listeners() {
         let home = tempfile::tempdir().unwrap();
-        let mut sampler = Sampler::new(home.path().to_path_buf());
+        let mut sampler = Sampler::new(home.path().to_path_buf(), Arc::default());
         let container = Container {
             id: "nat-container".into(),
             name: "db".into(),

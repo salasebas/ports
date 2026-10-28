@@ -24,12 +24,17 @@
 	import { Switch } from "$lib/components/ui/switch";
 	import {
 		canStop,
+		describeEvidence,
 		exposeFlag,
 		formatBytes,
 		formatBytesText,
 		formatDuration,
+		frameworkLabel,
 		isMeasured,
+		lanUrl,
 		serverProcessId,
+		serverUrl,
+		verifiedPage,
 	} from "$lib/ports/format";
 	import { fileManagerName } from "$lib/platform";
 	import { hiddenPort, hiddenProcess, type PortsStore } from "$lib/ports/ports-store.svelte";
@@ -41,6 +46,7 @@
 	import CpuBars from "./cpu-bars.svelte";
 	import PortLabel from "./port-label.svelte";
 	import QrCode from "./qr-code.svelte";
+	import ServerIcon from "./server-icon.svelte";
 	import Sparkline from "./sparkline.svelte";
 
 	let {
@@ -54,7 +60,8 @@
 
 	const memory = $derived(formatBytes(server.memoryBytes));
 	const leaking = $derived(server.status === "attention" && server.responding);
-	const lanUrl = $derived(server.lanUrl?.replace(/^http:\/\//, ""));
+	const page = $derived(verifiedPage(server));
+	const lan = $derived(lanUrl(server));
 	const idle = $derived(server.status === "idle");
 	const alerts = $derived(settings.current.alerts);
 	/** What the memory alerts watch for on this server; desktop apps get none. */
@@ -95,13 +102,25 @@
 			["Process", `${server.process} · ${serverProcessId(server)}`],
 			["Parent", server.parent && `${server.parent.name} · PID ${server.parent.process.pid}`],
 			["Managed by", supervisor && [supervisorNames[supervisor.kind], supervisor.name].filter(Boolean).join(" · ")],
-			["Framework", server.framework],
+			["Framework", frameworkLabel(server) || "Unknown"],
+			["Page", page?.title],
+			["Package", server.projectName !== server.name && server.projectName],
 			["Branch", server.branch],
 			["Folder", server.folder],
+			["Runs in", server.cwd !== server.folder && server.cwd !== "/" && server.cwd],
 			["Listens on", server.addresses.join(", ")],
 			["Command", server.command],
 		].filter((fact): fact is [string, string] => Boolean(fact[1])),
 	);
+
+	const confidence = $derived(server.attribution.confidence);
+	/** What the evidence adds up to, so a guess never reads as proof. */
+	const verdict = $derived.by(() => {
+		if (confidence === "likely")
+			return `Only ${server.attribution.evidence.some((e) => e.source === "wellKnownPort") ? "the port number" : "the project's dependencies"} suggest ${server.framework}; its command doesn't confirm it.`;
+		if (confidence === "unknown") return "Nothing in its command, project or image names a framework.";
+		return null;
+	});
 </script>
 
 <article class={cn("flex flex-col gap-5", className)} aria-label="{server.name} on port {server.port}">
@@ -113,6 +132,7 @@
 				</Button>
 			{/if}
 			<h2 class="flex min-w-0 items-center gap-1.5 px-10 text-sm font-semibold">
+				<ServerIcon {server} class="size-4" />
 				{#if store.isPinned(server)}
 					<PinIcon class="size-3.5 shrink-0 text-muted-foreground" aria-label="Pinned" />
 				{/if}
@@ -258,7 +278,12 @@
 	<dl class="grid grid-cols-[5.5rem_1fr] gap-x-4 gap-y-2.5 text-sm">
 		{#each facts as [label, value] (label)}
 			<dt class="text-muted-foreground">{label}</dt>
-			<dd class={cn("min-w-0 truncate", label === "Command" && "font-mono text-xs leading-5")}>{value}</dd>
+			<dd class={cn("flex min-w-0 items-center gap-1.5", label === "Command" && "font-mono text-xs leading-5")}>
+				<span class="truncate" title={value}>{value}</span>
+				{#if label === "Framework" && confidence === "likely"}
+					<Badge variant="outline">Likely</Badge>
+				{/if}
+			</dd>
 		{/each}
 		{#if server.exposed}
 			<dt class="text-muted-foreground">Network</dt>
@@ -270,11 +295,28 @@
 		{/if}
 	</dl>
 
-	<!-- Only dev servers speak HTTP for sure; a database on 0.0.0.0 has no page to open. -->
-	{#if server.kind === "dev" && server.lanUrl && lanUrl}
+	<section class="flex flex-col gap-1.5" aria-label="Identified by">
+		<p class="text-sm text-muted-foreground">Identified by</p>
+		<ul class="flex flex-col gap-1 text-xs">
+			{#each server.attribution.evidence as evidence, i (i)}
+				<li>{describeEvidence(evidence)}</li>
+			{/each}
+			{#if page}
+				<li>Answers {page.scheme.toUpperCase()} at /</li>
+			{:else if server.web.state === "none"}
+				<li>Answers neither HTTPS nor HTTP at /</li>
+			{/if}
+		</ul>
+		{#if verdict}
+			<p class="text-xs text-muted-foreground">{verdict}</p>
+		{/if}
+	</section>
+
+	<!-- Only a verified page goes to another device; a database on 0.0.0.0 has no page to open. -->
+	{#if page && lan}
 		<Separator />
 		<section class="flex items-center gap-4" aria-label="Open on another device">
-			<QrCode value={server.lanUrl} class="size-28 shrink-0" />
+			<QrCode value={lan} class="size-28 shrink-0" />
 			<div class="flex min-w-0 flex-col gap-2">
 				<p class="text-sm font-medium">Open on your phone</p>
 				<p class="text-xs text-muted-foreground">Scan the code with a device on the same network.</p>
@@ -282,25 +324,31 @@
 					variant="secondary"
 					size="sm"
 					class="justify-start"
-					aria-label="Copy {server.lanUrl}"
-					onclick={() => store.copyUrl(server, server.lanUrl)}
+					aria-label="Copy {lan}"
+					onclick={() => store.copyUrl(server, lan)}
 				>
 					<CopyIcon data-icon="inline-start" />
-					<span class="truncate font-mono text-xs">{lanUrl}</span>
+					<span class="truncate font-mono text-xs">{server.lanHost}</span>
 				</Button>
 			</div>
 		</section>
-	{:else if server.kind === "dev" && server.exposed}
+	{:else if page && server.exposed}
 		<Separator />
 		<p class="text-xs text-muted-foreground">
 			Other devices can reach it, but this machine isn't on a network right now.
 		</p>
-	{:else if server.kind === "dev"}
+	{:else if page && server.kind === "dev"}
 		<Separator />
 		<p class="text-xs text-muted-foreground">
 			Only this machine can open it. To open it on your phone, start it with
 			<code class="font-mono text-foreground">{exposeFlag(server) ?? "--host 0.0.0.0"}</code>
 			so it listens on the network too.
+		</p>
+	{:else if server.web.state === "none"}
+		<Separator />
+		<p class="text-xs text-muted-foreground">
+			No web page answered on :{server.port}, so it may speak another protocol. Open tries
+			<code class="font-mono text-foreground">{serverUrl(server)}</code>.
 		</p>
 	{/if}
 

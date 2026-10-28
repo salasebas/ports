@@ -55,6 +55,38 @@ export interface ControlPreview {
 	supervisor?: Supervisor;
 }
 
+/** How sure Ports is of a server's framework; never a score. */
+export type Confidence = "confirmed" | "likely" | "unknown";
+
+/** One reason behind what Ports says a server is. */
+export type Evidence =
+	/** A file that makes the folder a project, such as `package.json` or `.git`. */
+	| { source: "marker"; file: string }
+	/** The executable, or the script or Python module it runs. */
+	| { source: "command"; name: string }
+	/** A dependency the project declares: it refines a runner, or alone only suggests the framework. */
+	| { source: "dependency"; manifest: string; name: string }
+	| { source: "image"; name: string }
+	/** What usually listens on the port, for a process Ports can't see. */
+	| { source: "wellKnownPort"; port: number };
+
+/** Why Ports names a server's project and framework. */
+export interface Attribution {
+	/** `confirmed` when the command or image names the framework, `likely` when only dependencies or the port do. */
+	confidence: Confidence;
+	evidence: Evidence[];
+}
+
+/**
+ * Whether the server answered a request for `/`. `unknown` until checked;
+ * databases, desktop apps and other users' processes are never checked.
+ * `none` means it answered neither HTTPS nor HTTP.
+ */
+export type Web =
+	| { state: "unknown" }
+	| { state: "page"; scheme: "http" | "https"; title?: string }
+	| { state: "none" };
+
 export interface Server {
 	id: string;
 	target?: ServerTarget;
@@ -75,9 +107,20 @@ export interface Server {
 	command: string;
 	/** Project folder name, or the process name when no project is detected. */
 	name: string;
+	/** The project's root folder, e.g. `~/projects/web` or `/workspace/api`. */
 	folder?: string;
+	/** Where the process runs, which may be below `folder` or outside any project. */
+	cwd?: string;
+	/** The name the project's manifest gives it, which may differ from the folder's. */
+	projectName?: string;
 	branch?: string;
 	framework?: string;
+	/** The installed version of `framework`, when the project pins one. */
+	frameworkVersion?: string;
+	attribution: Attribution;
+	web: Web;
+	/** Key of the page's favicon or the project's icon file, loaded through `iconUrl`. */
+	icon?: string;
 	kind: ServerKind;
 	/** `attention` covers a memory leak and a server that stopped answering. */
 	status: ServerStatus;
@@ -87,8 +130,8 @@ export interface Server {
 	addresses: string[];
 	/** Reachable from other devices on the network. */
 	exposed: boolean;
-	/** Where another device on the network opens it, e.g. `http://192.168.1.20:5173`. */
-	lanUrl?: string;
+	/** Where another device on the network reaches it, e.g. `192.168.1.20:5173`; `lanUrl` adds the scheme. */
+	lanHost?: string;
 	/** Protected servers are skipped by bulk clean up. */
 	protected: boolean;
 	/** Ports can launch it again the same way; false for system services. */

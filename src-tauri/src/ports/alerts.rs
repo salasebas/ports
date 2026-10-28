@@ -97,14 +97,14 @@ fn bytes(bytes: u64) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::super::history::Status;
     use super::*;
 
     const GIB: u64 = 1024 * 1024 * 1024;
     const MINUTE: u64 = 60_000;
 
-    fn server(port: u16, memory_bytes: u64) -> Server {
+    pub(crate) fn server(port: u16, memory_bytes: u64) -> Server {
         Server {
             id: format!("test:{port}"),
             target: None,
@@ -118,15 +118,21 @@ mod tests {
             command: "vite".into(),
             name: "web".into(),
             folder: None,
+            cwd: None,
+            project_name: None,
             branch: None,
             framework: None,
+            framework_version: None,
+            attribution: Default::default(),
+            web: Default::default(),
+            icon: None,
             kind: Kind::Dev,
             status: Status::Running,
             leaking: false,
             responding: true,
             addresses: Vec::new(),
             exposed: false,
-            lan_url: None,
+            lan_host: None,
             protected: false,
             restartable: true,
             supervisor: None,

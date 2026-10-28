@@ -78,6 +78,9 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
+        .register_uri_scheme_protocol(ports::ICON_SCHEME, |context, request| {
+            ports::serve_icon(context.app_handle(), request.uri().path())
+        })
         .setup(|app| {
             #[cfg(desktop)]
             shortcut::init(app, toggle_tray_window)?;

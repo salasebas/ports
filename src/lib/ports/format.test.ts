@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { formatBytesText, formatDuration, serverUrl } from "./format";
+import { formatBytesText, formatDuration, lanUrl, serverUrl } from "./format";
+import type { Web } from "./types";
 
 const minute = 60_000;
 const hour = 60 * minute;
@@ -37,6 +38,27 @@ describe("serverUrl", () => {
 		[[], "http://localhost:3000"],
 		[["127.0.0.2"], "http://127.0.0.2:3000"],
 	])("uses a reachable binding for %s", (addresses, expected) => {
-		expect(serverUrl({ port: 3000, addresses })).toBe(expected);
+		expect(serverUrl({ port: 3000, addresses, web: { state: "unknown" } })).toBe(expected);
+	});
+
+	it("opens a verified HTTPS page with https on the same host", () => {
+		const web: Web = { state: "page", scheme: "https" };
+		expect(serverUrl({ port: 5173, addresses: ["::1"], web })).toBe("https://localhost:5173");
+		expect(serverUrl({ port: 5173, addresses: ["2001:db8::1"], web })).toBe("https://[2001:db8::1]:5173");
+	});
+});
+
+// The QR code and its Copy button must open the same page as Open.
+describe("lanUrl", () => {
+	it.each<[Web, string]>([
+		[{ state: "page", scheme: "https" }, "https://192.168.1.20:5173"],
+		[{ state: "page", scheme: "http" }, "http://192.168.1.20:5173"],
+		[{ state: "none" }, "http://192.168.1.20:5173"],
+	])("uses the scheme of %o", (web, expected) => {
+		expect(lanUrl({ lanHost: "192.168.1.20:5173", web })).toBe(expected);
+	});
+
+	it("has none when other devices can't reach it", () => {
+		expect(lanUrl({ web: { state: "page", scheme: "https" } })).toBeUndefined();
 	});
 });
