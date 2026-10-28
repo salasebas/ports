@@ -1,9 +1,11 @@
 import { emit } from "@tauri-apps/api/event";
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { listRows } from "./grouping";
 import { mockSnapshot } from "./mock";
 import { hiddenPort, hiddenProcess, PortsStore, SNAPSHOT_EVENT, unhide } from "./ports-store.svelte";
 import { preferences } from "./preferences.svelte";
+import type { SavedProject } from "./projects";
 import { processTree } from "./resources";
 import type { ControlPreview, Server, Snapshot, ServerTarget } from "./types";
 
@@ -98,7 +100,8 @@ function backend(reply?: (cmd: string) => unknown) {
 	vi.stubGlobal("isTauri", true);
 	mockIPC(
 		(cmd, args) => {
-			calls.push([cmd, args]);
+			// Every change of listeners rereads saved projects; that read is not a control.
+			if (cmd !== "list_projects") calls.push([cmd, args]);
 			if (reply) return reply(cmd);
 			if (cmd === "preview_control") return previewOf(args as { target: ServerTarget });
 			if (cmd === "restart_server") return snapshot(activeStore.servers);
@@ -126,6 +129,8 @@ beforeEach(() => {
 	preferences.confirmActions.current = true;
 	preferences.shownKinds.current = ["dev", "database", "container"];
 	preferences.sort.current = { key: "port", descending: false };
+	preferences.groupBy.current = "flat";
+	preferences.collapsedGroups.current = [];
 	preferences.pinned.current = [];
 	preferences.names.current = {};
 	preferences.hidden.current = [];
@@ -164,6 +169,41 @@ describe("live updates", () => {
 		});
 		const pushedBytes = pushed.servers.reduce((sum, s) => sum + s.memoryBytes, 0);
 		expect(store.usage.serversBytes).toBe(pushedBytes);
+		disconnect();
+	});
+
+	// A saved project hides while its server listens, so it must come back once that server stops.
+	it("shows a saved project again when its server stops", async () => {
+		const project: SavedProject = {
+			id: "p1",
+			folder: "~/shop",
+			command: "vite dev",
+			favorites: [],
+			expectedPort: 3000,
+			expectedAddress: "127.0.0.1",
+			recovery: "manual",
+			manager: "npm",
+			scripts: [],
+			folderMissing: false,
+			running: false,
+		};
+		let listening = true;
+		backend((cmd) => {
+			if (cmd === "snapshot") return { revision: 0, servers: [], system: mockSnapshot().system };
+			if (cmd === "list_projects") return [listening ? { ...project, matchedServerId: web.id } : project];
+			return undefined;
+		});
+		const store = new PortsStore();
+		const disconnect = store.connect();
+		await vi.waitFor(async () => {
+			await emit(SNAPSHOT_EVENT, snapshot([web]));
+			expect(store.saved[0]?.matchedServerId).toBe(web.id);
+		});
+		expect(store.savedProjects).toEqual([]);
+
+		listening = false;
+		await emit(SNAPSHOT_EVENT, snapshot([]));
+		await vi.waitFor(() => expect(store.savedProjects.map((item) => item.id)).toEqual(["p1"]));
 		disconnect();
 	});
 
@@ -433,16 +473,33 @@ describe("order", () => {
 		expect(store.filtered).toEqual([app, appApi, web]);
 	});
 
-	it("groups servers by project, servers outside a project last", () => {
-		const loose = server({ port: 1000, pid: 203, name: "loose" });
-		const a1 = server({ port: 2000, name: "a", folder: "~/a" });
-		const b1 = server({ port: 3000, pid: 201, name: "b", folder: "~/b" });
-		const a2 = server({ port: 4000, pid: 202, name: "a", folder: "~/a" });
-		expect(storeWith(loose, a1, b1, a2).groups).toEqual([
-			{ folder: "~/a", servers: [a1, a2] },
-			{ folder: "~/b", servers: [b1] },
-			{ folder: undefined, servers: [loose] },
-		]);
+	it("keeps a pin and a protection when the list is grouped by repository", () => {
+		const main = server({
+			port: 3000,
+			name: "web",
+			folder: "~/repo",
+			repositoryId: "~/repo/.git",
+			worktreePath: "~/repo",
+			memoryBytes: 10,
+		});
+		const hotfix = server({
+			port: 3001,
+			pid: 201,
+			name: "web",
+			folder: "~/hotfix",
+			repositoryId: "~/repo/.git",
+			worktreePath: "~/hotfix",
+			worktree: "hotfix",
+			memoryBytes: 4,
+		});
+		const store = storeWith(main, hotfix);
+		store.togglePin(hotfix);
+		store.setProtected(main, true);
+		const rows = listRows(store.filtered, "repository", []);
+		const listed = rows.flatMap((row) => (row.kind === "server" ? [row.server] : []));
+		expect(listed.map((item) => item.port)).toEqual([3001, 3000]);
+		expect(listed.find((item) => item.port === 3000)?.protected).toBe(true);
+		expect(rows.find((row) => row.kind === "repository")).toMatchObject({ count: 2, memoryBytes: 14 });
 	});
 });
 

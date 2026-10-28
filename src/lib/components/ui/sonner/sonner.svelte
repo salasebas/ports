@@ -6,6 +6,7 @@
 	import OctagonXIcon from '@lucide/svelte/icons/octagon-x';
 	import InfoIcon from '@lucide/svelte/icons/info';
 	import TriangleAlertIcon from '@lucide/svelte/icons/triangle-alert';
+	import XIcon from '@lucide/svelte/icons/x';
 
 	let { ...restProps }: SonnerProps = $props();
 </script>
@@ -35,5 +36,8 @@
 	{/snippet}
 	{#snippet warningIcon()}
 		<TriangleAlertIcon class="size-4" />
+	{/snippet}
+	{#snippet closeIcon()}
+		<XIcon class="size-4" />
 	{/snippet}
 </Sonner>

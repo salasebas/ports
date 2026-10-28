@@ -339,34 +339,6 @@ pub fn canonical(path: &Path) -> PathBuf {
         .unwrap_or_else(|| path.to_path_buf())
 }
 
-/// The checked-out branch, or the short commit when HEAD is detached.
-pub fn git_branch(folder: &Path, home: &Path) -> Option<String> {
-    let dot_git = folder
-        .ancestors()
-        .take_while(|dir| *dir != home)
-        .map(|dir| dir.join(".git"))
-        .find(|path| path.exists())?;
-    // Worktrees and submodules have a `.git` file pointing at the real git dir.
-    let git_dir = if dot_git.is_file() {
-        let pointer = fs::read_to_string(&dot_git).ok()?;
-        let target = pointer.trim().strip_prefix("gitdir:")?.trim();
-        dot_git.parent()?.join(target)
-    } else {
-        dot_git
-    };
-    let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
-    let head = head.trim();
-    match head.strip_prefix("ref: ") {
-        Some(reference) => Some(
-            reference
-                .strip_prefix("refs/heads/")
-                .unwrap_or(reference)
-                .to_string(),
-        ),
-        None => head.get(..7).map(str::to_string),
-    }
-}
-
 /// Executable and script/module names, never arbitrary option values.
 pub fn command_words<'a>(commands: impl IntoIterator<Item = &'a [OsString]>) -> HashSet<String> {
     let mut words = HashSet::new();
@@ -807,6 +779,10 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn branch(folder: &Path, home: &Path) -> Option<String> {
+        super::super::place::checkout(folder, home).and_then(|checkout| checkout.branch)
+    }
+
     fn words(command: &str) -> HashSet<String> {
         let args: Vec<OsString> = command.split(' ').map(OsString::from).collect();
         command_words([args.as_slice()])
@@ -884,7 +860,7 @@ mod tests {
         let folder = project_folder(&root(&workspace).join("src"), &root(&home));
         assert_eq!(folder, found(root(&workspace), "package.json"));
         assert_eq!(
-            git_branch(&folder.unwrap().root, &root(&home)),
+            branch(&folder.unwrap().root, &root(&home)),
             Some("release".to_string())
         );
     }
@@ -932,7 +908,7 @@ mod tests {
             found(root(&home).join("mono/apps/web"), "package.json")
         );
         assert_eq!(
-            git_branch(&folder.unwrap().root, &root(&home)),
+            branch(&folder.unwrap().root, &root(&home)),
             Some("feat/checkout".to_string())
         );
     }
@@ -951,7 +927,7 @@ mod tests {
             found(root(&home).join("hotfix"), ".git")
         );
         assert_eq!(
-            git_branch(&home.path().join("hotfix"), home.path()),
+            branch(&home.path().join("hotfix"), home.path()),
             Some("hotfix".to_string())
         );
     }
@@ -960,7 +936,7 @@ mod tests {
     fn shows_the_short_commit_of_a_detached_head() {
         let home = project(&[("repo/.git/HEAD", "4a1e04d7c0ffee\n")]);
         assert_eq!(
-            git_branch(&home.path().join("repo"), home.path()),
+            branch(&home.path().join("repo"), home.path()),
             Some("4a1e04d".to_string())
         );
     }

@@ -191,3 +191,33 @@
 		scrollbar-gutter: auto;
 	}
 }
+
+/*
+ * Toasts. A modal drawer or dialog sets `pointer-events: none` on the body, which the
+ * toaster inherits, so pointers fell through to the drawer underneath. Sonner's own
+ * styles are unlayered, so these selectors repeat its own to win by specificity.
+ */
+[data-sonner-toaster] [data-sonner-toast] {
+	pointer-events: auto;
+}
+[data-sonner-toaster] [data-sonner-toast][data-visible="false"] {
+	pointer-events: none;
+}
+/* The close button sits at the end of the row, like a ghost icon button. */
+[data-sonner-toaster] [data-sonner-toast][data-styled="true"] [data-close-button] {
+	position: static;
+	order: 99;
+	flex-shrink: 0;
+	margin-inline-start: auto;
+	width: 1.5rem;
+	height: 1.5rem;
+	border: 0;
+	border-radius: calc(var(--radius) * 0.8);
+	background: transparent;
+	color: var(--muted-foreground);
+	transform: none;
+}
+[data-sonner-toaster] [data-sonner-toast][data-styled="true"]:hover [data-close-button]:hover {
+	background: var(--accent);
+	color: var(--accent-foreground);
+}

@@ -1,5 +1,7 @@
 <script lang="ts">
 	import ChevronDownIcon from "@lucide/svelte/icons/chevron-down";
+	import BookmarkIcon from "@lucide/svelte/icons/bookmark";
+	import BookmarkMinusIcon from "@lucide/svelte/icons/bookmark-minus";
 	import ChevronLeftIcon from "@lucide/svelte/icons/chevron-left";
 	import CircleAlertIcon from "@lucide/svelte/icons/circle-alert";
 	import CodeIcon from "@lucide/svelte/icons/code";
@@ -40,6 +42,8 @@
 	import { hiddenPort, hiddenProcess, type PortsStore } from "$lib/ports/ports-store.svelte";
 	import { processKey, processTree } from "$lib/ports/resources";
 	import { editorLabel, preferences } from "$lib/ports/preferences.svelte";
+	import { invoke, isTauri } from "@tauri-apps/api/core";
+	import type { PullLookup } from "$lib/ports/projects";
 	import type { Server } from "$lib/ports/types";
 	import { settings } from "$lib/settings.svelte";
 	import { cn } from "$lib/utils";
@@ -106,12 +110,45 @@
 			["Page", page?.title],
 			["Package", server.projectName !== server.name && server.projectName],
 			["Branch", server.branch],
+			["Worktree", server.worktree],
+			[
+				"Repository",
+				server.repositoryName && server.repository
+					? `${server.repositoryName} · ${server.repository}`
+					: server.repositoryName,
+			],
 			["Folder", server.folder],
 			["Runs in", server.cwd !== server.folder && server.cwd !== "/" && server.cwd],
 			["Listens on", server.addresses.join(", ")],
 			["Command", server.command],
 		].filter((fact): fact is [string, string] => Boolean(fact[1])),
 	);
+
+	const saved = $derived(store.projectFor(server));
+	let pull = $state<PullLookup | { state: "loading" } | null>(null);
+	// Each snapshot is a new `server` object; the lookup reruns only when these change.
+	const folder = $derived(server.folder);
+	const branch = $derived(server.branch);
+	const port = $derived(server.port);
+
+	$effect(() => {
+		if (!folder || !branch || !isTauri()) {
+			pull = null;
+			return;
+		}
+		let current = true;
+		pull = { state: "loading" };
+		void invoke<PullLookup>("pull_request", { folder, port })
+			.then((result) => {
+				if (current) pull = result;
+			})
+			.catch((error: unknown) => {
+				if (current) pull = { state: "offline", message: String(error) };
+			});
+		return () => {
+			current = false;
+		};
+	});
 
 	const confidence = $derived(server.attribution.confidence);
 	/** What the evidence adds up to, so a guess never reads as proof. */
@@ -197,6 +234,29 @@
 					{fileManagerName}
 				</Button>
 			</div>
+			{#if saved}
+				<div class="grid grid-cols-2 gap-2">
+					<Button variant="secondary" size="sm" onclick={() => store.saveProject(server)}>
+						<BookmarkIcon data-icon="inline-start" />
+						Update saved
+					</Button>
+					<Button variant="secondary" size="sm" onclick={() => store.forgetSaved(saved)}>
+						<BookmarkMinusIcon data-icon="inline-start" />
+						Unsave
+					</Button>
+				</div>
+			{:else}
+				<Button variant="secondary" size="sm" onclick={() => store.saveProject(server)}>
+					<BookmarkIcon data-icon="inline-start" />
+					Save project
+				</Button>
+			{/if}
+			{#if saved}
+				<p class="text-xs text-muted-foreground">
+					Saved to start {saved.command} at {saved.expectedAddress}:{saved.expectedPort}. Restart above still signals
+					this process.
+				</p>
+			{/if}
 		{/if}
 		{#if canStop(server)}
 			<div
@@ -311,6 +371,76 @@
 			<p class="text-xs text-muted-foreground">{verdict}</p>
 		{/if}
 	</section>
+
+	<section class="flex flex-col gap-1.5" aria-label="Session">
+		<p class="text-sm text-muted-foreground">Session</p>
+		{#if server.session}
+			<p class="text-sm">{server.session.label}</p>
+			<ul class="flex flex-col gap-1 text-xs">
+				{#each server.session.evidence as evidence, i (i)}
+					<li>
+						{evidence.source === "ancestor" ? `Parent process ${evidence.name}` : `Environment ${evidence.name}`}
+					</li>
+				{/each}
+			</ul>
+			{#if server.session.resume.state === "available"}
+				<Button
+					variant="secondary"
+					size="sm"
+					class="self-start"
+					onclick={() =>
+						store.revealSession(server.session?.resume.state === "available" ? server.session.resume.path : "")}
+				>
+					{server.session.resume.label}
+				</Button>
+			{:else}
+				<p class="text-xs text-muted-foreground">{server.session.resume.message}</p>
+			{/if}
+		{:else}
+			<p class="text-xs text-muted-foreground">
+				Session unknown. Nothing in the process tree or its environment names a terminal or coding agent.
+			</p>
+		{/if}
+	</section>
+
+	{#if server.branch}
+		<Separator />
+		<section class="flex flex-col gap-2" aria-label="Remote">
+			<p class="text-sm text-muted-foreground">Remote</p>
+			{#if !pull || pull.state === "loading"}
+				<p class="text-xs text-muted-foreground">Looking up the pull request…</p>
+			{:else if pull.state === "found"}
+				<Button
+					class="justify-start"
+					variant="secondary"
+					size="sm"
+					onclick={() => store.openRemote(pull && pull.state === "found" ? pull.pull.url : "")}
+				>
+					PR #{pull.pull.number}: {pull.pull.title}
+				</Button>
+				{#if pull.preview}
+					<Button
+						class="justify-start"
+						variant="secondary"
+						size="sm"
+						onclick={() => store.openRemote(pull && pull.state === "found" && pull.preview ? pull.preview.url : "")}
+					>
+						{pull.preview.label}
+					</Button>
+					<p class="text-xs text-muted-foreground">Remote preview. This is not the local server on :{server.port}.</p>
+				{/if}
+			{:else if pull.state === "ambiguous"}
+				<p class="text-xs text-muted-foreground">{pull.message}</p>
+				{#each pull.pulls as item (item.url)}
+					<Button class="justify-start" variant="ghost" size="sm" onclick={() => store.openRemote(item.url)}>
+						PR #{item.number}: {item.title}
+					</Button>
+				{/each}
+			{:else}
+				<p class="text-xs text-muted-foreground">{pull.message}</p>
+			{/if}
+		</section>
+	{/if}
 
 	<!-- Only a verified page goes to another device; a database on 0.0.0.0 has no page to open. -->
 	{#if page && lan}

@@ -5,11 +5,14 @@ import { SvelteSet } from "svelte/reactivity";
 import { toast } from "svelte-sonner";
 import { canStop, serverUrl } from "./format";
 import { preferences, type SortKey } from "./preferences.svelte";
+import { savedMatches, type SavedProject } from "./projects";
 import type { ControlPreview, ProcessIdentity, Server, Snapshot, SystemUsage } from "./types";
 import { allocateUsage, controlKey, sharesControl } from "./resources";
 
 /** Must match `SNAPSHOT_EVENT` in `src-tauri/src/ports/mod.rs`. */
 export const SNAPSHOT_EVENT = "ports://snapshot";
+/** Must match `PROJECTS_EVENT` in `src-tauri/src/ports/saved.rs`. */
+export const PROJECTS_EVENT = "ports://projects";
 
 /** Runs a system action and reports its failure, e.g. a missing folder or editor, as a toast. */
 async function attempt(action: Promise<unknown>): Promise<boolean> {
@@ -92,12 +95,6 @@ const ascending: Record<SortKey, (a: Server, b: Server) => number> = {
 	uptime: (a, b) => b.startedAt - a.startedAt,
 };
 
-/** The servers of one project folder; `folder` is undefined for servers outside any project. */
-export interface ServerGroup {
-	folder?: string;
-	servers: Server[];
-}
-
 /** The server with the name and protection the user gave it, or the same object when there are none. */
 function customize(server: Server): Server {
 	const name = preferences.names.current[server.port];
@@ -125,8 +122,13 @@ export class PortsStore {
 	servers = $state.raw<Server[]>([]);
 	system = $state.raw<SystemUsage>({ totalBytes: 0, usedBytes: 0, cpuPercent: 0 });
 	#revision = -1;
+	/** The listener ids of the last snapshot, to refresh saved projects when they change. */
+	#listeners: string | null = null;
 	query = $state("");
 	selectedId = $state<string | null>(null);
+	/** Saved project open in the drawer. Separate from a live server: Start is not Restart. */
+	selectedProjectId = $state<string | null>(null);
+	saved = $state.raw<SavedProject[]>([]);
 	/** Action waiting for the user to confirm it. */
 	pending = $state.raw<PendingAction | null>(null);
 	/** Idle servers clean up will stop once the user confirms. */
@@ -155,6 +157,9 @@ export class PortsStore {
 						server.process,
 						server.framework,
 						server.branch,
+						server.worktree,
+						server.repositoryName,
+						server.session?.label,
 						server.projectName,
 						server.web.state === "page" && server.web.title,
 					]
@@ -170,18 +175,18 @@ export class PortsStore {
 		);
 	});
 
-	/** `filtered` by project folder, in the order of each group's first server; servers outside a project come last. */
-	groups = $derived.by(() => {
-		const groups = new Map<string | undefined, ServerGroup>();
-		for (const server of this.filtered) {
-			const group = groups.get(server.folder) ?? { folder: server.folder, servers: [] };
-			group.servers.push(server);
-			groups.set(server.folder, group);
-		}
-		return [...groups.values()].toSorted((a, b) => Number(!a.folder) - Number(!b.folder));
-	});
-
 	selected = $derived(this.#customized.find((server) => server.id === this.selectedId) ?? null);
+
+	selectedProject = $derived(this.saved.find((project) => project.id === this.selectedProjectId) ?? null);
+
+	/** Saved projects that are not currently the listener on their expected port. */
+	savedProjects = $derived(
+		this.saved.filter((project) => !project.matchedServerId && savedMatches(project, this.query)),
+	);
+
+	projectFor = (server: Server) =>
+		this.saved.find((project) => project.matchedServerId === server.id) ??
+		this.saved.find((project) => project.folder === server.folder && project.expectedPort === server.port);
 
 	/** What clean up stops: shown idle servers Ports can stop, unless protected or kept running by a supervisor. */
 	idle = $derived(
@@ -223,6 +228,10 @@ export class PortsStore {
 		const unlisten = listen<Snapshot>(SNAPSHOT_EVENT, (event) => {
 			if (connected) this.apply(event.payload);
 		});
+		// A run Ports started can exit before it ever listens, which no snapshot shows.
+		const unlistenProjects = listen(PROJECTS_EVENT, () => {
+			if (connected) void this.refreshSaved();
+		});
 		void unlisten
 			.then(() => (connected ? invoke<Snapshot>("snapshot") : null))
 			.then((snapshot) => {
@@ -235,6 +244,7 @@ export class PortsStore {
 		return () => {
 			connected = false;
 			void unlisten.then((stop) => stop()).catch(() => {});
+			void unlistenProjects.then((stop) => stop()).catch(() => {});
 		};
 	};
 
@@ -243,11 +253,94 @@ export class PortsStore {
 		this.#revision = snapshot.revision;
 		this.servers = snapshot.servers;
 		this.system = snapshot.system;
+		// A saved project's match is computed against the listeners, so it changes with them.
+		const listeners = snapshot.servers
+			.map((server) => server.id)
+			.toSorted()
+			.join("\n");
+		if (listeners !== this.#listeners) {
+			this.#listeners = listeners;
+			void this.refreshSaved();
+		}
 	};
 
 	select = (id: string | null) => {
 		this.selectedId = id;
+		if (id) this.selectedProjectId = null;
 	};
+
+	selectProject = (id: string | null) => {
+		this.selectedProjectId = id;
+		if (id) this.selectedId = null;
+	};
+
+	refreshSaved = async () => {
+		if (!isTauri()) return;
+		try {
+			this.saved = await invoke<SavedProject[]>("list_projects");
+		} catch (error) {
+			toast.error(String(error));
+		}
+	};
+
+	saveProject = async (server: Server) => {
+		if (!server.folder) return;
+		const address = server.addresses.find((item) => item === "127.0.0.1") ?? server.addresses[0] ?? "127.0.0.1";
+		const ok = await attempt(
+			invoke("save_project", {
+				request: {
+					folder: server.folder,
+					command: server.command,
+					expectedPort: server.port,
+					expectedAddress: address,
+				},
+			}),
+		);
+		await this.refreshSaved();
+		if (ok) toast.success(`Saved ${server.name}`, { description: `Starts with ${server.command}` });
+	};
+
+	startSaved = async (project: SavedProject) => {
+		const ok = await attempt(invoke("start_project", { id: project.id }));
+		await this.refreshSaved();
+		if (ok) toast.success(`Started ${project.folder.split("/").filter(Boolean).at(-1) ?? "project"}`);
+	};
+
+	stopSaved = async (project: SavedProject) => {
+		const ok = await attempt(invoke("stop_project", { id: project.id }));
+		await this.refreshSaved();
+		if (ok) toast.success("Stopped. It will not start again until you ask.");
+	};
+
+	forgetSaved = async (project: SavedProject) => {
+		const ok = await attempt(invoke("forget_project", { id: project.id }));
+		if (this.selectedProjectId === project.id) this.selectedProjectId = null;
+		await this.refreshSaved();
+		if (ok) toast.success("Removed from saved projects");
+	};
+
+	setSavedCommand = async (project: SavedProject, command: string) => {
+		const ok = await attempt(invoke("set_project_command", { request: { id: project.id, command } }));
+		await this.refreshSaved();
+		return ok;
+	};
+
+	setSavedBinding = async (project: SavedProject, expectedPort: number, expectedAddress: string) => {
+		const ok = await attempt(
+			invoke("set_project_binding", { request: { id: project.id, expectedPort, expectedAddress } }),
+		);
+		await this.refreshSaved();
+		return ok;
+	};
+
+	setFavorite = async (project: SavedProject, script: string, favorite: boolean) => {
+		await attempt(invoke("set_favorite", { request: { id: project.id, script, favorite } }));
+		await this.refreshSaved();
+	};
+
+	openRemote = (url: string) => attempt(openUrl(url));
+
+	revealSession = (path: string) => attempt(invoke("reveal_session", { path }));
 
 	refresh = async () => {
 		try {

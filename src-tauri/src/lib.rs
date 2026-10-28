@@ -85,6 +85,8 @@ pub fn run() {
             #[cfg(desktop)]
             shortcut::init(app, toggle_tray_window)?;
             app.manage(settings::Changes::default());
+            app.manage(ports::saved::Projects::open(app.handle()));
+            app.manage(ports::pulls::PullCache::default());
 
             app.manage(ports::Monitor::new(
                 app.path().home_dir()?,
@@ -153,6 +155,17 @@ pub fn run() {
             ports::preview_control,
             ports::stop_server,
             ports::restart_server,
+            ports::saved::list_projects,
+            ports::saved::save_project,
+            ports::saved::forget_project,
+            ports::saved::set_favorite,
+            ports::saved::set_project_command,
+            ports::saved::set_project_binding,
+            ports::saved::start_project,
+            ports::saved::stop_project,
+            ports::saved::project_log,
+            ports::pulls::pull_request,
+            ports::reveal_session,
             settings::get_settings,
             settings::set_alerts,
             settings::set_stop_grace,

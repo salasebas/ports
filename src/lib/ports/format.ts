@@ -100,6 +100,13 @@ export function serverUrl(server: Pick<Server, "port" | "addresses" | "web">): s
 export const lanUrl = (server: Pick<Server, "lanHost" | "web">) =>
 	server.lanHost ? `${scheme(server)}://${server.lanHost}` : undefined;
 
+/** The worktree and branch, without repeating a worktree whose name is the branch. */
+export function placeLabel(server: Pick<Server, "worktree" | "branch">): string | undefined {
+	const parts = [server.worktree, server.branch].filter((part): part is string => Boolean(part));
+	const unique = parts.filter((part, index) => parts.indexOf(part) === index);
+	return unique.length ? unique.join(" · ") : undefined;
+}
+
 /** The framework when its command or image names it; a guess from dependencies stays in the details. */
 export const confirmedFramework = (server: Server) =>
 	server.attribution.confidence === "confirmed" ? server.framework : undefined;
