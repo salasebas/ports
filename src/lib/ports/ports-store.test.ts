@@ -4,7 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mockSnapshot } from "./mock";
 import { hiddenPort, hiddenProcess, PortsStore, SNAPSHOT_EVENT, unhide } from "./ports-store.svelte";
 import { preferences } from "./preferences.svelte";
-import type { Server, Snapshot, ServerTarget } from "./types";
+import { processTree } from "./resources";
+import type { ControlPreview, Server, Snapshot, ServerTarget } from "./types";
 
 function server(overrides: Partial<Server>): Server {
 	const value: Omit<Server, "id" | "target" | "resources"> = {
@@ -44,7 +45,17 @@ function server(overrides: Partial<Server>): Server {
 		...value,
 		id: `${value.port}:${value.pid ?? value.container?.id}:${value.startedAt}`,
 		target,
-		resources: value.pid ? [{ process, memoryBytes: value.memoryBytes, cpuPercent: value.cpuPercent }] : [],
+		resources: value.pid
+			? [
+					{
+						process,
+						name: value.process,
+						ports: [value.port],
+						memoryBytes: value.memoryBytes,
+						cpuPercent: value.cpuPercent,
+					},
+				]
+			: [],
 	};
 }
 
@@ -68,6 +79,14 @@ function storeWith(...servers: Server[]) {
 	return store;
 }
 
+/** What the fake backend ends for a target: the processes of the rows it controls. */
+function previewOf({ target }: { target: ServerTarget }): ControlPreview {
+	const rows = backendRows.filter((row) => JSON.stringify(row.target) === JSON.stringify(target));
+	return {
+		processes: rows.flatMap((row) => row.resources.map(({ process, name, ports }) => ({ process, name, ports }))),
+	};
+}
+
 /** Commands the store sent to the Rust backend, with their arguments. */
 let calls: [string, unknown][];
 
@@ -79,6 +98,7 @@ function backend(reply?: (cmd: string) => unknown) {
 		(cmd, args) => {
 			calls.push([cmd, args]);
 			if (reply) return reply(cmd);
+			if (cmd === "preview_control") return previewOf(args as { target: ServerTarget });
 			if (cmd === "restart_server") return snapshot(activeStore.servers);
 			if (cmd === "stop_server") {
 				const { target } = args as { target: ServerTarget };
@@ -215,18 +235,98 @@ describe("stopping a server", () => {
 	it("asks for confirmation instead of stopping when the preference is on", async () => {
 		const store = storeWith(web, api);
 		await store.request("stop", web);
-		expect(store.pending).toEqual({ action: "stop", server: web });
+		expect(store.pending).toEqual({
+			action: "stop",
+			server: web,
+			servers: [web],
+			previews: [previewOf({ target: web.target! })],
+			error: null,
+		});
 		expect(store.servers).toEqual([web, api]);
-		expect(calls).toEqual([]);
+		expect(calls.map(([cmd]) => cmd)).toEqual(["preview_control"]);
 	});
 
-	it("asks before restarting too", async () => {
+	// The backend refuses any process the user wasn't shown, e.g. a replacement.
+	it("asks before restarting too, and restarts only what the preview showed", async () => {
 		const store = storeWith(web);
 		await store.request("restart", web);
-		expect(store.pending).toEqual({ action: "restart", server: web });
-		expect(calls).toEqual([]);
+		expect(store.pending?.action).toBe("restart");
+		expect(calls.map(([cmd]) => cmd)).toEqual(["preview_control"]);
 		await store.confirm();
-		expect(calls).toEqual([["restart_server", { target: web.target }]]);
+		expect(calls.at(-1)).toEqual([
+			"restart_server",
+			{ target: web.target, scope: { confirmed: [web.resources[0].process] } },
+		]);
+	});
+
+	it("can't confirm an action whose preview failed", async () => {
+		backend((cmd) => {
+			if (cmd === "preview_control") throw "The server on :5173 changed; refresh before trying again";
+		});
+		const store = storeWith(web);
+		await store.request("stop", web);
+		expect(store.pending?.error).toContain("changed");
+		await store.confirm();
+		expect(calls.map(([cmd]) => cmd)).toEqual(["preview_control"]);
+	});
+
+	// Force Kill gives a server no chance to save its work, so it always asks first.
+	it("asks before a Force Kill even with confirmation off, then kills only the previewed scope", async () => {
+		preferences.confirmActions.current = false;
+		const store = storeWith(web);
+		await store.request("forceKill", web);
+		expect(store.pending?.previews).toHaveLength(1);
+		await store.confirm();
+		expect(calls.at(-1)).toEqual([
+			"stop_server",
+			{ target: web.target, onlyIfIdle: false, force: true, scope: { confirmed: [web.resources[0].process] } },
+		]);
+	});
+
+	// brew services stop also keeps the service from starting at login, so it never happens unseen.
+	it("asks before stopping a Homebrew service even with confirmation off", async () => {
+		preferences.confirmActions.current = false;
+		const redis = server({ ...db, supervisor: { kind: "homebrew", name: "redis", supported: true } });
+		const store = storeWith(redis);
+		await store.request("stop", redis);
+		expect(store.pending?.action).toBe("stop");
+		expect(calls.map(([cmd]) => cmd)).toEqual(["preview_control"]);
+	});
+
+	// A watcher such as nodemon would start the server again; Stop parent ends it too.
+	it("previews and stops the parent of a server", async () => {
+		const nodemon = { process: { pid: 90, start: "1" }, name: "nodemon" };
+		const watched = server({ ...web, parent: nodemon });
+		const parentScope = { processes: [{ process: nodemon.process, name: "nodemon", ports: [] }] };
+		backend((cmd) => (cmd === "preview_control" ? parentScope : snapshot([])));
+		const store = storeWith(watched);
+		await store.request("stopParent", watched);
+		expect(calls[0]).toEqual(["preview_control", { target: watched.target, parent: nodemon.process }]);
+		await store.confirm();
+		expect(calls.at(-1)).toEqual([
+			"stop_server",
+			{
+				target: watched.target,
+				onlyIfIdle: false,
+				scope: { parent: nodemon.process, confirmed: [nodemon.process] },
+			},
+		]);
+	});
+
+	// "Stop every node server" lists them first and stops each process tree once.
+	it("stops every unprotected server of the same program once per process tree", async () => {
+		const second = server({ port: 3001, pid: 101, name: "docs" });
+		const secondPort = server({ ...second, port: 3002 });
+		const guarded = server({ port: 3003, pid: 102, name: "admin", protected: true });
+		const store = storeWith(web, second, secondPort, guarded, api);
+		await store.request("stopAll", web);
+		expect(store.pending?.servers).toEqual([web, second]);
+		await store.confirm();
+		const stopped = calls
+			.filter(([cmd]) => cmd === "stop_server")
+			.map(([, args]) => (args as { target: unknown }).target);
+		expect(stopped).toEqual([web.target, second.target]);
+		expect(store.servers).toEqual([guarded, api]);
 	});
 
 	it("stops the process on the port right away when confirmation is turned off", async () => {
@@ -401,6 +501,12 @@ describe("clean up", () => {
 		expect(calls.filter(([cmd]) => cmd === "stop_server")).toHaveLength(1);
 	});
 
+	// Homebrew keeps its services running on purpose, and its stop also removes them from login.
+	it("leaves servers a supervisor runs out of clean up", () => {
+		const brewed = server({ ...idleApi, supervisor: { kind: "homebrew", name: "redis", supported: true } });
+		expect(storeWith(idleWeb, brewed).idle).toEqual([idleWeb]);
+	});
+
 	it("stops every idle server after one confirmation, leaving the rest running", async () => {
 		const store = storeWith(idleWeb, idleApi, busy, idleDb);
 		store.cleanUp();
@@ -432,6 +538,16 @@ describe("clean up", () => {
 });
 
 // The resource owner is a kernel process identity, even when jobs overlap or a row is hidden.
+/** One process of a prefork gunicorn. */
+const workerUsage = (pid: number, parent: number, memoryBytes: number, ports: number[] = []) => ({
+	process: { pid, start: "1" },
+	parent,
+	name: "gunicorn",
+	ports,
+	memoryBytes,
+	cpuPercent: 1,
+});
+
 describe("resource allocation and row identity", () => {
 	it("counts shared descendants once across headline totals and chart slices", () => {
 		const child = server({ pid: 50, port: 3001, memoryBytes: 100, cpuPercent: 1 });
@@ -444,6 +560,19 @@ describe("resource allocation and row identity", () => {
 		expect(store.usage.serversBytes).toBe(300);
 		store.hide(hiddenPort(parent.port));
 		expect(store.usage.serversBytes).toBe(0);
+	});
+
+	// A prefork master with two workers: each worker shows the port it holds, under its master.
+	it("lists a server's processes as a tree that adds up to its total", () => {
+		const master = server({ port: 8000, pid: 10, process: "gunicorn", memoryBytes: 600 });
+		master.resources = [workerUsage(12, 10, 200, [8000]), workerUsage(10, 1, 300), workerUsage(11, 10, 100, [8000])];
+		const rows = processTree(master);
+		expect(rows.map(({ usage, depth }) => [usage.process.pid, depth, usage.ports])).toEqual([
+			[10, 0, []],
+			[11, 1, [8000]],
+			[12, 1, [8000]],
+		]);
+		expect(rows.reduce((sum, row) => sum + row.usage.memoryBytes, 0)).toBe(master.memoryBytes);
 	});
 
 	it("selects independent owners on the same numeric port", () => {

@@ -247,10 +247,11 @@
 			</div>
 		</div>
 	</Table.Cell>
-	<Table.Cell>
-		<div class="flex flex-col gap-0.5">
-			<span>{server.framework ?? server.process}</span>
-			<span class="font-mono text-xs text-muted-foreground">{serverProcessId(server)}</span>
+	<!-- Grid cells keep their content width by default; long process names truncate instead. -->
+	<Table.Cell class="min-w-0">
+		<div class="flex min-w-0 flex-col gap-0.5" title={server.framework ?? server.process}>
+			<span class="truncate">{server.framework ?? server.process}</span>
+			<span class="truncate font-mono text-xs text-muted-foreground">{serverProcessId(server)}</span>
 		</div>
 	</Table.Cell>
 	<Table.Cell class="text-right font-mono text-muted-foreground tabular-nums">

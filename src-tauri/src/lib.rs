@@ -86,6 +86,7 @@ pub fn run() {
             app.manage(ports::Monitor::new(
                 app.path().home_dir()?,
                 settings::alerts(app.handle()),
+                settings::stop_grace_seconds(app.handle()),
             ));
             ports::start(app.handle())?;
             ports::open_alerts_on_click(app.handle(), show_main);
@@ -146,10 +147,12 @@ pub fn run() {
             ports::snapshot,
             ports::refresh,
             ports::set_refresh_interval,
+            ports::preview_control,
             ports::stop_server,
             ports::restart_server,
             settings::get_settings,
             settings::set_alerts,
+            settings::set_stop_grace,
             settings::set_shortcut,
         ])
         .build(tauri::generate_context!())

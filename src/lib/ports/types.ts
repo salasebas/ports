@@ -14,10 +14,45 @@ export type ServerTarget =
 	| { kind: "process"; port: number; listener: ProcessIdentity; root: ProcessIdentity; addresses: string[] }
 	| { kind: "container"; port: number; id: string; engine: string; addresses: string[] };
 
+/** One process of a server's tree. */
 export interface ProcessUsage {
 	process: ProcessIdentity;
+	/** Parent PID; the tree's top process may have a parent outside the server. */
+	parent?: number;
+	name: string;
+	/** The ports it listens on itself, e.g. each worker of a prefork server. */
+	ports: number[];
 	memoryBytes: number;
 	cpuPercent: number;
+}
+
+/** What starts a server again when it exits. */
+export interface Supervisor {
+	kind: "homebrew" | "pm2" | "supervisord";
+	/** The Homebrew formula, or the PM2 app once PM2 confirmed it. */
+	name?: string;
+	/** Ports stops and restarts it through the supervisor; otherwise the supervisor may start it again. */
+	supported: boolean;
+}
+
+/** What started a server and may start it again, such as nodemon. */
+export interface ParentProcess {
+	process: ProcessIdentity;
+	name: string;
+}
+
+/** One process a control ends. */
+export interface AffectedProcess {
+	process: ProcessIdentity;
+	name: string;
+	ports: number[];
+}
+
+/** What a stop, restart or Force Kill would end, from `preview_control`. */
+export interface ControlPreview {
+	/** Empty for a container, which Docker controls as a whole. */
+	processes: AffectedProcess[];
+	supervisor?: Supervisor;
 }
 
 export interface Server {
@@ -58,6 +93,9 @@ export interface Server {
 	protected: boolean;
 	/** Ports can launch it again the same way; false for system services. */
 	restartable: boolean;
+	supervisor?: Supervisor;
+	/** Stop parent ends it too, so it can't start the server again. */
+	parent?: ParentProcess;
 	startedAt: number;
 	lastActiveAt: number;
 	/** The server's whole process tree. */

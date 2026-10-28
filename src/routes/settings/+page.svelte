@@ -23,7 +23,7 @@
 	import { cn } from "$lib/utils";
 	import { hiddenLabel, setRefreshInterval, unhide } from "$lib/ports/ports-store.svelte";
 	import { editors, preferences, refreshIntervals } from "$lib/ports/preferences.svelte";
-	import { alertThresholds, settings, type AlertSettings } from "$lib/settings.svelte";
+	import { alertThresholds, settings, stopGraces, type AlertSettings } from "$lib/settings.svelte";
 
 	type Mode = "light" | "dark" | "system";
 
@@ -62,6 +62,14 @@
 	async function setAlerts(change: Partial<AlertSettings>) {
 		try {
 			await settings.setAlerts(change);
+		} catch (error) {
+			toast.error(String(error));
+		}
+	}
+
+	async function setStopGrace(seconds: number) {
+		try {
+			await settings.setStopGrace(seconds);
 		} catch (error) {
 			toast.error(String(error));
 		}
@@ -175,9 +183,31 @@
 			<Field.Field orientation="horizontal">
 				<Field.Content>
 					<Field.Label for="{id}-confirm">Confirm actions</Field.Label>
-					<Field.Description>Ask before stopping or restarting a server.</Field.Description>
+					<Field.Description
+						>Ask before stopping or restarting a server. Force Kill and broader stops always ask.</Field.Description
+					>
 				</Field.Content>
 				<Switch id="{id}-confirm" bind:checked={preferences.confirmActions.current} />
+			</Field.Field>
+			<Field.Separator />
+			<Field.Field orientation="horizontal">
+				<Field.Content>
+					<Field.Label for="{id}-grace">Wait before killing</Field.Label>
+					<Field.Description
+						>How long Stop gives a server to exit on its own. Force Kill doesn't wait.</Field.Description
+					>
+				</Field.Content>
+				<NativeSelect.Root
+					id="{id}-grace"
+					size="sm"
+					class="w-36"
+					disabled={!desktop}
+					bind:value={() => String(settings.current.stopGraceSeconds), (value) => setStopGrace(Number(value))}
+				>
+					{#each stopGraces as grace (grace.value)}
+						<NativeSelect.Option value={grace.value}>{grace.label}</NativeSelect.Option>
+					{/each}
+				</NativeSelect.Root>
 			</Field.Field>
 		{/snippet}
 		{@render section("Servers", servers)}
@@ -224,8 +254,8 @@
 					<Field.Title>Hidden servers</Field.Title>
 					<Field.Description>
 						{preferences.hidden.current.length
-							? "Left out of both lists. Remove one to show it again."
-							: "Hide a server from its details to leave it out of both lists."}
+							? "Left out of the window and the menu bar list. Remove one to show it again."
+							: "None yet. To hide one, open a server's details and choose Hide. It then leaves the window and the menu bar list."}
 					</Field.Description>
 				</Field.Content>
 				{#if preferences.hidden.current.length}

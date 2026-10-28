@@ -5,6 +5,8 @@ use std::path::PathBuf;
 
 use sysinfo::System;
 
+use super::project;
+
 #[derive(Debug, Default)]
 pub struct ProcessTable {
     parents: HashMap<u32, u32>,
@@ -84,6 +86,36 @@ impl ProcessTable {
     pub fn user(&self, pid: u32) -> Option<u32> {
         self.users.get(&pid).copied()
     }
+}
+
+const SHELLS: [&str; 8] = ["sh", "bash", "zsh", "dash", "fish", "ksh", "tcsh", "csh"];
+
+/// What started a service and may start it again when it exits, such as
+/// nodemon or turbo: the nearest ancestor of `root` past any shell wrapper.
+/// Only this user's own programs count, never a terminal or shell session,
+/// an app, Ports or what started it, or the system.
+pub fn watcher(root: u32, table: &ProcessTable, groups: &impl Groups) -> Option<u32> {
+    let user = table.user(root)?;
+    let own = groups.own_pid();
+    let ports: Vec<u32> = std::iter::once(own).chain(table.ancestors(own)).collect();
+    for ancestor in table.ancestors(root) {
+        let program = table.programs.get(&ancestor)?;
+        if ancestor <= 1
+            || table.user(ancestor) != Some(user)
+            || groups.sid(ancestor) == Some(ancestor)
+            || ports.contains(&ancestor)
+            || project::is_app_bundle(program)
+        {
+            return None;
+        }
+        let shell = program
+            .file_name()
+            .is_some_and(|name| SHELLS.contains(&name.to_string_lossy().as_ref()));
+        if !shell {
+            return Some(ancestor);
+        }
+    }
+    None
 }
 
 /// Process group and session lookups, injectable so the ownership rules can be tested.
@@ -291,6 +323,49 @@ mod tests {
             (NODE, SH),
             (ESBUILD, NODE),
         ])
+    }
+
+    #[test]
+    fn a_watcher_is_the_nearest_own_program_above_the_shell_wrappers() {
+        // Editor task: zsh (session) → nodemon → sh -c → node (listens).
+        const NODEMON: u32 = 300;
+        let mut table = ProcessTable::from_parents([(NODEMON, SHELL), (SH, NODEMON), (NODE, SH)]);
+        table.programs = HashMap::from([
+            (SHELL, PathBuf::from("/bin/zsh")),
+            (NODEMON, PathBuf::from("/usr/local/bin/node")),
+            (SH, PathBuf::from("/bin/sh")),
+            (NODE, PathBuf::from("/usr/local/bin/node")),
+        ]);
+        table.users = [SHELL, NODEMON, SH, NODE].map(|pid| (pid, 501)).into();
+        let groups = FakeGroups {
+            pgids: HashMap::new(),
+            session_leaders: vec![SHELL],
+            own: 999,
+        };
+        assert_eq!(watcher(NODE, &table, &groups), Some(NODEMON));
+        // A shell job's own leader sits right under the session: no watcher.
+        assert_eq!(watcher(NODEMON, &table, &groups), None);
+        // Nor an app, another user's process, or what started Ports.
+        let app = FakeGroups {
+            own: NODEMON,
+            ..groups
+        };
+        assert_eq!(watcher(NODE, &table, &app), None);
+        table.programs.insert(
+            NODEMON,
+            PathBuf::from("/Applications/Code.app/Contents/MacOS/Code Helper"),
+        );
+        assert_eq!(watcher(NODE, &table, &FakeGroups { own: 999, ..app }), None);
+        table
+            .programs
+            .insert(NODEMON, PathBuf::from("/usr/local/bin/node"));
+        table.users.insert(NODEMON, 0);
+        let groups = FakeGroups {
+            pgids: HashMap::new(),
+            session_leaders: vec![SHELL],
+            own: 999,
+        };
+        assert_eq!(watcher(NODE, &table, &groups), None);
     }
 
     #[test]

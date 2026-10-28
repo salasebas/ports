@@ -22,21 +22,34 @@ export const alertThresholds = [
 	...[1, 2, 4, 8].map((gb) => ({ value: String(gb * GB), label: `Above ${gb} GB` })),
 ];
 
+/** Choices for `Settings.stopGraceSeconds`, within the backend's 1 to 60 seconds. */
+export const stopGraces = [1, 3, 5, 10, 30, 60].map((seconds) => ({
+	value: String(seconds),
+	label: seconds === 60 ? "1 minute" : seconds === 1 ? "1 second" : `${seconds} seconds`,
+}));
+
 /** Mirrors `Settings` in `src-tauri/src/settings.rs`. */
 export interface Settings {
 	revision: number;
 	/** The shortcut that shows the popover, e.g. `alt+super+KeyP`; null when there's none. */
 	shortcut: string | null;
 	alerts: AlertSettings;
+	/** How long Stop waits for a server to exit before it kills it. */
+	stopGraceSeconds: number;
 }
 
 /**
  * Settings the backend keeps, since it needs them while every window is
- * hidden: the shortcut and the memory alerts. Each window loads them once
+ * hidden: the shortcut, the memory alerts and the shutdown grace period. Each window loads them once
  * and follows the changes made in any window.
  */
 export class BackendSettings {
-	current = $state.raw<Settings>({ revision: -1, shortcut: null, alerts: { enabled: true, thresholdBytes: 2 * GB } });
+	current = $state.raw<Settings>({
+		revision: -1,
+		shortcut: null,
+		alerts: { enabled: true, thresholdBytes: 2 * GB },
+		stopGraceSeconds: 3,
+	});
 	#loaded = false;
 
 	apply = (settings: Settings) => {
@@ -66,6 +79,10 @@ export class BackendSettings {
 
 	setAlerts = async (alerts: Partial<AlertSettings>) => {
 		this.apply(await invoke<Settings>("set_alerts", { alerts }));
+	};
+
+	setStopGrace = async (seconds: number) => {
+		this.apply(await invoke<Settings>("set_stop_grace", { seconds }));
 	};
 }
 

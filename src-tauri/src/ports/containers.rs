@@ -1,5 +1,6 @@
 //! Published container bindings, collected and controlled through the local Engine API.
 
+use super::control::Shutdown;
 use reqwest::Method;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
@@ -295,24 +296,40 @@ fn locate(home: &Path, target: &ContainerTarget) -> Result<Container, String> {
         .ok_or_else(|| format!(":{} is no longer published by that container", target.port))
 }
 
-pub fn stop(home: &Path, target: &ContainerTarget) -> Result<(), String> {
-    let container = locate(home, target)?;
-    request(
-        &client(&container.socket)?,
-        Method::POST,
-        &format!("/containers/{}/stop", container.id),
-        CONTROL_TIMEOUT,
-    )
-    .map(drop)
+/// Docker's own stop waits `grace` before it kills the container; Force Kill
+/// kills it right away. Restart stops it the same way first.
+pub fn stop(home: &Path, target: &ContainerTarget, shutdown: Shutdown) -> Result<(), String> {
+    if shutdown.force {
+        control(home, target, "kill", Duration::ZERO)
+    } else {
+        control(home, target, "stop", shutdown.grace)
+    }
 }
 
-pub fn restart(home: &Path, target: &ContainerTarget) -> Result<(), String> {
+pub fn restart(home: &Path, target: &ContainerTarget, shutdown: Shutdown) -> Result<(), String> {
+    control(home, target, "restart", shutdown.grace)
+}
+
+fn control(
+    home: &Path,
+    target: &ContainerTarget,
+    action: &str,
+    grace: Duration,
+) -> Result<(), String> {
     let container = locate(home, target)?;
+    let path = match action {
+        "kill" => format!("/containers/{}/kill", container.id),
+        _ => format!(
+            "/containers/{}/{action}?t={}",
+            container.id,
+            grace.as_secs()
+        ),
+    };
     request(
         &client(&container.socket)?,
         Method::POST,
-        &format!("/containers/{}/restart", container.id),
-        CONTROL_TIMEOUT,
+        &path,
+        CONTROL_TIMEOUT + grace,
     )
     .map(drop)
 }

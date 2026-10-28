@@ -129,6 +129,8 @@ mod tests {
             lan_url: None,
             protected: false,
             restartable: true,
+            supervisor: None,
+            parent: None,
             started_at: 0,
             last_active_at: 0,
             memory_bytes,
