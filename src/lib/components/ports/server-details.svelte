@@ -1,6 +1,7 @@
 <script lang="ts">
 	import ChevronDownIcon from "@lucide/svelte/icons/chevron-down";
 	import BookmarkIcon from "@lucide/svelte/icons/bookmark";
+	import BookmarkMinusIcon from "@lucide/svelte/icons/bookmark-minus";
 	import ChevronLeftIcon from "@lucide/svelte/icons/chevron-left";
 	import CircleAlertIcon from "@lucide/svelte/icons/circle-alert";
 	import CodeIcon from "@lucide/svelte/icons/code";
@@ -233,10 +234,23 @@
 					{fileManagerName}
 				</Button>
 			</div>
-			<Button variant="secondary" size="sm" onclick={() => store.saveProject(server)}>
-				<BookmarkIcon data-icon="inline-start" />
-				{saved ? "Update saved project" : "Save project"}
-			</Button>
+			{#if saved}
+				<div class="grid grid-cols-2 gap-2">
+					<Button variant="secondary" size="sm" onclick={() => store.saveProject(server)}>
+						<BookmarkIcon data-icon="inline-start" />
+						Update saved
+					</Button>
+					<Button variant="secondary" size="sm" onclick={() => store.forgetSaved(saved)}>
+						<BookmarkMinusIcon data-icon="inline-start" />
+						Remove from saved
+					</Button>
+				</div>
+			{:else}
+				<Button variant="secondary" size="sm" onclick={() => store.saveProject(server)}>
+					<BookmarkIcon data-icon="inline-start" />
+					Save project
+				</Button>
+			{/if}
 			{#if saved}
 				<p class="text-xs text-muted-foreground">
 					Saved to start {saved.command} at {saved.expectedAddress}:{saved.expectedPort}. Restart above still signals

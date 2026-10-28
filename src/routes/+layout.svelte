@@ -42,7 +42,8 @@
 <svelte:window {onkeydown} />
 
 <ModeWatcher />
-<Toaster position="bottom-right" closeButton />
+<!-- Bottom center, clear of the details drawer that slides in from the right. -->
+<Toaster position="bottom-center" closeButton />
 <Tooltip.Provider delayDuration={400}>
 	{@render children()}
 </Tooltip.Provider>
