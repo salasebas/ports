@@ -9,9 +9,13 @@ mod icons;
 mod identity;
 mod network;
 mod pages;
+mod place;
 mod processes;
 mod project;
+pub mod pulls;
 mod sampler;
+pub mod saved;
+mod session;
 mod sockets;
 mod supervisors;
 
@@ -147,6 +151,21 @@ impl Monitor {
         let secs = clamp_grace(secs);
         self.stop_grace_secs.store(secs, Ordering::Relaxed);
         secs
+    }
+
+    /// The servers from the last sample, if one has finished.
+    pub(crate) fn latest_servers(&self) -> Option<Vec<sampler::Server>> {
+        lock(&self.latest)
+            .as_ref()
+            .map(|snapshot| snapshot.servers.clone())
+    }
+
+    /// Samples once when Ports has not published anything yet, then returns the servers.
+    pub(crate) fn servers(&self, app: &AppHandle) -> Vec<sampler::Server> {
+        if self.latest_servers().is_none() {
+            let _ = self.publish(app);
+        }
+        self.latest_servers().unwrap_or_default()
     }
 
     fn shutdown(&self, force: bool) -> Shutdown {
@@ -376,6 +395,16 @@ async fn blocking<T: Send + 'static>(
 /// Answers the windows' `ports-icon://` requests with a project's or page's icon.
 pub fn serve_icon(app: &AppHandle, path: &str) -> Response<Vec<u8>> {
     app.state::<Monitor>().icons.respond(path)
+}
+
+#[tauri::command]
+pub fn reveal_session(app: AppHandle, path: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let home = project::canonical(&app.path().home_dir().map_err(|error| error.to_string())?);
+    let path = session::revealable(&home, std::path::Path::new(&path))?;
+    app.opener()
+        .reveal_item_in_dir(path)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]

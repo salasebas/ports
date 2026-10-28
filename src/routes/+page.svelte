@@ -11,6 +11,8 @@
 	import ArrowUpDownIcon from "@lucide/svelte/icons/arrow-up-down";
 	import ArrowUpIcon from "@lucide/svelte/icons/arrow-up";
 	import ArrowUpRightIcon from "@lucide/svelte/icons/arrow-up-right";
+	import ChevronDownIcon from "@lucide/svelte/icons/chevron-down";
+	import ChevronRightIcon from "@lucide/svelte/icons/chevron-right";
 	import ClockIcon from "@lucide/svelte/icons/clock";
 	import CpuIcon from "@lucide/svelte/icons/cpu";
 	import FolderIcon from "@lucide/svelte/icons/folder";
@@ -40,11 +42,14 @@
 	import RenameDialog from "$lib/components/ports/rename-dialog.svelte";
 	import ServerFilter from "$lib/components/ports/server-filter.svelte";
 	import ServerSearch from "$lib/components/ports/server-search.svelte";
+	import SavedSection from "$lib/components/ports/saved-section.svelte";
+	import ProjectDetails from "$lib/components/ports/project-details.svelte";
 	import SettingsButton from "$lib/components/ports/settings-button.svelte";
 	import Sparkline from "$lib/components/ports/sparkline.svelte";
 	import ConfirmDialog from "$lib/components/ports/confirm-dialog.svelte";
 	import UsageSummary from "$lib/components/ports/usage-summary.svelte";
 	import {
+		placeLabel,
 		canStop,
 		confirmedFramework,
 		formatBytesText,
@@ -53,9 +58,11 @@
 		serverActivity,
 		serverProcessId,
 	} from "$lib/ports/format";
-	import { PortsStore, type ServerGroup } from "$lib/ports/ports-store.svelte";
+	import { listRows, toggleCollapsed, type GroupRow } from "$lib/ports/grouping";
+	import { PortsStore } from "$lib/ports/ports-store.svelte";
 	import { preferences, sortKeys, type SortKey } from "$lib/ports/preferences.svelte";
 	import type { Server, ServerStatus } from "$lib/ports/types";
+	import type { SavedProject } from "$lib/ports/projects";
 	import { cn } from "$lib/utils";
 
 	const store = new PortsStore();
@@ -74,11 +81,21 @@
 
 	// Keeps the drawer populated while it animates out after a stop.
 	let lastSelected = $state.raw<Server | null>(null);
+	let lastProject = $state.raw<SavedProject | null>(null);
+	let lastKind = $state<"server" | "project">("server");
 	const shown = $derived(store.selected ?? lastSelected);
+	const shownProject = $derived(store.selectedProject ?? lastProject);
 
 	function showDetails(server: Server) {
 		lastSelected = server;
+		lastKind = "server";
 		store.select(server.id);
+	}
+
+	function showProject(project: SavedProject) {
+		lastProject = project;
+		lastKind = "project";
+		store.selectProject(project.id);
 	}
 
 	// `/?details=5173` opens a server's details, e.g. after a click on its memory
@@ -99,16 +116,11 @@
 		preferences.sort.current = { key, descending };
 	}
 
-	type Row = { key: string; server: Server; group?: never } | { key: string; group: ServerGroup; server?: never };
+	const rows = $derived(listRows(store.filtered, preferences.groupBy.current, preferences.collapsedGroups.current));
 
-	const rows = $derived<Row[]>(
-		preferences.groupByProject.current
-			? store.groups.flatMap((group) => [
-					{ key: `group:${group.folder ?? ""}`, group },
-					...group.servers.map((server) => ({ key: server.id, server })),
-				])
-			: store.filtered.map((server) => ({ key: server.id, server })),
-	);
+	function toggleGroup(key: string) {
+		preferences.collapsedGroups.current = toggleCollapsed(preferences.collapsedGroups.current, key);
+	}
 </script>
 
 {#snippet action(label: string, Icon: Component, onclick: () => void, disabled = false)}
@@ -191,29 +203,51 @@
 				<DropdownMenu.RadioItem value="descending" closeOnSelect={false}>Descending</DropdownMenu.RadioItem>
 			</DropdownMenu.RadioGroup>
 			<DropdownMenu.Separator />
-			<DropdownMenu.CheckboxItem bind:checked={preferences.groupByProject.current}>
-				Group by project
-			</DropdownMenu.CheckboxItem>
+			<DropdownMenu.Group>
+				<DropdownMenu.GroupHeading>Group by</DropdownMenu.GroupHeading>
+				<DropdownMenu.RadioGroup bind:value={preferences.groupBy.current}>
+					<DropdownMenu.RadioItem value="flat" closeOnSelect={false}>Flat list</DropdownMenu.RadioItem>
+					<DropdownMenu.RadioItem value="project" closeOnSelect={false}>Project</DropdownMenu.RadioItem>
+					<DropdownMenu.RadioItem value="repository" closeOnSelect={false}>Repository</DropdownMenu.RadioItem>
+				</DropdownMenu.RadioGroup>
+			</DropdownMenu.Group>
 		</DropdownMenu.Content>
 	</DropdownMenu.Root>
 {/snippet}
 
-{#snippet groupCell(group: ServerGroup)}
-	<td class="col-span-full flex min-w-0 items-center gap-2 px-5 py-2 text-xs text-muted-foreground">
-		<FolderIcon class="size-3.5 shrink-0 opacity-70" />
-		{#if group.folder}
-			<span class="shrink-0 font-medium text-foreground">{group.folder.split("/").at(-1)}</span>
-			<span class="truncate">{group.folder}</span>
-		{:else}
-			<span class="font-medium text-foreground">Outside a project</span>
-		{/if}
-		<span class="ml-auto font-mono tabular-nums">{group.servers.length}</span>
+{#snippet groupCell(row: GroupRow)}
+	{@const collapsed = preferences.collapsedGroups.current.includes(row.key)}
+	{@const Chevron = collapsed ? ChevronRightIcon : ChevronDownIcon}
+	<td class="col-span-full flex min-w-0 items-center px-5 py-1 text-xs text-muted-foreground">
+		<button
+			type="button"
+			class="flex min-w-0 flex-1 items-center gap-2 rounded-md py-1 text-start {row.depth === 1 ? 'ps-6' : ''}"
+			aria-expanded={!collapsed}
+			onclick={(event: MouseEvent) => {
+				event.stopPropagation();
+				toggleGroup(row.key);
+			}}
+		>
+			<Chevron class="size-3.5 shrink-0 opacity-70" />
+			<FolderIcon class="size-3.5 shrink-0 opacity-70" />
+			<span class="shrink-0 font-medium text-foreground">{row.name}</span>
+			{#if row.detail}
+				<span class="shrink-0">{row.detail}</span>
+			{/if}
+			{#if row.path}
+				<span class="truncate">{row.path}</span>
+			{/if}
+			<span class="ms-auto shrink-0 font-mono tabular-nums">
+				{row.count} · {formatBytesText(row.memoryBytes)} · {Math.round(row.cpuPercent)}%
+			</span>
+		</button>
 	</td>
 {/snippet}
 
 {#snippet serverCells(server: Server)}
 	{@const attention = server.status === "attention"}
 	{@const leaking = attention && server.responding}
+	{@const place = placeLabel(server)}
 	<Table.Cell class="py-3.5 pl-5">
 		<PortLabel port={server.port} class="text-[15px]" />
 	</Table.Cell>
@@ -245,7 +279,7 @@
 				<span
 					class={cn("truncate text-xs", attention || !server.responding ? "text-warning" : "text-muted-foreground")}
 				>
-					{server.branch ? `${server.branch} · ` : ""}{serverActivity(server)}
+					{place ? `${place} · ` : ""}{serverActivity(server)}
 				</span>
 			</div>
 		</div>
@@ -349,7 +383,7 @@
 						</Table.Header>
 						<Table.Body class="grid">
 							{#each rows as row (row.key)}
-								{@const server = row.server}
+								{@const server = row.kind === "server" ? row.server : undefined}
 								<!-- A plain <tr> because animate: and transitions need an element, not a component. -->
 								<tr
 									data-slot="table-row"
@@ -364,8 +398,8 @@
 								>
 									{#if server}
 										{@render serverCells(server)}
-									{:else if row.group}
-										{@render groupCell(row.group)}
+									{:else if row.kind !== "server"}
+										{@render groupCell(row)}
 									{/if}
 								</tr>
 							{/each}
@@ -381,15 +415,19 @@
 		{:else}
 			<NoResults {store} class="flex-1" />
 		{/if}
+		<SavedSection {store} onOpen={showProject} />
 	</main>
 </div>
 
 <Drawer.Root
 	direction="right"
 	bind:open={
-		() => store.selected !== null,
+		() => store.selected !== null || store.selectedProject !== null,
 		(open) => {
-			if (!open) store.select(null);
+			if (!open) {
+				store.select(null);
+				store.selectProject(null);
+			}
 		}
 	}
 >
@@ -402,7 +440,11 @@
 				</Button>
 			{/snippet}
 		</Drawer.Close>
-		{#if shown}
+		{#if lastKind === "project" && shownProject && !store.selected}
+			<ScrollArea class="min-h-0 flex-1">
+				<ProjectDetails project={shownProject} {store} class="p-3" />
+			</ScrollArea>
+		{:else if shown}
 			<ScrollArea class="min-h-0 flex-1">
 				<ServerDetails server={shown} {store} class="p-3" />
 			</ScrollArea>

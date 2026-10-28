@@ -4,7 +4,7 @@
 	import SquareIcon from "@lucide/svelte/icons/square";
 	import WifiIcon from "@lucide/svelte/icons/wifi";
 	import { Button } from "$lib/components/ui/button";
-	import { canStop, confirmedFramework, formatBytes, isMeasured, serverActivity } from "$lib/ports/format";
+	import { canStop, confirmedFramework, formatBytes, isMeasured, placeLabel, serverActivity } from "$lib/ports/format";
 	import type { PortsStore } from "$lib/ports/ports-store.svelte";
 	import { preferences } from "$lib/ports/preferences.svelte";
 	import type { Server } from "$lib/ports/types";
@@ -22,7 +22,7 @@
 	});
 	const attention = $derived(server.status === "attention");
 	const leaking = $derived(attention && server.responding);
-	const detail = $derived(server.branch ?? confirmedFramework(server) ?? server.process);
+	const detail = $derived(placeLabel(server) ?? confirmedFramework(server) ?? server.process);
 </script>
 
 <li

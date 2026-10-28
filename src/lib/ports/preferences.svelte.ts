@@ -1,9 +1,12 @@
 import { PersistedState } from "runed";
+import { groupByFromStorage, type GroupBy } from "./grouping";
 import type { ServerKind } from "./types";
 
 export type Metric = "memory" | "cpu";
 
 export type SortKey = "port" | "name" | "memory" | "cpu" | "uptime";
+
+export type { GroupBy } from "./grouping";
 
 export interface Sort {
 	key: SortKey;
@@ -45,8 +48,16 @@ export const preferences = {
 	refreshInterval: new PersistedState<number>("ports.refreshInterval", 2000),
 	/** Order of both lists, after the pinned servers. */
 	sort: new PersistedState<Sort>("ports.sort", { key: "port", descending: false }),
-	/** Groups the main window's table by project folder. */
-	groupByProject: new PersistedState("ports.groupByProject", false),
+	/**
+	 * Flat list, one group per project folder, or repository then worktree.
+	 * A previous "group by project" switch still selects the project grouping.
+	 */
+	groupBy: new PersistedState<GroupBy>(
+		"ports.groupBy",
+		groupByFromStorage(null, typeof localStorage === "undefined" ? null : localStorage.getItem("ports.groupByProject")),
+	),
+	/** Group headers the user folded, by their grouping key. Visual only. */
+	collapsedGroups: new PersistedState<string[]>("ports.collapsedGroups", []),
 	/** Servers listed first, by `serverKey`. */
 	pinned: new PersistedState<string[]>("ports.pinned", []),
 	/** Names the user gave ports, by port number. */

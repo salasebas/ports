@@ -126,6 +126,8 @@ beforeEach(() => {
 	preferences.confirmActions.current = true;
 	preferences.shownKinds.current = ["dev", "database", "container"];
 	preferences.sort.current = { key: "port", descending: false };
+	preferences.groupBy.current = "flat";
+	preferences.collapsedGroups.current = [];
 	preferences.pinned.current = [];
 	preferences.names.current = {};
 	preferences.hidden.current = [];
@@ -431,6 +433,37 @@ describe("order", () => {
 		const store = storeWith(web, app, appApi);
 		store.togglePin(appApi);
 		expect(store.filtered).toEqual([app, appApi, web]);
+	});
+
+	it("keeps a pin and a protection when the list is grouped by repository", () => {
+		const main = server({
+			port: 3000,
+			name: "web",
+			folder: "~/repo",
+			repositoryId: "~/repo/.git",
+			worktreePath: "~/repo",
+			memoryBytes: 10,
+		});
+		const hotfix = server({
+			port: 3001,
+			pid: 201,
+			name: "web",
+			folder: "~/hotfix",
+			repositoryId: "~/repo/.git",
+			worktreePath: "~/hotfix",
+			worktree: "hotfix",
+			memoryBytes: 4,
+		});
+		const store = storeWith(main, hotfix);
+		store.togglePin(main);
+		store.setProtected(hotfix, true);
+		preferences.groupBy.current = "repository";
+		expect(store.isPinned(main)).toBe(true);
+		expect(store.isPinned(hotfix)).toBe(false);
+		expect(store.filtered.find((item) => item.port === 3001)?.protected).toBe(true);
+		expect(store.filtered.reduce((sum, item) => sum + item.memoryBytes, 0)).toBe(14);
+		preferences.groupBy.current = "flat";
+		expect(store.filtered.map((item) => item.port)).toEqual([3000, 3001]);
 	});
 
 	it("groups servers by project, servers outside a project last", () => {

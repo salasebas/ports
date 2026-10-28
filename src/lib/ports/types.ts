@@ -77,6 +77,24 @@ export interface Attribution {
 	evidence: Evidence[];
 }
 
+export type SessionAgent = "cursor" | "claude" | "codex" | "terminal";
+
+/** Evidence that a process tree or an allowlisted variable names a session. Never a command argument. */
+export type SessionEvidence = { source: "ancestor"; name: string } | { source: "environment"; name: string };
+
+export type Resume =
+	| { state: "available"; label: string; path: string }
+	| { state: "missing"; message: string }
+	| { state: "unsupported"; message: string };
+
+/** Who started a server, when Ports can tell. Absent means the session is unknown. */
+export interface Session {
+	agent: SessionAgent;
+	label: string;
+	evidence: SessionEvidence[];
+	resume: Resume;
+}
+
 /**
  * Whether the server answered a request for `/`. `unknown` until checked;
  * databases, desktop apps and other users' processes are never checked.
@@ -114,6 +132,17 @@ export interface Server {
 	/** The name the project's manifest gives it, which may differ from the folder's. */
 	projectName?: string;
 	branch?: string;
+	/** Linked Git worktree name. Absent on the main checkout. */
+	worktree?: string;
+	/** This checkout's folder. Different for each worktree of one repository. */
+	worktreePath?: string;
+	/** The repository's main folder, shared by its worktrees. */
+	repository?: string;
+	repositoryName?: string;
+	/** Common git directory. The grouping key for one repository. */
+	repositoryId?: string;
+	/** Set only when ancestry or an allowlisted variable names an agent or terminal. */
+	session?: Session;
 	framework?: string;
 	/** The installed version of `framework`, when the project pins one. */
 	frameworkVersion?: string;

@@ -16,8 +16,10 @@ use super::icons::{self, Icons};
 use super::identity::ProcessIdentity;
 use super::network;
 use super::pages::Web;
+use super::place;
 use super::processes::{self, Job, OsGroups, ProcessTable};
 use super::project::{self, Attribution, Evidence};
+use super::session::{self, Session};
 use super::sockets::Sockets;
 use super::supervisors::{self, LaunchdJobs, Supervisor};
 
@@ -70,6 +72,23 @@ pub struct Server {
     pub project_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// Linked worktree name, when this checkout is one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
+    /// This checkout's folder. Distinct for each worktree of a repository.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree_path: Option<String>,
+    /// The main checkout's folder. Shared by every worktree of the repository.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository_name: Option<String>,
+    /// The common git directory, shared by every worktree of one repository.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository_id: Option<String>,
+    /// Set only when process ancestry or an allowlisted variable names an agent or terminal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session: Option<Session>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub framework: Option<&'static str>,
     /// The installed version of `framework`, when the project pins one.
@@ -277,6 +296,12 @@ impl Sampler {
                 ports.entry(*pid).or_default().insert(socket.port());
             }
         }
+        let mut env_pids = Vec::new();
+        for (job, _) in jobs.values() {
+            env_pids.push(job.root);
+            env_pids.extend(table.ancestors(job.root).into_iter().take(12));
+        }
+        session::refresh(&mut self.system, &env_pids);
         let mut launchd = LaunchdJobs::default();
         let mut servers = Vec::new();
         let mut seen = HashSet::new();
@@ -325,6 +350,7 @@ impl Sampler {
                             .into_owned(),
                     })
                 });
+            let session = session_for(&self.system, &self.home, job.root, &table);
             if let Some(server) = describe(
                 &self.system,
                 &self.home,
@@ -339,6 +365,7 @@ impl Sampler {
                     id,
                     addresses: addresses.into_iter().collect(),
                     resources,
+                    session,
                 },
                 tracked,
                 now,
@@ -416,6 +443,19 @@ struct Service {
     id: String,
     addresses: Vec<IpAddr>,
     resources: Vec<ProcessUsage>,
+    session: Option<Session>,
+}
+
+fn session_for(system: &System, home: &Path, root: u32, table: &ProcessTable) -> Option<Session> {
+    let own = std::process::id();
+    let skip: HashSet<u32> = std::iter::once(own).chain(table.ancestors(own)).collect();
+    let chain: Vec<_> = std::iter::once(root)
+        .chain(table.ancestors(root))
+        .take(12)
+        .filter(|pid| !skip.contains(pid))
+        .filter_map(|pid| session::observe(system, pid))
+        .collect();
+    session::attribute(&chain, home)
 }
 
 fn describe(
@@ -436,6 +476,7 @@ fn describe(
         id,
         addresses,
         resources,
+        session,
     } = service;
     let listener = system.process(Pid::from_u32(job.listener))?;
     let root = system.process(Pid::from_u32(job.root)).unwrap_or(listener);
@@ -461,6 +502,9 @@ fn describe(
         .as_deref()
         .and_then(|cwd| project::project_folder(cwd, home));
     let folder = project.as_ref().map(|project| project.root.as_path());
+    let place = folder
+        .and_then(|folder| place::checkout(folder, home))
+        .map(|checkout| checkout.place(home));
     // The root (`php artisan serve`) names the framework; only the listener's
     // own command proves it speaks HTTP, since a job can run TCP helpers too.
     let mut detection = project::framework(
@@ -508,7 +552,13 @@ fn describe(
         name: folder
             .and_then(Path::file_name)
             .map_or_else(|| process.clone(), |n| n.to_string_lossy().into_owned()),
-        branch: folder.and_then(|f| project::git_branch(f, home)),
+        branch: place.as_ref().and_then(|place| place.branch.clone()),
+        worktree: place.as_ref().and_then(|place| place.worktree.clone()),
+        worktree_path: place.as_ref().map(|place| place.worktree_path.clone()),
+        repository: place.as_ref().map(|place| place.repository.clone()),
+        repository_name: place.as_ref().map(|place| place.repository_name.clone()),
+        repository_id: place.as_ref().map(|place| place.repository_id.clone()),
+        session,
         folder: folder.map(|f| project::display_path(f, home)),
         cwd: cwd.as_deref().map(|cwd| project::display_path(cwd, home)),
         project_name: folder.and_then(project::manifest_name),
@@ -576,6 +626,12 @@ fn unowned(port: u16, owner: String, first_seen: u64) -> Server {
         cwd: None,
         project_name: None,
         branch: None,
+        worktree: None,
+        worktree_path: None,
+        repository: None,
+        repository_name: None,
+        repository_id: None,
+        session: None,
         framework,
         framework_version: None,
         attribution: detection.attribution,
@@ -638,6 +694,12 @@ fn contained(port: u16, container: &Container) -> Server {
         cwd: None,
         project_name: None,
         branch: None,
+        worktree: None,
+        worktree_path: None,
+        repository: None,
+        repository_name: None,
+        repository_id: None,
+        session: None,
         framework,
         framework_version: None,
         attribution: detection.attribution,
