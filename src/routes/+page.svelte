@@ -92,6 +92,11 @@
 		store.select(server.id);
 	}
 
+	/** A toast sits above the drawer: swiping or closing it must not close the drawer. */
+	function keepOpenForToasts(event: Event) {
+		if (event.target instanceof Element && event.target.closest("[data-sonner-toaster]")) event.preventDefault();
+	}
+
 	function showProject(project: SavedProject) {
 		lastProject = project;
 		lastKind = "project";
@@ -431,7 +436,7 @@
 		}
 	}
 >
-	<Drawer.Content class="w-[26rem] sm:max-w-[26rem]">
+	<Drawer.Content class="w-[26rem] sm:max-w-[26rem]" onInteractOutside={keepOpenForToasts}>
 		<Drawer.Title class="sr-only">Server details</Drawer.Title>
 		<Drawer.Close>
 			{#snippet child({ props })}
