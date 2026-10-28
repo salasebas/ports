@@ -191,6 +191,7 @@ fn pm2_home(title: &str) -> Option<PathBuf> {
 }
 
 /// `launchctl list` prints `PID\tStatus\tLabel`, with `-` for jobs that aren't running.
+#[cfg(any(target_os = "macos", test))]
 fn parse_launchctl(output: &str) -> HashMap<u32, String> {
     output
         .lines()
