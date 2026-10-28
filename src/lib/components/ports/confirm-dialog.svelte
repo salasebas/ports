@@ -2,7 +2,6 @@
 	import CircleAlertIcon from "@lucide/svelte/icons/circle-alert";
 	import * as Alert from "$lib/components/ui/alert";
 	import * as AlertDialog from "$lib/components/ui/alert-dialog";
-	import { Badge } from "$lib/components/ui/badge";
 	import { Checkbox } from "$lib/components/ui/checkbox";
 	import * as Field from "$lib/components/ui/field";
 	import { Skeleton } from "$lib/components/ui/skeleton";
@@ -15,6 +14,7 @@
 	import { cubicOut } from "svelte/easing";
 	import { prefersReducedMotion } from "svelte/motion";
 	import { fade, fly } from "svelte/transition";
+	import PortLabel from "./port-label.svelte";
 
 	let { store }: { store: PortsStore } = $props();
 
@@ -28,8 +28,8 @@
 	const leave = $derived({ duration: reduced ? 0 : 120 });
 	const enter = $derived({ y: reduced ? 0 : 4, duration: reduced ? 0 : 200, easing: cubicOut });
 
-	/** Long worker trees fold into a count past this many rows. */
-	const SHOWN_PROCESSES = 6;
+	/** Long lists fold into a count past this many rows. */
+	const SHOWN_ROWS = 6;
 
 	// Keeps the text in place while the dialog animates out.
 	let last: PendingAction | null = null;
@@ -50,15 +50,47 @@
 		stopAll: "Stop all",
 	};
 
-	const processes = $derived(pending?.previews?.flatMap((preview) => preview.processes) ?? []);
-	const keys = $derived(new Set(processes.map((affected) => processKey(affected.process))));
-	/** Ports the backend found under these processes, or the container's own rows. */
-	const ports = $derived.by(() => {
+	/** One line of the preview: a process, or a whole server for Stop all. */
+	interface Row {
+		key: string;
+		name: string;
+		ports: number[];
+		pids: number[];
+		/** How a supervisor stops it, when Ports goes through one. */
+		note?: string;
+		/** A supervisor Ports can't control may start it again. */
+		warning?: string;
+	}
+
+	const unique = (ports: number[]) => [...new Set(ports)].toSorted((a, b) => a - b);
+
+	const rows = $derived.by((): Row[] => {
 		if (!pending?.previews) return [];
-		const found = processes.flatMap((affected) => affected.ports);
-		const containers = pending.servers.filter((server) => server.target?.kind === "container").map((s) => s.port);
-		return [...new Set([...found, ...containers])].toSorted((a, b) => a - b);
+		const { action, server, servers, previews } = pending;
+		if (action === "stopAll") {
+			return servers.map((row, i) => ({
+				key: row.id,
+				name: row.name,
+				ports: unique(previews[i].processes.flatMap((affected) => affected.ports)),
+				pids: previews[i].processes.map((affected) => affected.process.pid),
+				note: managedNote(previews[i]),
+				warning: respawnWarning(previews[i]),
+			}));
+		}
+		const [preview] = previews;
+		// A container has no processes of its own here; Docker stops it as a whole.
+		if (!preview.processes.length) return [{ key: server.id, name: server.name, ports: [server.port], pids: [] }];
+		return preview.processes.map((affected) => ({
+			key: processKey(affected.process),
+			name: affected.name,
+			ports: affected.ports,
+			pids: [affected.process.pid],
+		}));
 	});
+
+	const keys = $derived(
+		new Set(pending?.previews?.flatMap((preview) => preview.processes.map((p) => processKey(p.process))) ?? []),
+	);
 	/** Other servers these processes also run, including ones the list hides or protects. */
 	const alsoAffected = $derived(
 		store.servers.filter(
@@ -67,28 +99,53 @@
 				server.resources.some((resource) => keys.has(processKey(resource.process))),
 		),
 	);
+	const warning = $derived(
+		pending?.action !== "stopAll" && pending?.previews ? respawnWarning(pending.previews[0]) : undefined,
+	);
+	/** Stop all waits for every preview, so its skeleton has a line per server. */
+	const skeletonRows = $derived(pending?.action === "stopAll" ? Math.min(pending.servers.length, SHOWN_ROWS) : 1);
+
 	function supervisorName(found: Supervisor) {
 		return { homebrew: "Homebrew", pm2: "PM2", supervisord: "supervisord" }[found.kind];
 	}
 
-	function describe(action: PendingAction["action"], server: Server, preview?: ControlPreview) {
-		const grace = settings.current.stopGraceSeconds;
-		const managed = preview?.supervisor?.supported ? preview.supervisor : undefined;
-		if (managed?.kind === "homebrew") {
+	function managedNote(preview: ControlPreview) {
+		const managed = preview.supervisor?.supported ? preview.supervisor : undefined;
+		if (managed?.kind === "homebrew") return "Through brew services, which also keeps it off at login";
+		if (managed?.kind === "pm2") return "Through PM2";
+	}
+
+	function respawnWarning(preview: ControlPreview) {
+		const found = preview.supervisor;
+		if (!found || found.supported) return;
+		return `${supervisorName(found)} may start it again; stop it there to keep it stopped`;
+	}
+
+	const seconds = (n: number) => (n === 1 ? "1 second" : `${n} seconds`);
+
+	function describe(shown: PendingAction) {
+		const { action, server, previews } = shown;
+		const grace = seconds(settings.current.stopGraceSeconds);
+		const managed = action === "stopAll" ? undefined : previews?.[0].supervisor;
+		if (managed?.supported && managed.kind === "homebrew") {
 			return action === "restart"
 				? `Homebrew restarts ${managed.name} with brew services restart.`
 				: `Homebrew stops ${managed.name} with brew services stop, which also keeps it from starting at login.`;
 		}
-		if (managed?.kind === "pm2") return `PM2 ${action === "restart" ? "restarts" : "stops"} ${managed.name}.`;
+		if (managed?.supported && managed.kind === "pm2") {
+			return `PM2 ${action === "restart" ? "restarts" : "stops"} ${managed.name}.`;
+		}
 		switch (action) {
 			case "stopAll":
-				return "Each server stops the way its line says.";
+				return previews?.some((preview) => preview.supervisor?.supported)
+					? `Each gets ${grace} to exit before Ports kills it, unless its line says otherwise.`
+					: `Each gets ${grace} to exit before Ports kills it.`;
 			case "stop":
-				return `These processes get ${grace === 1 ? "1 second" : `${grace} seconds`} to exit before Ports kills them.`;
+				return `Each gets ${grace} to exit before Ports kills it.`;
 			case "restart":
-				return `These processes stop, then ${server.name} starts again on :${server.port}.`;
+				return `It stops, then ${server.name} starts again on :${server.port}.`;
 			case "forceKill":
-				return "These processes end right away, without saving or cleaning up.";
+				return "Ends right away, without saving or cleaning up.";
 			case "stopParent":
 				return `It started ${server.name} and may start it again. It ends with everything it runs.`;
 		}
@@ -100,16 +157,6 @@
 		store.confirm();
 	}
 </script>
-
-{#snippet respawn(preview: ControlPreview)}
-	{#if preview.supervisor && !preview.supervisor.supported}
-		<p class="text-warning">
-			{supervisorName(preview.supervisor)} runs it and may start it again. Stop it through {supervisorName(
-				preview.supervisor,
-			)} to keep it stopped.
-		</p>
-	{/if}
-{/snippet}
 
 <AlertDialog.Root
 	bind:open={
@@ -126,13 +173,11 @@
 			{@const { action, server, previews, error } = pending}
 			<AlertDialog.Header>
 				<AlertDialog.Title>{titles[action](pending)}</AlertDialog.Title>
-				<AlertDialog.Description>
-					{describe(action, server, action === "stopAll" ? undefined : previews?.[0])}
-				</AlertDialog.Description>
+				<AlertDialog.Description>{describe(pending)}</AlertDialog.Description>
 			</AlertDialog.Header>
 
 			<!-- Loading, error and preview share one cell, so they crossfade in place instead of jumping. -->
-			<div class="grid min-h-16 text-sm *:col-start-1 *:row-start-1" aria-live="polite" aria-busy={!previews && !error}>
+			<div class="grid text-sm *:col-start-1 *:row-start-1" aria-live="polite" aria-busy={!previews && !error}>
 				{#if error}
 					<div in:fly={enter}>
 						<Alert.Root variant="destructive">
@@ -144,62 +189,62 @@
 				{:else if !previews}
 					<!-- Shows only when checking takes a moment, in the shape of what it will show. -->
 					<div class="flex flex-col gap-3" in:fade|global={appear} out:fade={leave}>
-						<div class="flex items-center gap-3 rounded-xl bg-muted/50 px-3 py-2.5">
-							<Skeleton class="h-4 w-20" />
-							<Skeleton class="ms-auto h-5 w-12 rounded-full" />
-							<Skeleton class="h-4 w-16" />
-						</div>
+						<ul class="flex flex-col divide-y divide-border/60 rounded-xl bg-muted/50">
+							{#each { length: skeletonRows }, i (i)}
+								<li class="flex h-10 items-center gap-3 px-3">
+									<Skeleton class="h-3.5 w-16" />
+									<Skeleton class="h-3.5 w-10" />
+									<Skeleton class="ms-auto h-3.5 w-12" />
+								</li>
+							{/each}
+						</ul>
 						<span class="sr-only">Checking what this would stop</span>
-						<Skeleton class="h-3.5 w-24" />
 					</div>
 				{:else}
 					<div class="flex flex-col gap-3" in:fly={enter}>
-						{#if processes.length}
-							<ul class="flex flex-col divide-y divide-border/60 rounded-xl bg-muted/50" aria-label="Processes">
-								{#each processes.slice(0, SHOWN_PROCESSES) as affected (processKey(affected.process))}
-									<li class="flex items-center gap-2 px-3 py-2">
-										<span class="min-w-0 flex-1 truncate font-medium">{affected.name}</span>
-										{#each affected.ports as port (port)}
-											<Badge variant="secondary" class="font-mono">:{port}</Badge>
+						<ul
+							class="flex flex-col divide-y divide-border/60 rounded-xl bg-muted/50"
+							aria-label={action === "stopAll" ? "Servers" : "Processes"}
+						>
+							{#each rows.slice(0, SHOWN_ROWS) as row (row.key)}
+								<li class="flex min-h-10 flex-col justify-center gap-0.5 px-3 py-2">
+									<div class="flex items-baseline gap-2">
+										<span class="min-w-0 truncate font-medium">{row.name}</span>
+										{#each row.ports as port (port)}
+											<PortLabel {port} class="text-[13px]" />
 										{/each}
-										<span class="w-20 shrink-0 text-right font-mono text-xs text-muted-foreground tabular-nums">
-											{affected.process.pid}
-										</span>
-									</li>
-								{/each}
-								{#if processes.length > SHOWN_PROCESSES}
-									<li class="px-3 py-2 text-muted-foreground">
-										and {processes.length - SHOWN_PROCESSES} more
-									</li>
-								{/if}
-							</ul>
-						{/if}
-						{#if ports.length || alsoAffected.length}
+										{#if row.pids.length}
+											<span class="ms-auto shrink-0 font-mono text-xs text-muted-foreground tabular-nums">
+												{row.pids[0]}{row.pids.length > 1 ? ` +${row.pids.length - 1}` : ""}
+											</span>
+										{/if}
+									</div>
+									{#if row.note}
+										<p class="text-xs text-muted-foreground">{row.note}</p>
+									{/if}
+									{#if row.warning}
+										<p class="text-xs text-warning">{row.warning}</p>
+									{/if}
+								</li>
+							{/each}
+							{#if rows.length > SHOWN_ROWS}
+								<li class="flex h-10 items-center px-3 text-muted-foreground">
+									and {rows.length - SHOWN_ROWS} more
+								</li>
+							{/if}
+						</ul>
+						{#if alsoAffected.length}
 							<p class="text-muted-foreground">
-								{#if ports.length}
-									Frees <span class="font-mono text-foreground">{ports.map((port) => `:${port}`).join(" ")}</span>
-								{/if}
-								{#if alsoAffected.length}
-									{ports.length ? "· " : ""}Also stops
-									{#each alsoAffected as other, i (other.id)}
-										{i ? ", " : ""}<span class="text-foreground">{other.name} :{other.port}</span>{isHidden(other)
-											? " (hidden)"
-											: ""}{other.protected ? " (protected)" : ""}
-									{/each}
-								{/if}
+								Also stops
+								{#each alsoAffected as other, i (other.id)}
+									{i ? ", " : ""}<span class="text-foreground">{other.name} :{other.port}</span>{isHidden(other)
+										? " (hidden)"
+										: ""}{other.protected ? " (protected)" : ""}
+								{/each}
 							</p>
 						{/if}
-						{#if action === "stopAll"}
-							<ul class="flex flex-col gap-1" aria-label="Servers">
-								{#each pending.servers as row, i (row.id)}
-									<li class="text-muted-foreground">
-										<span class="text-foreground">{row.name} :{row.port}</span> · {describe("stop", row, previews[i])}
-										{@render respawn(previews[i])}
-									</li>
-								{/each}
-							</ul>
-						{:else}
-							{@render respawn(previews[0])}
+						{#if warning}
+							<p class="text-warning">{warning}.</p>
 						{/if}
 					</div>
 				{/if}
