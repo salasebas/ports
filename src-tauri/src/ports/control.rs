@@ -672,7 +672,8 @@ def term(*args):
  p=os.fork()
  if p==0:
   s.close()
-  with open(sys.argv[1],'w') as f:f.write(str(os.getpid()))
+  with open(sys.argv[1]+'.tmp','w') as f:f.write(str(os.getpid()))
+  os.rename(sys.argv[1]+'.tmp',sys.argv[1])
   time.sleep(60);os._exit(0)
  os._exit(0)
 signal.signal(signal.SIGTERM,term)
@@ -694,6 +695,9 @@ time.sleep(60)
                 .unwrap();
             let port = line.trim().parse().unwrap();
             let result = stop(&target(port, server.id()));
+            // A child that escaped records its PID within moments; one ended
+            // before recording it leaves no file.
+            thread::sleep(Duration::from_millis(300));
             let forked = std::fs::read_to_string(path)
                 .ok()
                 .map(|pid| pid.parse::<u32>().unwrap());
