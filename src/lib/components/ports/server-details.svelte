@@ -242,7 +242,7 @@
 					</Button>
 					<Button variant="secondary" size="sm" onclick={() => store.forgetSaved(saved)}>
 						<BookmarkMinusIcon data-icon="inline-start" />
-						Remove from saved
+						Unsave
 					</Button>
 				</div>
 			{:else}
