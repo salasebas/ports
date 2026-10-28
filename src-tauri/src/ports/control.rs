@@ -5,8 +5,9 @@ use super::identity::ProcessIdentity;
 use super::processes::{self, Groups, Job, OsGroups, ProcessTable};
 use super::sampler::can_relaunch;
 use super::sockets::Sockets;
+use super::supervisors::{self, LaunchdJobs, Managed, Supervisor};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::OsString;
 use std::net::IpAddr;
 use std::os::unix::process::CommandExt;
@@ -18,7 +19,8 @@ use sysinfo::{
     Pid, Process, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System, UpdateKind, Users,
 };
 
-const TERM_GRACE: Duration = Duration::from_secs(3);
+/// How long Stop waits after SIGTERM before it sends SIGKILL, unless the user chose otherwise.
+pub const DEFAULT_GRACE: Duration = Duration::from_secs(3);
 const KILL_GRACE: Duration = Duration::from_secs(2);
 const POLL: Duration = Duration::from_millis(100);
 const LISTEN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -53,18 +55,118 @@ impl Target {
     }
 }
 
+/// How Stop ends a process tree: SIGTERM, then SIGKILL after `grace`; or
+/// SIGKILL right away for Force Kill.
+#[derive(Debug, Clone, Copy)]
+pub struct Shutdown {
+    pub grace: Duration,
+    pub force: bool,
+}
+
+impl Default for Shutdown {
+    fn default() -> Self {
+        Self {
+            grace: DEFAULT_GRACE,
+            force: false,
+        }
+    }
+}
+
+/// One process a control ends, for the preview the user confirms.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Affected {
+    pub process: ProcessIdentity,
+    pub name: String,
+    /// The ports it listens on itself.
+    pub ports: Vec<u16>,
+}
+
+/// Everything a Stop, Restart or Force Kill would end, from the same lookup
+/// the control itself uses. Mirrors `ControlPreview` in `src/lib/ports/types.ts`.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Preview {
+    pub processes: Vec<Affected>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supervisor: Option<Supervisor>,
+}
+
 /// A process target checked against the live system once, then reserved
 /// and stopped or restarted from that same lookup.
 pub struct Service {
     target: ProcessTarget,
     job: Option<(Job, System)>,
+    /// The ports each process of the job listens on.
+    ports: BTreeMap<u32, BTreeSet<u16>>,
+    /// The supervisor that would start it again, confirmed by its own tooling.
+    managed: Option<Managed>,
+    /// A supervisor Ports found but can't control, so only signals reach the service.
+    unsupported: Option<Supervisor>,
 }
 
 impl Service {
-    pub fn locate(target: &ProcessTarget) -> Result<Self, String> {
+    /// Locates the service, or with `parent` the process that started it and
+    /// everything that process runs, such as a watcher that restarts it.
+    pub fn locate(
+        target: &ProcessTarget,
+        parent: Option<&ProcessIdentity>,
+    ) -> Result<Self, String> {
+        let Some((job, system, sockets)) = locate(target)? else {
+            return Ok(Self {
+                target: target.clone(),
+                job: None,
+                ports: BTreeMap::new(),
+                managed: None,
+                unsupported: None,
+            });
+        };
+        let table = ProcessTable::new(&system);
+        let found = supervisors::find(job.listener, &system, &table, &mut LaunchdJobs::default());
+        let (target, job) = match parent {
+            Some(parent) => {
+                if found.is_some()
+                    || processes::watcher(job.root, &table, &OsGroups) != Some(parent.pid)
+                    || !parent.is_current()
+                {
+                    return Err(
+                        "The parent of this server changed; refresh before trying again".into(),
+                    );
+                }
+                let job = Job {
+                    listener: job.listener,
+                    root: parent.pid,
+                    group: None,
+                    pids: table.descendants(parent.pid),
+                };
+                ensure_not_ports(&job, &table)?;
+                let target = ProcessTarget {
+                    root: parent.clone(),
+                    ..target.clone()
+                };
+                (target, job)
+            }
+            None => (target.clone(), job),
+        };
+        let (managed, unsupported) = match &found {
+            Some(found) if parent.is_none() => match Managed::confirm(found, &system)? {
+                Some(managed) => (Some(managed), None),
+                None => (None, Some(found.summary())),
+            },
+            _ => (None, None),
+        };
+        let mut ports: BTreeMap<u32, BTreeSet<u16>> = BTreeMap::new();
+        for (socket, owners) in &sockets.listening {
+            for pid in owners.iter().filter(|pid| job.pids.contains(pid)) {
+                ports.entry(*pid).or_default().insert(socket.port());
+            }
+        }
         Ok(Self {
-            target: target.clone(),
-            job: locate(target)?,
+            target,
+            job: Some((job, system)),
+            ports,
+            managed,
+            unsupported,
         })
     }
 
@@ -72,47 +174,121 @@ impl Service {
     /// different roots while their destructive scopes still overlap.
     pub fn keys(&self) -> Vec<String> {
         let mut keys = vec![format!("process:{}", self.target.root.key())];
-        if let Some((job, _)) = &self.job {
-            keys.extend(
-                job.pids
-                    .iter()
-                    .filter_map(|pid| ProcessIdentity::read(*pid))
-                    .map(|id| format!("process:{}", id.key())),
-            );
-        }
+        keys.extend(
+            self.identities()
+                .iter()
+                .map(|id| format!("process:{}", id.key())),
+        );
         keys.sort();
         keys.dedup();
         keys
     }
 
-    pub fn stop(self) -> Result<(), String> {
+    fn identities(&self) -> Vec<ProcessIdentity> {
+        self.job
+            .iter()
+            .flat_map(|(job, _)| &job.pids)
+            .filter_map(|pid| ProcessIdentity::read(*pid))
+            .collect()
+    }
+
+    pub fn preview(&self) -> Preview {
+        let processes = self
+            .job
+            .iter()
+            .flat_map(|(job, system)| {
+                job.pids.iter().filter_map(|pid| {
+                    let process = system.process(Pid::from_u32(*pid))?;
+                    Some(Affected {
+                        process: ProcessIdentity::read(*pid)?,
+                        name: process.name().to_string_lossy().into_owned(),
+                        ports: self.ports.get(pid).into_iter().flatten().copied().collect(),
+                    })
+                })
+            })
+            .collect();
+        Preview {
+            processes,
+            supervisor: self
+                .managed
+                .as_ref()
+                .map(Managed::summary)
+                .or_else(|| self.unsupported.clone()),
+        }
+    }
+
+    /// Refuses a control whose scope grew since the user confirmed its
+    /// preview: a process that took another's place, or one that joined.
+    /// Processes that exited meanwhile don't matter.
+    pub fn ensure_within(&self, confirmed: &[ProcessIdentity]) -> Result<(), String> {
+        if self.identities().iter().all(|id| confirmed.contains(id)) {
+            Ok(())
+        } else {
+            Err("What this would stop changed since you confirmed it; review it again".into())
+        }
+    }
+
+    pub fn stop(self, shutdown: Shutdown) -> Result<(), String> {
         let Some((job, system)) = self.job else {
             return Ok(());
         };
-        end(&job, &system, &self.target)?;
+        if let Some(managed) = &self.managed {
+            if shutdown.force {
+                return Err(format!(
+                    "{} is managed by its supervisor, which would start it again; use Stop instead",
+                    managed.label()
+                ));
+            }
+            managed.stop()?;
+            return wait_until_free(&self.target, shutdown.grace + KILL_GRACE + KILL_GRACE);
+        }
+        end(&job, &system, &self.target, shutdown)?;
         ensure_free(&self.target)
     }
 
-    pub fn restart(self) -> Result<(), String> {
+    pub fn restart(self, shutdown: Shutdown) -> Result<(), String> {
         let Some((job, mut system)) = self.job else {
             return Err(format!("Nothing listens on :{} anymore", self.target.port));
         };
+        if let Some(managed) = &self.managed {
+            let before: BTreeSet<_> = job
+                .pids
+                .iter()
+                .filter_map(|pid| ProcessIdentity::read(*pid))
+                .collect();
+            managed.restart()?;
+            return wait_until_supervised(&self.target, managed, &before, LISTEN_TIMEOUT);
+        }
+        if let Some(supervisor) = &self.unsupported {
+            return Err(format!(
+                "{} runs this server and Ports can't restart it through {0}",
+                supervisor_name(supervisor)
+            ));
+        }
         let launch = Launch::capture(job.root, &mut system)?;
-        end(&job, &system, &self.target)?;
+        end(&job, &system, &self.target, shutdown)?;
         ensure_free(&self.target)?;
         let child = launch.spawn()?;
         wait_until_listening(&self.target, child, &launch.name, LISTEN_TIMEOUT)
     }
 }
 
+fn supervisor_name(supervisor: &Supervisor) -> &'static str {
+    match supervisor.kind {
+        supervisors::Kind::Homebrew => "Homebrew",
+        supervisors::Kind::Pm2 => "PM2",
+        supervisors::Kind::Supervisord => "supervisord",
+    }
+}
+
 #[cfg(test)]
 fn stop(target: &ProcessTarget) -> Result<(), String> {
-    Service::locate(target)?.stop()
+    Service::locate(target, None)?.stop(Shutdown::default())
 }
 
 #[cfg(test)]
 fn restart(target: &ProcessTarget) -> Result<(), String> {
-    Service::locate(target)?.restart()
+    Service::locate(target, None)?.restart(Shutdown::default())
 }
 
 const FORWARDERS: [&str; 8] = [
@@ -147,7 +323,7 @@ fn process_table() -> System {
     system
 }
 
-fn locate(target: &ProcessTarget) -> Result<Option<(Job, System)>, String> {
+fn locate(target: &ProcessTarget) -> Result<Option<(Job, System, Sockets)>, String> {
     if target.addresses.is_empty() {
         return Err("The selected server has no known binding".into());
     }
@@ -184,14 +360,8 @@ fn locate(target: &ProcessTarget) -> Result<Option<(Job, System)>, String> {
             if table.user(job.listener) != Some(unsafe { libc::getuid() }) {
                 return Err(not_permitted(&system, job.listener));
             }
-            let own = std::process::id();
-            if std::iter::once(own)
-                .chain(table.ancestors(own))
-                .any(|pid| job.pids.contains(&pid))
-            {
-                return Err("Ports can't stop the process that started it".into());
-            }
-            return Ok(Some((job, system)));
+            ensure_not_ports(&job, &table)?;
+            return Ok(Some((job, system, sockets)));
         }
     }
     Err(format!(
@@ -200,7 +370,23 @@ fn locate(target: &ProcessTarget) -> Result<Option<(Job, System)>, String> {
     ))
 }
 
-fn end(job: &Job, system: &System, selected: &ProcessTarget) -> Result<(), String> {
+fn ensure_not_ports(job: &Job, table: &ProcessTable) -> Result<(), String> {
+    let own = std::process::id();
+    if std::iter::once(own)
+        .chain(table.ancestors(own))
+        .any(|pid| job.pids.contains(&pid))
+    {
+        return Err("Ports can't stop the process that started it".into());
+    }
+    Ok(())
+}
+
+fn end(
+    job: &Job,
+    system: &System,
+    selected: &ProcessTarget,
+    shutdown: Shutdown,
+) -> Result<(), String> {
     if !selected.root.is_current() || !selected.listener.is_current() {
         return Err("The selected service changed before shutdown".into());
     }
@@ -249,7 +435,12 @@ fn end(job: &Job, system: &System, selected: &ProcessTarget) -> Result<(), Strin
         .filter_map(|pid| system.process(Pid::from_u32(*pid))?.exe())
         .map(Path::to_path_buf)
         .collect();
-    for (signal, grace) in [(libc::SIGTERM, TERM_GRACE), (libc::SIGKILL, KILL_GRACE)] {
+    let rounds: &[_] = if shutdown.force {
+        &[(libc::SIGKILL, KILL_GRACE)]
+    } else {
+        &[(libc::SIGTERM, shutdown.grace), (libc::SIGKILL, KILL_GRACE)]
+    };
+    for &(signal, grace) in rounds {
         let deadline = Instant::now() + grace;
         let mut sent = HashSet::new();
         let mut empty_rounds = 0;
@@ -362,6 +553,52 @@ fn ensure_free(target: &ProcessTarget) -> Result<(), String> {
         Err(format!("The binding on :{} is still in use", target.port))
     } else {
         Ok(())
+    }
+}
+
+fn wait_until_free(target: &ProcessTarget, timeout: Duration) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match ensure_free(target) {
+            Err(_) if Instant::now() < deadline => thread::sleep(POLL),
+            result => return result,
+        }
+    }
+}
+
+/// Waits until the supervisor runs a new process on the port: one under
+/// the process it runs for the service now, that wasn't part of it before.
+fn wait_until_supervised(
+    target: &ProcessTarget,
+    managed: &Managed,
+    before: &BTreeSet<ProcessIdentity>,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(anchor) = managed.anchor() {
+            let sockets = Sockets::scan()?;
+            let system = process_table();
+            let descendants = ProcessTable::new(&system).descendants(anchor);
+            let replaced = sockets.listening.iter().any(|(socket, owners)| {
+                socket.port() == target.port
+                    && owners.iter().any(|pid| {
+                        descendants.contains(pid)
+                            && ProcessIdentity::read(*pid).is_some_and(|id| !before.contains(&id))
+                    })
+            });
+            if replaced {
+                return Ok(());
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "{} started again but isn't listening on :{} yet",
+                managed.label(),
+                target.port
+            ));
+        }
+        thread::sleep(Duration::from_millis(250));
     }
 }
 
@@ -583,10 +820,10 @@ time.sleep(60)
         let port = free_port();
         let (mut server, _) = start(port, dir.path(), &[]);
         let selected = target(port, server.id());
-        let (job, system) = locate(&selected).unwrap().unwrap();
+        let (job, system, _) = locate(&selected).unwrap().unwrap();
         let mut stale = selected.clone();
         stale.root.start.push_str("-reused");
-        let result = end(&job, &system, &stale);
+        let result = end(&job, &system, &stale, Shutdown::default());
         let survived = running(server.id());
         stop(&selected).unwrap();
         server.wait().unwrap();
@@ -600,7 +837,7 @@ time.sleep(60)
         let port = free_port();
         let (mut server, worker) = start(port, dir.path(), &[]);
         let selected = target(port, server.id());
-        let keys = Service::locate(&selected).unwrap().keys();
+        let keys = Service::locate(&selected, None).unwrap().keys();
         let worker_key = format!("process:{}", ProcessIdentity::read(worker).unwrap().key());
         stop(&selected).unwrap();
         server.wait().unwrap();
@@ -745,6 +982,214 @@ time.sleep(60)
         server.wait().unwrap();
         result.unwrap();
         assert!(path.exists(), "the server never received SIGTERM");
+    }
+
+    fn listening_within(port: u16, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if !Sockets::scan().unwrap().listeners(port).is_empty() {
+                return true;
+            }
+            thread::sleep(POLL);
+        }
+        false
+    }
+
+    #[test]
+    fn stopping_the_parent_keeps_a_watcher_from_starting_the_server_again() {
+        let _shared = SHARED_GROUP.lock().unwrap_or_else(|e| e.into_inner());
+        let port = free_port();
+        // Like nodemon run by an editor task: it starts the server again
+        // whenever it exits. Another program than the server's, so it can't
+        // pass for a prefork master.
+        let server = "import socket,sys,time;s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);s.bind(('127.0.0.1',int(sys.argv[1])));s.listen();time.sleep(60)";
+        let code = r#"$|=1;my($server,$port)=@ARGV;
+while(1){my $pid=fork();if(!$pid){exec('python3','-c',$server,$port)}print "$pid\n";waitpid($pid,0);select(undef,undef,undef,0.1)}"#;
+        let mut watcher = Command::new("perl")
+            .args(["-e", code, server, &port.to_string()])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(watcher.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let server: u32 = line.trim().parse().unwrap();
+        assert!(listening_within(port, Duration::from_secs(5)));
+        let selected = target(port, server);
+        let parent = ProcessIdentity::read(watcher.id()).unwrap();
+
+        let result = Service::locate(&selected, Some(&parent)).map(|service| {
+            let preview = service.preview();
+            (preview, service.stop(Shutdown::default()))
+        });
+        thread::sleep(Duration::from_millis(500));
+        let started_again = !Sockets::scan().unwrap().listeners(port).is_empty();
+        let _ = watcher.kill();
+        let _ = watcher.wait();
+
+        let (preview, stopped) = result.unwrap();
+        stopped.unwrap();
+        let pids: Vec<_> = preview.processes.iter().map(|p| p.process.pid).collect();
+        assert!(
+            pids.contains(&watcher.id()) && pids.contains(&server),
+            "{pids:?}"
+        );
+        let listener = preview
+            .processes
+            .iter()
+            .find(|p| p.process.pid == server)
+            .unwrap();
+        assert_eq!(listener.ports, vec![port]);
+        assert!(!started_again);
+    }
+
+    #[test]
+    fn force_kill_ends_the_server_without_its_shutdown_handler() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("terminated");
+        let code = r#"import signal,socket,sys,time
+s=socket.socket();s.bind(('127.0.0.1',0));s.listen()
+def term(*args):
+ open(sys.argv[1],'w').close()
+ sys.exit(0)
+signal.signal(signal.SIGTERM,term)
+print(s.getsockname()[1],flush=True)
+time.sleep(60)
+"#;
+        let mut server = Command::new("python3")
+            .args(["-c", code, path.to_str().unwrap()])
+            .stdout(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(server.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let port = line.trim().parse().unwrap();
+        let force = Shutdown {
+            force: true,
+            ..Shutdown::default()
+        };
+        let result = Service::locate(&target(port, server.id()), None).and_then(|s| s.stop(force));
+        let status = server.wait().unwrap();
+        result.unwrap();
+        assert!(
+            !path.exists(),
+            "Force Kill let the server shut down gracefully"
+        );
+        assert!(status.code().is_none());
+    }
+
+    #[test]
+    fn stop_waits_the_configured_grace_before_killing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let port = free_port();
+        let (mut server, _) = start(port, dir.path(), &["ignore-term"]);
+        let grace = Shutdown {
+            grace: Duration::from_secs(1),
+            force: false,
+        };
+        let started = Instant::now();
+        let result = Service::locate(&target(port, server.id()), None).and_then(|s| s.stop(grace));
+        let elapsed = started.elapsed();
+        server.wait().unwrap();
+        result.unwrap();
+        assert!(elapsed >= Duration::from_secs(1), "{elapsed:?}");
+        assert!(elapsed < DEFAULT_GRACE, "{elapsed:?}");
+    }
+
+    #[test]
+    fn a_confirmed_preview_cannot_authorize_a_process_it_did_not_list() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let port = free_port();
+        let (mut server, worker) = start(port, dir.path(), &[]);
+        let selected = target(port, server.id());
+        let service = Service::locate(&selected, None).unwrap();
+        let listed: Vec<_> = service
+            .preview()
+            .processes
+            .into_iter()
+            .map(|p| p.process)
+            .collect();
+        let without_worker: Vec<_> = listed
+            .iter()
+            .filter(|id| id.pid != worker)
+            .cloned()
+            .collect();
+
+        let refused = service.ensure_within(&without_worker);
+        let accepted = service.ensure_within(&listed);
+        let worker_alive = running(worker);
+        stop(&selected).unwrap();
+        server.wait().unwrap();
+
+        assert!(refused.unwrap_err().contains("changed"));
+        accepted.unwrap();
+        assert!(worker_alive);
+    }
+
+    /// launchd runs a listener under a Homebrew label, as `brew services` would,
+    /// and starts it again when it exits. Needs a macOS login session, so it
+    /// runs only on request: `cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    #[cfg(target_os = "macos")]
+    fn a_homebrew_service_is_found_through_launchd_and_never_reported_stopped_by_mistake() {
+        let label = "homebrew.mxcl.ports-test-service";
+        let port = free_port();
+        let server = format!(
+            "import socket,time;s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);s.bind(('127.0.0.1',{port}));s.listen();time.sleep(600)"
+        );
+        // Homebrew's own, since Xcode's python3 runs from inside Xcode.app.
+        let python = ["/opt/homebrew/bin/python3", "/usr/local/bin/python3"]
+            .into_iter()
+            .find(|path| Path::new(path).exists())
+            .expect("a Homebrew python3");
+        let submitted = Command::new("/bin/launchctl")
+            .args(["submit", "-l", label, "--", python, "-c", &server])
+            .status()
+            .unwrap();
+        assert!(submitted.success());
+        let listening = listening_within(port, Duration::from_secs(10));
+        let mut sampler = super::super::sampler::Sampler::new(std::env::temp_dir());
+        let row = sampler
+            .sample()
+            .unwrap()
+            .servers
+            .into_iter()
+            .find(|row| row.port == port);
+        let located = row.as_ref().and_then(|row| match &row.target {
+            Some(Target::Process(target)) => Some(Service::locate(target, None)),
+            _ => None,
+        });
+        let preview = located
+            .as_ref()
+            .map(|service| service.as_ref().map(Service::preview).map_err(Clone::clone));
+        // brew has no such formula, so the stop must fail and leave it listening.
+        let stopped = located.map(|service| service.and_then(|s| s.stop(Shutdown::default())));
+        let still_listening = !Sockets::scan().unwrap().listeners(port).is_empty();
+        let _ = Command::new("/bin/launchctl")
+            .args(["remove", label])
+            .status();
+
+        assert!(listening);
+        let row = row.unwrap();
+        let supervisor = row.supervisor.unwrap();
+        assert_eq!(supervisor.name.as_deref(), Some("ports-test-service"));
+        assert!(row.parent.is_none());
+        let preview = preview.unwrap().unwrap();
+        assert_eq!(
+            preview.supervisor.unwrap().kind,
+            supervisors::Kind::Homebrew
+        );
+        let error = stopped.unwrap().unwrap_err();
+        assert!(
+            error.contains("Can't stop ports-test-service (Homebrew)"),
+            "{error}"
+        );
+        assert!(still_listening);
     }
 
     #[test]

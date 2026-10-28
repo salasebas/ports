@@ -168,7 +168,15 @@ export function mockServers(now = Date.now()): Server[] {
 				...server,
 				id: `${server.port}:${process.pid}:${process.start}`,
 				target: { kind: "process", port: server.port, listener: process, root: process, addresses: server.addresses },
-				resources: [{ process, memoryBytes: server.memoryBytes, cpuPercent: server.cpuPercent }],
+				resources: [
+					{
+						process,
+						name: server.process,
+						ports: [server.port],
+						memoryBytes: server.memoryBytes,
+						cpuPercent: server.cpuPercent,
+					},
+				],
 			};
 		})
 		.toSorted((a, b) => a.port - b.port);

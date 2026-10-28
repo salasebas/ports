@@ -1,4 +1,4 @@
-import type { ProcessIdentity, Server, Usage } from "./types";
+import type { ProcessIdentity, ProcessUsage, Server, Usage } from "./types";
 
 export const processKey = (process: ProcessIdentity) => `${process.pid}:${process.start}`;
 
@@ -28,4 +28,29 @@ export function allocateUsage(servers: readonly Server[]): { server: Server; usa
 		}
 		return { server, usage };
 	});
+}
+
+/**
+ * The server's processes as a tree, parents before their children, with
+ * each one's depth. A process whose parent isn't part of the server is a top.
+ */
+export function processTree(server: Server): { usage: ProcessUsage; depth: number }[] {
+	const pids = new Set(server.resources.map((resource) => resource.process.pid));
+	const children = new Map<number | undefined, ProcessUsage[]>();
+	for (const resource of server.resources.toSorted((a, b) => a.process.pid - b.process.pid)) {
+		const parent =
+			resource.parent !== undefined && resource.parent !== resource.process.pid && pids.has(resource.parent)
+				? resource.parent
+				: undefined;
+		children.set(parent, [...(children.get(parent) ?? []), resource]);
+	}
+	const rows: { usage: ProcessUsage; depth: number }[] = [];
+	const visit = (parent: number | undefined, depth: number) => {
+		for (const usage of children.get(parent) ?? []) {
+			rows.push({ usage, depth });
+			visit(usage.process.pid, depth + 1);
+		}
+	};
+	visit(undefined, 0);
+	return rows;
 }

@@ -5,7 +5,7 @@ import { SvelteSet } from "svelte/reactivity";
 import { toast } from "svelte-sonner";
 import { canStop, serverUrl } from "./format";
 import { preferences, type SortKey } from "./preferences.svelte";
-import type { Server, Snapshot, SystemUsage } from "./types";
+import type { ControlPreview, ProcessIdentity, Server, Snapshot, SystemUsage } from "./types";
 import { allocateUsage, controlKey, sharesControl } from "./resources";
 
 /** Must match `SNAPSHOT_EVENT` in `src-tauri/src/ports/mod.rs`. */
@@ -28,7 +28,33 @@ export function setRefreshInterval(ms: number) {
 	return attempt(invoke("set_refresh_interval", { ms }));
 }
 
-export type ServerAction = "stop" | "restart";
+/**
+ * `forceKill` skips the graceful shutdown; `stopParent` also ends what
+ * started the server, such as nodemon; `stopAll` stops every server of the
+ * same program.
+ */
+export type ServerAction = "stop" | "restart" | "forceKill" | "stopParent" | "stopAll";
+
+/** Broad or abrupt actions always show what they end, whatever the preference. */
+const alwaysConfirmed: ServerAction[] = ["forceKill", "stopParent", "stopAll"];
+
+/** An action waiting for the user, with what the backend says it would end. */
+export interface PendingAction {
+	action: ServerAction;
+	server: Server;
+	/** Every server the action controls: the one chosen, or each server of its program for `stopAll`. */
+	servers: Server[];
+	/** One per server, in the same order; null while the backend works them out. */
+	previews: ControlPreview[] | null;
+	error: string | null;
+}
+
+interface StopOptions {
+	force?: boolean;
+	parent?: ProcessIdentity;
+	/** The processes of the preview the user confirmed; the backend refuses to reach others. */
+	confirmed?: ProcessIdentity[];
+}
 
 /**
  * Work a button starts; its button stays disabled until the work ends. Stop
@@ -81,7 +107,7 @@ export const hiddenLabel = (entry: string) => entry.replace(/^port:/, ":").repla
 
 const idleCount = (n: number) => (n === 1 ? "1 idle server" : `${n} idle servers`);
 
-function isHidden(server: Server) {
+export function isHidden(server: Server) {
 	const hidden = preferences.hidden.current;
 	return hidden.includes(hiddenPort(server.port)) || hidden.includes(hiddenProcess(server.process));
 }
@@ -94,7 +120,7 @@ export class PortsStore {
 	query = $state("");
 	selectedId = $state<string | null>(null);
 	/** Action waiting for the user to confirm it. */
-	pending = $state.raw<{ action: ServerAction; server: Server } | null>(null);
+	pending = $state.raw<PendingAction | null>(null);
 	/** Idle servers clean up will stop once the user confirms. */
 	cleaning = $state.raw<Server[] | null>(null);
 	/** Server whose name the user is editing. */
@@ -283,24 +309,72 @@ export class PortsStore {
 	revealFolder = (server: Server) =>
 		this.#run(server, "folder", () => attempt(invoke("reveal_folder", { folder: server.folder })));
 
-	/** Entry point for every stop and restart button: asks first when the preference is on. */
+	/** The other servers `stopAll` reaches: each shown, unprotected server of the same program, once per process tree. */
+	sameProgram = (server: Server) => {
+		const servers: Server[] = [server];
+		for (const other of this.shown) {
+			if (other.process !== server.process || other.target?.kind !== "process" || other.protected) continue;
+			if (!servers.some((chosen) => sharesControl(chosen, other))) servers.push(other);
+		}
+		return servers;
+	};
+
+	/** Entry point for every control button: asks first, with a preview, when the action or the preference says so. */
 	request = async (action: ServerAction, server: Server) => {
 		if (this.isBusy(server, "control")) return;
-		if (preferences.confirmActions.current) this.pending = { action, server };
-		else await this[action](server);
+		const servers = action === "stopAll" ? this.sameProgram(server) : [server];
+		if (!alwaysConfirmed.includes(action) && !preferences.confirmActions.current) {
+			await this.#execute(action, servers, null);
+			return;
+		}
+		const pending: PendingAction = { action, server, servers, previews: null, error: null };
+		this.pending = pending;
+		try {
+			const previews = await Promise.all(
+				servers.map((row) =>
+					invoke<ControlPreview>("preview_control", {
+						target: target(row),
+						parent: action === "stopParent" ? (row.parent?.process ?? null) : null,
+					}),
+				),
+			);
+			if (this.pending === pending) this.pending = { ...pending, previews };
+		} catch (error) {
+			if (this.pending === pending) this.pending = { ...pending, error: String(error) };
+		}
 	};
 
 	confirm = async () => {
 		const pending = this.pending;
 		this.pending = null;
-		if (pending) await this[pending.action](pending.server);
+		if (pending?.previews) await this.#execute(pending.action, pending.servers, pending.previews);
 	};
 
-	restart = (server: Server) =>
+	async #execute(action: ServerAction, servers: Server[], previews: ControlPreview[] | null) {
+		const confirmed = (i: number) => previews?.[i].processes.map((affected) => affected.process);
+		if (action === "restart") return this.restart(servers[0], confirmed(0));
+		if (action === "stopAll") {
+			await Promise.all(servers.map((server, i) => this.stop(server, { confirmed: confirmed(i) })));
+			return;
+		}
+		const [server] = servers;
+		await this.stop(server, {
+			force: action === "forceKill",
+			parent: action === "stopParent" ? server.parent?.process : undefined,
+			confirmed: confirmed(0),
+		});
+	}
+
+	restart = (server: Server, confirmed?: ProcessIdentity[]) =>
 		this.#run(server, "control", async () => {
 			const id = toast.loading(`Restarting ${server.name}…`, { id: `restart-${server.id}` });
 			try {
-				this.apply(await invoke<Snapshot>("restart_server", { target: target(server) }));
+				this.apply(
+					await invoke<Snapshot>("restart_server", {
+						target: target(server),
+						...(confirmed ? { scope: { confirmed } } : {}),
+					}),
+				);
 				// The new process has a new identity; keep its details open.
 				if (this.selectedId === server.id && !this.selected) {
 					this.selectedId =
@@ -314,22 +388,27 @@ export class PortsStore {
 			}
 		});
 
-	stop = (server: Server) =>
+	stop = (server: Server, options: StopOptions = {}) =>
 		this.#run(server, "control", async () => {
-			const id = toast.loading(`Stopping ${server.name}…`, { id: `stop-${server.id}` });
-			const error = await this.#stop(server);
+			const what = options.parent ? `${server.parent?.name ?? "the parent"} of ${server.name}` : server.name;
+			const verb = options.force ? ["Force killing", "Force killed"] : ["Stopping", "Stopped"];
+			const id = toast.loading(`${verb[0]} ${what}…`, { id: `stop-${server.id}` });
+			const error = await this.#stop(server, false, options);
 			if (error) toast.error(error, { id });
-			else toast.success(`Stopped ${server.name}`, { id, description: `:${server.port}` });
+			else toast.success(`${verb[1]} ${what}`, { id, description: `:${server.port}` });
 		});
 
 	/** Stops the server and takes it off the list; returns why it couldn't. */
-	async #stop(server: Server, onlyIfIdle = false): Promise<string | null> {
+	async #stop(server: Server, onlyIfIdle = false, options: StopOptions = {}): Promise<string | null> {
+		const { force, parent, confirmed } = options;
 		try {
 			this.apply(
 				await invoke<Snapshot>("stop_server", {
 					target: target(server),
 					onlyIfIdle,
 					...(onlyIfIdle ? { allowedIds: this.idle.map((row) => row.id) } : {}),
+					...(force ? { force } : {}),
+					...(parent || confirmed ? { scope: { parent, confirmed } } : {}),
 				}),
 			);
 		} catch (error) {

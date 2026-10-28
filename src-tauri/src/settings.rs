@@ -13,6 +13,7 @@ use crate::ports::{AlertSettings, Monitor};
 const STORE: &str = "settings.json";
 pub const SHORTCUT: &str = "shortcut";
 const ALERTS: &str = "alerts";
+const STOP_GRACE: &str = "stopGraceSeconds";
 /// Carries `Settings` to every window when one changes. Must match `src/lib/settings.svelte.ts`.
 const SETTINGS_EVENT: &str = "ports://settings";
 
@@ -24,6 +25,8 @@ pub struct Settings {
     /// The accelerator that shows the popover, e.g. `alt+super+KeyP`; `None` when there's none.
     shortcut: Option<String>,
     alerts: AlertSettings,
+    /// How long Stop waits for a server to exit before it kills it.
+    stop_grace_seconds: u64,
 }
 
 /// The stored value of `key`, or `None` when it was never set or can't be read.
@@ -78,6 +81,10 @@ pub fn alerts(app: &AppHandle) -> AlertSettings {
     read(app, ALERTS).unwrap_or_default()
 }
 
+pub fn stop_grace_seconds(app: &AppHandle) -> u64 {
+    read(app, STOP_GRACE).unwrap_or(crate::ports::DEFAULT_GRACE_SECS)
+}
+
 fn current(app: &AppHandle, revision: u64) -> Settings {
     #[cfg(desktop)]
     let shortcut = crate::shortcut::current(app);
@@ -87,6 +94,7 @@ fn current(app: &AppHandle, revision: u64) -> Settings {
         revision,
         shortcut,
         alerts: app.state::<Monitor>().alert_settings(),
+        stop_grace_seconds: app.state::<Monitor>().stop_grace_secs(),
     }
 }
 
@@ -120,6 +128,22 @@ pub fn set_alerts(app: AppHandle, alerts: AlertPatch) -> Result<Settings, String
     }
     write(&app, ALERTS, next)?;
     monitor.set_alert_settings(next);
+    *revision += 1;
+    Ok(broadcast(&app, *revision))
+}
+
+/// Shared by both windows; the backend keeps it within `GRACE_SECS`.
+#[tauri::command]
+pub fn set_stop_grace(app: AppHandle, seconds: u64) -> Result<Settings, String> {
+    let state = app.state::<Changes>();
+    let mut revision = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    let monitor = app.state::<Monitor>();
+    let seconds = seconds.clamp(
+        *crate::ports::GRACE_SECS.start(),
+        *crate::ports::GRACE_SECS.end(),
+    );
+    write(&app, STOP_GRACE, seconds)?;
+    monitor.set_stop_grace_secs(seconds);
     *revision += 1;
     Ok(broadcast(&app, *revision))
 }

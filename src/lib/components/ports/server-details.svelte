@@ -4,6 +4,9 @@
 	import CircleAlertIcon from "@lucide/svelte/icons/circle-alert";
 	import CodeIcon from "@lucide/svelte/icons/code";
 	import CopyIcon from "@lucide/svelte/icons/copy";
+	import CornerLeftUpIcon from "@lucide/svelte/icons/corner-left-up";
+	import EllipsisIcon from "@lucide/svelte/icons/ellipsis";
+	import ListXIcon from "@lucide/svelte/icons/list-x";
 	import FolderOpenIcon from "@lucide/svelte/icons/folder-open";
 	import PinIcon from "@lucide/svelte/icons/pin";
 	import RotateCwIcon from "@lucide/svelte/icons/rotate-cw";
@@ -11,6 +14,7 @@
 	import SquareIcon from "@lucide/svelte/icons/square";
 	import SquareTerminalIcon from "@lucide/svelte/icons/square-terminal";
 	import WifiIcon from "@lucide/svelte/icons/wifi";
+	import ZapIcon from "@lucide/svelte/icons/zap";
 	import * as Alert from "$lib/components/ui/alert";
 	import { Badge } from "$lib/components/ui/badge";
 	import { Button } from "$lib/components/ui/button";
@@ -29,6 +33,7 @@
 	} from "$lib/ports/format";
 	import { fileManagerName } from "$lib/platform";
 	import { hiddenPort, hiddenProcess, type PortsStore } from "$lib/ports/ports-store.svelte";
+	import { processKey, processTree } from "$lib/ports/resources";
 	import { editorLabel, preferences } from "$lib/ports/preferences.svelte";
 	import type { Server } from "$lib/ports/types";
 	import { settings } from "$lib/settings.svelte";
@@ -63,9 +68,33 @@
 	// Pins and protection cover every port of a project.
 	const scope = $derived(server.folder ? "every port of this project" : `:${server.port} only`);
 
+	const supervisorNames = { homebrew: "Homebrew", pm2: "PM2", supervisord: "supervisord" };
+	const supervisor = $derived(server.supervisor);
+	/** A supervisor that would start it again after a signal, so Force Kill isn't offered. */
+	const managed = $derived(supervisor?.supported === true);
+	const others = $derived(server.target?.kind === "process" ? store.sameProgram(server).length - 1 : 0);
+	const hasMore = $derived(!managed || Boolean(server.parent) || others > 0);
+	const indents = ["ps-0", "ps-3", "ps-6", "ps-9", "ps-12"];
+
+	const tree = $derived(processTree(server));
+	/** The other servers each process also belongs to, so a shared one reads as shared. */
+	const sharedWith = $derived.by(() => {
+		const shared = new Map<string, string[]>();
+		for (const other of store.servers) {
+			if (other.id === server.id) continue;
+			for (const resource of other.resources) {
+				const key = processKey(resource.process);
+				shared.set(key, [...(shared.get(key) ?? []), `:${other.port}`]);
+			}
+		}
+		return shared;
+	});
+
 	const facts = $derived(
 		[
 			["Process", `${server.process} · ${serverProcessId(server)}`],
+			["Parent", server.parent && `${server.parent.name} · PID ${server.parent.process.pid}`],
+			["Managed by", supervisor && [supervisorNames[supervisor.kind], supervisor.name].filter(Boolean).join(" · ")],
 			["Framework", server.framework],
 			["Branch", server.branch],
 			["Folder", server.folder],
@@ -150,7 +179,13 @@
 			</div>
 		{/if}
 		{#if canStop(server)}
-			<div class={cn("grid gap-2", server.restartable && "grid-cols-2")}>
+			<div
+				class={cn(
+					"grid gap-2",
+					server.restartable ? "grid-cols-2" : "grid-cols-1",
+					hasMore && (server.restartable ? "grid-cols-[1fr_1fr_auto]" : "grid-cols-[1fr_auto]"),
+				)}
+			>
 				{#if server.restartable}
 					<Button
 						variant="secondary"
@@ -171,7 +206,47 @@
 					<SquareIcon data-icon="inline-start" class="fill-current" />
 					Stop
 				</Button>
+				{#if hasMore}
+					<DropdownMenu.Root>
+						<DropdownMenu.Trigger disabled={store.isBusy(server, "control")}>
+							{#snippet child({ props })}
+								<Button {...props} variant="secondary" size="icon-sm" aria-label="More ways to stop">
+									<EllipsisIcon />
+								</Button>
+							{/snippet}
+						</DropdownMenu.Trigger>
+						<DropdownMenu.Content align="end" class="w-60">
+							{#if !managed}
+								<DropdownMenu.Item onSelect={() => store.request("forceKill", server)}>
+									<ZapIcon />
+									Force Kill
+								</DropdownMenu.Item>
+							{/if}
+							{#if server.parent}
+								<DropdownMenu.Item onSelect={() => store.request("stopParent", server)}>
+									<CornerLeftUpIcon />
+									Stop parent {server.parent.name}
+								</DropdownMenu.Item>
+							{/if}
+							{#if others > 0}
+								<DropdownMenu.Item onSelect={() => store.request("stopAll", server)}>
+									<ListXIcon />
+									Stop every {server.process} server
+								</DropdownMenu.Item>
+							{/if}
+						</DropdownMenu.Content>
+					</DropdownMenu.Root>
+				{/if}
 			</div>
+			{#if supervisor && !supervisor.supported}
+				<p class="text-xs text-muted-foreground">
+					{supervisorNames[supervisor.kind]} may start it again after Stop; Ports can't control it yet.
+				</p>
+			{:else if managed}
+				<p class="text-xs text-muted-foreground">
+					Stop and Restart go through {supervisorNames[supervisor!.kind]}, so it doesn't start again on its own.
+				</p>
+			{/if}
 		{/if}
 	</div>
 
@@ -258,6 +333,35 @@
 			</p>
 			<CpuBars values={server.cpuHistory} class="h-14 w-full" />
 		</section>
+
+		{#if tree.length > 1}
+			<section class="flex flex-col gap-2" aria-label="Processes">
+				<p class="text-sm text-muted-foreground">Processes <span class="text-foreground">{tree.length}</span></p>
+				<ul class="flex flex-col gap-1.5 text-sm">
+					{#each tree as { usage, depth } (processKey(usage.process))}
+						{@const shared = sharedWith.get(processKey(usage.process))}
+						<li class={cn("flex items-center gap-2", indents[Math.min(depth, indents.length - 1)])}>
+							<span class="flex min-w-0 flex-1 items-center gap-1.5">
+								<span class="truncate">{usage.name}</span>
+								<span class="shrink-0 font-mono text-xs text-muted-foreground">{usage.process.pid}</span>
+								{#each usage.ports as port (port)}
+									<Badge variant="secondary" class="font-mono">:{port}</Badge>
+								{/each}
+								{#if shared}
+									<span class="shrink-0 text-xs text-muted-foreground">also {shared.join(", ")}</span>
+								{/if}
+							</span>
+							<span class="w-16 shrink-0 text-right font-mono text-xs tabular-nums">
+								{formatBytesText(usage.memoryBytes)}
+							</span>
+							<span class="w-9 shrink-0 text-right font-mono text-xs text-muted-foreground tabular-nums">
+								{Math.round(usage.cpuPercent)}%
+							</span>
+						</li>
+					{/each}
+				</ul>
+			</section>
+		{/if}
 	{/if}
 
 	<Separator />

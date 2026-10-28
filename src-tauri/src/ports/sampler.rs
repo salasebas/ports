@@ -16,6 +16,7 @@ use super::network;
 use super::processes::{self, Job, OsGroups, ProcessTable};
 use super::project;
 use super::sockets::Sockets;
+use super::supervisors::{self, LaunchdJobs, Supervisor};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -78,6 +79,12 @@ pub struct Server {
     pub lan_url: Option<String>,
     pub protected: bool,
     pub restartable: bool,
+    /// What starts it again when it exits, such as Homebrew or PM2.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supervisor: Option<Supervisor>,
+    /// What started it and may start it again, such as nodemon; Stop parent ends it too.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<ParentProcess>,
     pub started_at: u64,
     pub last_active_at: u64,
     pub memory_bytes: u64,
@@ -86,12 +93,24 @@ pub struct Server {
     pub cpu_history: Vec<f64>,
 }
 
+/// One process of a server's tree. Mirrors `ProcessUsage` in `src/lib/ports/types.ts`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProcessUsage {
     pub process: ProcessIdentity,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<u32>,
+    pub name: String,
+    /// The ports it listens on itself, e.g. each worker of a prefork server.
+    pub ports: Vec<u16>,
     pub memory_bytes: u64,
     pub cpu_percent: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ParentProcess {
+    pub process: ProcessIdentity,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -199,6 +218,13 @@ impl Sampler {
                     .insert(socket.ip());
             }
         }
+        let mut ports: HashMap<u32, BTreeSet<u16>> = HashMap::new();
+        for (socket, owners) in &sockets.listening {
+            for pid in owners {
+                ports.entry(*pid).or_default().insert(socket.port());
+            }
+        }
+        let mut launchd = LaunchdJobs::default();
         let mut servers = Vec::new();
         let mut seen = HashSet::new();
         let mut measured = HashMap::new();
@@ -217,6 +243,9 @@ impl Sampler {
                         let process = self.system.process(Pid::from_u32(*pid))?;
                         let usage = ProcessUsage {
                             process: ProcessIdentity::read(*pid)?,
+                            parent: table.parent(*pid),
+                            name: process.name().to_string_lossy().into_owned(),
+                            ports: ports.get(pid).into_iter().flatten().copied().collect(),
                             memory_bytes: memory_of(process),
                             cpu_percent: f64::from(process.cpu_usage())
                                 / self.system.cpus().len().max(1) as f64,
@@ -226,11 +255,30 @@ impl Sampler {
                     measured.get(pid).cloned()
                 })
                 .collect();
+            let supervisor = supervisors::find(job.listener, &self.system, &table, &mut launchd)
+                .map(|found| found.summary());
+            let parent = supervisor
+                .is_none()
+                .then(|| processes::watcher(job.root, &table, &OsGroups))
+                .flatten()
+                .and_then(|pid| {
+                    Some(ParentProcess {
+                        process: ProcessIdentity::read(pid)?,
+                        name: self
+                            .system
+                            .process(Pid::from_u32(pid))?
+                            .name()
+                            .to_string_lossy()
+                            .into_owned(),
+                    })
+                });
             if let Some(server) = describe(
                 &self.system,
                 &self.home,
                 &sockets,
                 Service {
+                    supervisor,
+                    parent,
                     port,
                     job,
                     identity,
@@ -305,6 +353,8 @@ impl Sampler {
 }
 
 struct Service {
+    supervisor: Option<Supervisor>,
+    parent: Option<ParentProcess>,
     port: u16,
     job: Job,
     identity: ProcessIdentity,
@@ -322,6 +372,8 @@ fn describe(
     now: u64,
 ) -> Option<Server> {
     let Service {
+        supervisor,
+        parent,
         port,
         job,
         identity,
@@ -392,7 +444,12 @@ fn describe(
         folder: folder.as_deref().map(|f| project::display_path(f, home)),
         framework,
         protected: matches!(kind, Kind::Database),
-        restartable: can_relaunch(root, system),
+        // A supervisor restarts what it runs; Ports only through one it supports.
+        restartable: supervisor
+            .as_ref()
+            .map_or_else(|| can_relaunch(root, system), |s| s.supported),
+        supervisor,
+        parent,
         kind,
         status,
         leaking,
@@ -436,6 +493,8 @@ fn unowned(port: u16, owner: String, first_seen: u64) -> Server {
         framework,
         protected: matches!(kind, Kind::Database),
         restartable: false,
+        supervisor: None,
+        parent: None,
         kind,
         status: Status::Running,
         leaking: false,
@@ -489,6 +548,8 @@ fn contained(port: u16, container: &Container) -> Server {
         framework,
         protected: framework.is_some_and(project::is_database),
         restartable: true,
+        supervisor: None,
+        parent: None,
         kind: Kind::Container,
         status: Status::Running,
         leaking: false,

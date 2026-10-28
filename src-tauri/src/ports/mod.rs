@@ -11,10 +11,12 @@ mod processes;
 mod project;
 mod sampler;
 mod sockets;
+mod supervisors;
 
 pub use alerts::AlertSettings;
 use containers::ContainerTarget;
-use control::Target;
+use control::{Preview, Shutdown, Target};
+use identity::ProcessIdentity;
 
 use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -63,6 +65,7 @@ pub struct Monitor {
     health: Mutex<Health>,
     alerts: Mutex<Alerts>,
     alert_settings: Mutex<AlertSettings>,
+    stop_grace_secs: AtomicU64,
 }
 
 /// What the latest health probes found, and when the next round is due.
@@ -80,7 +83,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Monitor {
-    pub fn new(home: PathBuf, alert_settings: AlertSettings) -> Self {
+    pub fn new(home: PathBuf, alert_settings: AlertSettings, stop_grace_secs: u64) -> Self {
         Self {
             sampler: Mutex::new(Sampler::new(home.clone())),
             publication: Mutex::new(()),
@@ -93,6 +96,7 @@ impl Monitor {
             health: Mutex::new(Health::default()),
             alerts: Mutex::new(Alerts::default()),
             alert_settings: Mutex::new(alert_settings),
+            stop_grace_secs: AtomicU64::new(clamp_grace(stop_grace_secs)),
         }
     }
 
@@ -120,6 +124,23 @@ impl Monitor {
 
     pub fn set_alert_settings(&self, settings: AlertSettings) {
         *lock(&self.alert_settings) = settings;
+    }
+
+    pub fn stop_grace_secs(&self) -> u64 {
+        self.stop_grace_secs.load(Ordering::Relaxed)
+    }
+
+    pub fn set_stop_grace_secs(&self, secs: u64) -> u64 {
+        let secs = clamp_grace(secs);
+        self.stop_grace_secs.store(secs, Ordering::Relaxed);
+        secs
+    }
+
+    fn shutdown(&self, force: bool) -> Shutdown {
+        Shutdown {
+            grace: Duration::from_secs(self.stop_grace_secs()),
+            force,
+        }
     }
 
     fn alert(&self, app: &AppHandle, snapshot: &Snapshot) {
@@ -213,20 +234,19 @@ impl Monitor {
         *woken = false;
     }
 
-    /// Runs one stop or restart per affected process at a time; a second click while the
+    /// Runs one control per affected process at a time; a second click while the
     /// first one is still waiting for the server to exit is refused.
     fn control(
         &self,
         app: &AppHandle,
         target: &Target,
+        scope: &Scope,
         work: impl FnOnce(Located) -> Result<(), String>,
     ) -> Result<Snapshot, String> {
-        let located = match target {
-            Target::Process(target) => {
-                Located::Process(Box::new(control::Service::locate(target)?))
-            }
-            Target::Container(container) => Located::Container(container.clone()),
-        };
+        let located = locate(target, scope.parent.as_ref())?;
+        if let (Located::Process(service), Some(confirmed)) = (&located, &scope.confirmed) {
+            service.ensure_within(confirmed)?;
+        }
         let keys = match &located {
             Located::Process(service) => service.keys(),
             Located::Container(_) => vec![target.key()],
@@ -249,6 +269,39 @@ impl Monitor {
             self.wake();
             lock(&self.latest).clone().ok_or(error)
         })
+    }
+}
+
+/// Bounds of the shutdown grace period, in seconds.
+pub const GRACE_SECS: RangeInclusive<u64> = 1..=60;
+pub const DEFAULT_GRACE_SECS: u64 = control::DEFAULT_GRACE.as_secs();
+
+fn clamp_grace(secs: u64) -> u64 {
+    secs.clamp(*GRACE_SECS.start(), *GRACE_SECS.end())
+}
+
+/// Which processes a control reaches, as the windows ask for it.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Scope {
+    /// Also the process that started the service, with everything it runs.
+    #[serde(default)]
+    parent: Option<ProcessIdentity>,
+    /// The processes of the preview the user confirmed; the control refuses
+    /// to reach any other.
+    #[serde(default)]
+    confirmed: Option<Vec<ProcessIdentity>>,
+}
+
+fn locate(target: &Target, parent: Option<&ProcessIdentity>) -> Result<Located, String> {
+    match target {
+        Target::Process(target) => Ok(Located::Process(Box::new(control::Service::locate(
+            target, parent,
+        )?))),
+        Target::Container(_) if parent.is_some() => {
+            Err("A container has no parent process to stop".into())
+        }
+        Target::Container(container) => Ok(Located::Container(container.clone())),
     }
 }
 
@@ -336,12 +389,28 @@ pub fn set_refresh_interval(monitor: State<'_, Monitor>, ms: u64) {
     }
 }
 
+/// What a control would end, from the same lookup the control repeats
+/// before it acts: the processes, the ports they hold and their supervisor.
+#[tauri::command]
+pub async fn preview_control(
+    target: Target,
+    parent: Option<ProcessIdentity>,
+) -> Result<Preview, String> {
+    blocking(move || match locate(&target, parent.as_ref())? {
+        Located::Process(service) => Ok(service.preview()),
+        Located::Container(_) => Ok(Preview::default()),
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn stop_server(
     app: AppHandle,
     target: Target,
     only_if_idle: Option<bool>,
     allowed_ids: Option<Vec<String>>,
+    force: Option<bool>,
+    scope: Option<Scope>,
 ) -> Result<Snapshot, String> {
     blocking(move || {
         let monitor = app.state::<Monitor>();
@@ -349,10 +418,16 @@ pub async fn stop_server(
         if only_if_idle.unwrap_or(false) {
             ensure_idle(&monitor, &target, allowed_ids.as_deref())?;
         }
-        monitor.control(&app, &target, |located| match located {
-            Located::Process(service) => service.stop(),
-            Located::Container(target) => containers::stop(&monitor.home, &target),
-        })
+        let shutdown = monitor.shutdown(force.unwrap_or(false));
+        monitor.control(
+            &app,
+            &target,
+            &scope.unwrap_or_default(),
+            |located| match located {
+                Located::Process(service) => service.stop(shutdown),
+                Located::Container(target) => containers::stop(&monitor.home, &target, shutdown),
+            },
+        )
     })
     .await
 }
@@ -398,12 +473,21 @@ fn ensure_idle(
 }
 
 #[tauri::command]
-pub async fn restart_server(app: AppHandle, target: Target) -> Result<Snapshot, String> {
+pub async fn restart_server(
+    app: AppHandle,
+    target: Target,
+    scope: Option<Scope>,
+) -> Result<Snapshot, String> {
     blocking(move || {
         let monitor = app.state::<Monitor>();
-        monitor.control(&app, &target, |located| match located {
-            Located::Process(service) => service.restart(),
-            Located::Container(target) => containers::restart(&monitor.home, &target),
+        let shutdown = monitor.shutdown(false);
+        let scope = scope.unwrap_or_default();
+        if scope.parent.is_some() {
+            return Err("Ports restarts a server, not its parent".into());
+        }
+        monitor.control(&app, &target, &scope, |located| match located {
+            Located::Process(service) => service.restart(shutdown),
+            Located::Container(target) => containers::restart(&monitor.home, &target, shutdown),
         })
     })
     .await
