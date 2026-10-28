@@ -8,6 +8,8 @@ use std::net::{IpAddr, SocketAddr};
 pub struct Sockets {
     pub listening: BTreeMap<SocketAddr, BTreeSet<u32>>,
     pub unowned: BTreeMap<SocketAddr, Option<u32>>,
+    /// Ports whose `::` socket refuses IPv4 (`IPV6_V6ONLY`, nginx's `[::]` default).
+    pub v6only: BTreeSet<u16>,
     established: HashSet<(u16, u32)>,
 }
 
@@ -21,7 +23,10 @@ impl Sockets {
                 .map(|l| (l.socket, l.process.pid, l.state)),
         );
         #[cfg(target_os = "macos")]
-        for (socket, pid) in pcblist::listening()? {
+        for (socket, pid, v6only) in pcblist::listening()? {
+            if v6only {
+                sockets.v6only.insert(socket.port());
+            }
             let socket = canonical(socket);
             if sockets.listening.contains_key(&socket) {
                 continue;
@@ -33,7 +38,22 @@ impl Sockets {
             }
         }
         #[cfg(target_os = "linux")]
-        sockets.merge_unowned(proc_net::listening()?);
+        {
+            sockets.merge_unowned(proc_net::listening()?);
+            // /proc doesn't show a socket's own IPV6_V6ONLY, only the default.
+            if std::fs::read_to_string("/proc/sys/net/ipv6/bindv6only")
+                .is_ok_and(|value| value.trim() == "1")
+            {
+                sockets.v6only.extend(
+                    sockets
+                        .listening
+                        .keys()
+                        .chain(sockets.unowned.keys())
+                        .filter(|socket| socket.ip() == IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED))
+                        .map(SocketAddr::port),
+                );
+            }
+        }
         Ok(sockets)
     }
 
@@ -138,6 +158,7 @@ mod pcblist {
     const INPCB_LPORT: usize = 18;
     /// `xinpcb_n.inp_vflag`, with `INP_IPV4` and `INP_IPV6`.
     const INPCB_VFLAG: usize = 44;
+    const INP_IPV4: u8 = 0x1;
     const INP_IPV6: u8 = 0x2;
     /// `xinpcb_n.inp_dependladdr`: an `in6_addr`, or an `in_addr_4in6` whose last four bytes are the IPv4 address.
     const INPCB_LADDR: usize = 64;
@@ -147,8 +168,9 @@ mod pcblist {
     const TCPCB_STATE: usize = 36;
     const TCPS_LISTEN: u32 = 1;
 
-    /// Local address and PID of every listening TCP socket, IPv4 and IPv6.
-    pub fn listening() -> Result<Vec<(SocketAddr, u32)>, String> {
+    /// Local address and PID of every listening TCP socket, IPv4 and IPv6,
+    /// and whether a `::` socket is IPv6-only: xnu marks a dual-stack one `INP_IPV4` too.
+    pub fn listening() -> Result<Vec<(SocketAddr, u32, bool)>, String> {
         read()
             .map(|buffer| parse(&buffer))
             .ok_or_else(|| "Could not read the macOS TCP table".to_string())
@@ -214,13 +236,13 @@ mod pcblist {
         })
     }
 
-    fn parse(buffer: &[u8]) -> Vec<(SocketAddr, u32)> {
+    fn parse(buffer: &[u8]) -> Vec<(SocketAddr, u32, bool)> {
         let mut found = Vec::new();
         let Some(header) = u32_at(buffer, 0) else {
             return found;
         };
         let mut offset = round_up_8(header as usize);
-        let (mut socket, mut pid) = (None, None);
+        let (mut socket, mut pid, mut v6only) = (None, None, false);
         while let (Some(len), Some(kind)) = (u32_at(buffer, offset), u32_at(buffer, offset + 4)) {
             let len = len as usize;
             if len <= XINPGEN_LEN {
@@ -235,6 +257,12 @@ mod pcblist {
                     socket = port
                         .zip(local_ip(record))
                         .map(|(port, ip)| SocketAddr::new(ip, port));
+                    v6only = socket.is_some_and(|socket| {
+                        socket.ip() == IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+                            && record
+                                .get(INPCB_VFLAG)
+                                .is_some_and(|flag| flag & INP_IPV4 == 0)
+                    });
                     pid = None;
                 }
                 XSO_SOCKET => pid = u32_at(buffer, offset + SOCKET_LAST_PID),
@@ -244,7 +272,7 @@ mod pcblist {
                         && socket.port() != 0
                         && pid != 0
                     {
-                        found.push((socket, pid));
+                        found.push((socket, pid, v6only));
                     }
                 }
                 _ => {}
@@ -266,10 +294,28 @@ mod pcblist {
                 assert!(
                     super::listening()
                         .unwrap()
-                        .contains(&(socket, std::process::id())),
+                        .contains(&(socket, std::process::id(), false)),
                     "{socket} is missing"
                 );
             }
+        }
+
+        #[test]
+        fn tells_an_ipv6_only_wildcard_from_a_dual_stack_one() {
+            use socket2::{Domain, Socket, Type};
+            let socket = Socket::new(Domain::IPV6, Type::STREAM, None).unwrap();
+            socket.set_only_v6(true).unwrap();
+            socket
+                .bind(&"[::]:0".parse::<std::net::SocketAddr>().unwrap().into())
+                .unwrap();
+            socket.listen(1).unwrap();
+            let address = socket.local_addr().unwrap().as_socket().unwrap();
+            assert!(
+                super::listening()
+                    .unwrap()
+                    .contains(&(address, std::process::id(), true)),
+                "{address} isn't reported as IPv6-only"
+            );
         }
     }
 }

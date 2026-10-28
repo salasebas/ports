@@ -283,7 +283,12 @@ impl Sampler {
         let lan_ip = network::lan_ip();
         for server in &mut servers {
             server.exposed = network::is_exposed(&server.addresses);
-            server.lan_url = network::lan_url(server.port, &server.addresses, lan_ip);
+            server.lan_url = network::lan_url(
+                server.port,
+                &server.addresses,
+                lan_ip,
+                sockets.v6only.contains(&server.port),
+            );
         }
         servers.sort_by(|a, b| a.port.cmp(&b.port).then_with(|| a.id.cmp(&b.id)));
         self.revision = self.revision.saturating_add(1);
