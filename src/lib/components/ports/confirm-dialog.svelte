@@ -5,18 +5,28 @@
 	import { Badge } from "$lib/components/ui/badge";
 	import { Checkbox } from "$lib/components/ui/checkbox";
 	import * as Field from "$lib/components/ui/field";
-	import { Spinner } from "$lib/components/ui/spinner";
+	import { Skeleton } from "$lib/components/ui/skeleton";
 	import type { PendingAction, PortsStore } from "$lib/ports/ports-store.svelte";
 	import { isHidden, mustConfirm } from "$lib/ports/ports-store.svelte";
 	import { preferences } from "$lib/ports/preferences.svelte";
 	import { processKey } from "$lib/ports/resources";
 	import type { ControlPreview, Server, Supervisor } from "$lib/ports/types";
 	import { settings } from "$lib/settings.svelte";
+	import { cubicOut } from "svelte/easing";
+	import { prefersReducedMotion } from "svelte/motion";
+	import { fade, fly } from "svelte/transition";
 
 	let { store }: { store: PortsStore } = $props();
 
 	const id = $props.id();
 	let dontAskAgain = $state(false);
+
+	// Short, opacity and transform only; nothing moves when the user asks for less motion.
+	const reduced = $derived(prefersReducedMotion.current);
+	/** Most previews arrive within a frame or two; the skeleton waits so it doesn't flash. */
+	const appear = $derived({ delay: 150, duration: reduced ? 0 : 150 });
+	const leave = $derived({ duration: reduced ? 0 : 120 });
+	const enter = $derived({ y: reduced ? 0 : 4, duration: reduced ? 0 : 200, easing: cubicOut });
 
 	/** Long worker trees fold into a count past this many rows. */
 	const SHOWN_PROCESSES = 6;
@@ -121,64 +131,79 @@
 				</AlertDialog.Description>
 			</AlertDialog.Header>
 
-			{#if error}
-				<Alert.Root variant="destructive">
-					<CircleAlertIcon />
-					<Alert.Title>Ports can't tell what this would stop</Alert.Title>
-					<Alert.Description>{error}</Alert.Description>
-				</Alert.Root>
-			{:else if !previews}
-				<p class="flex items-center justify-center gap-2 text-sm text-muted-foreground">
-					<Spinner />
-					Checking what this would stop…
-				</p>
-			{:else}
-				<div class="flex flex-col gap-3 text-sm" aria-live="polite">
-					{#if processes.length}
-						<ul class="flex flex-col gap-1" aria-label="Processes">
-							{#each processes.slice(0, SHOWN_PROCESSES) as affected (processKey(affected.process))}
-								<li class="flex items-center gap-2">
-									<span class="min-w-0 flex-1 truncate">{affected.name}</span>
-									{#each affected.ports as port (port)}
-										<Badge variant="secondary" class="font-mono">:{port}</Badge>
+			<!-- Loading, error and preview share one cell, so they crossfade in place instead of jumping. -->
+			<div class="grid min-h-16 text-sm *:col-start-1 *:row-start-1" aria-live="polite" aria-busy={!previews && !error}>
+				{#if error}
+					<div in:fly={enter}>
+						<Alert.Root variant="destructive">
+							<CircleAlertIcon />
+							<Alert.Title>Ports can't tell what this would stop</Alert.Title>
+							<Alert.Description>{error}</Alert.Description>
+						</Alert.Root>
+					</div>
+				{:else if !previews}
+					<!-- Shows only when checking takes a moment, in the shape of what it will show. -->
+					<div class="flex flex-col gap-3" in:fade|global={appear} out:fade={leave}>
+						<div class="flex items-center gap-3 rounded-xl bg-muted/50 px-3 py-2.5">
+							<Skeleton class="h-4 w-20" />
+							<Skeleton class="ms-auto h-5 w-12 rounded-full" />
+							<Skeleton class="h-4 w-16" />
+						</div>
+						<span class="sr-only">Checking what this would stop</span>
+						<Skeleton class="h-3.5 w-24" />
+					</div>
+				{:else}
+					<div class="flex flex-col gap-3" in:fly={enter}>
+						{#if processes.length}
+							<ul class="flex flex-col divide-y divide-border/60 rounded-xl bg-muted/50" aria-label="Processes">
+								{#each processes.slice(0, SHOWN_PROCESSES) as affected (processKey(affected.process))}
+									<li class="flex items-center gap-2 px-3 py-2">
+										<span class="min-w-0 flex-1 truncate font-medium">{affected.name}</span>
+										{#each affected.ports as port (port)}
+											<Badge variant="secondary" class="font-mono">:{port}</Badge>
+										{/each}
+										<span class="w-20 shrink-0 text-right font-mono text-xs text-muted-foreground tabular-nums">
+											{affected.process.pid}
+										</span>
+									</li>
+								{/each}
+								{#if processes.length > SHOWN_PROCESSES}
+									<li class="px-3 py-2 text-muted-foreground">
+										and {processes.length - SHOWN_PROCESSES} more
+									</li>
+								{/if}
+							</ul>
+						{/if}
+						{#if ports.length || alsoAffected.length}
+							<p class="text-muted-foreground">
+								{#if ports.length}
+									Frees <span class="font-mono text-foreground">{ports.map((port) => `:${port}`).join(" ")}</span>
+								{/if}
+								{#if alsoAffected.length}
+									{ports.length ? "· " : ""}Also stops
+									{#each alsoAffected as other, i (other.id)}
+										{i ? ", " : ""}<span class="text-foreground">{other.name} :{other.port}</span>{isHidden(other)
+											? " (hidden)"
+											: ""}{other.protected ? " (protected)" : ""}
 									{/each}
-									<span class="shrink-0 font-mono text-xs text-muted-foreground">PID {affected.process.pid}</span>
-								</li>
-							{/each}
-							{#if processes.length > SHOWN_PROCESSES}
-								<li class="text-muted-foreground">and {processes.length - SHOWN_PROCESSES} more</li>
-							{/if}
-						</ul>
-					{/if}
-					{#if ports.length}
-						<p class="text-muted-foreground">
-							Frees {ports.map((port) => `:${port}`).join(", ")}
-						</p>
-					{/if}
-					{#if alsoAffected.length}
-						<p class="text-muted-foreground">
-							Also stops
-							{#each alsoAffected as other, i (other.id)}
-								{i ? ", " : ""}<span class="text-foreground">{other.name} :{other.port}</span>{isHidden(other)
-									? " (hidden)"
-									: ""}{other.protected ? " (protected)" : ""}
-							{/each}
-						</p>
-					{/if}
-					{#if action === "stopAll"}
-						<ul class="flex flex-col gap-1" aria-label="Servers">
-							{#each pending.servers as row, i (row.id)}
-								<li class="text-muted-foreground">
-									<span class="text-foreground">{row.name} :{row.port}</span> · {describe("stop", row, previews[i])}
-									{@render respawn(previews[i])}
-								</li>
-							{/each}
-						</ul>
-					{:else}
-						{@render respawn(previews[0])}
-					{/if}
-				</div>
-			{/if}
+								{/if}
+							</p>
+						{/if}
+						{#if action === "stopAll"}
+							<ul class="flex flex-col gap-1" aria-label="Servers">
+								{#each pending.servers as row, i (row.id)}
+									<li class="text-muted-foreground">
+										<span class="text-foreground">{row.name} :{row.port}</span> · {describe("stop", row, previews[i])}
+										{@render respawn(previews[i])}
+									</li>
+								{/each}
+							</ul>
+						{:else}
+							{@render respawn(previews[0])}
+						{/if}
+					</div>
+				{/if}
+			</div>
 
 			{#if !mustConfirm(action, server)}
 				<Field.Field orientation="horizontal" class="justify-center">

@@ -23,6 +23,16 @@ impl ProcessIdentity {
     pub fn is_current(&self) -> bool {
         Self::read(self.pid).as_ref() == Some(self)
     }
+
+    /// When the process started, in seconds since the epoch, where the
+    /// identity records wall-clock time (macOS). Linux records ticks since boot.
+    pub fn started_secs(&self) -> Option<u64> {
+        if cfg!(target_os = "macos") {
+            self.start.split_once(':')?.0.parse().ok()
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -82,6 +92,18 @@ mod tests {
             ..current
         };
         assert!(!stale.is_current());
+    }
+
+    // launchd belongs to root; sysinfo can't read its start time, the kernel can.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn knows_when_another_users_process_started() {
+        let started = ProcessIdentity::read(1).unwrap().started_secs().unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(started > 0 && started <= now);
     }
 
     // Another user's process, such as launchd or init, still has an identity.

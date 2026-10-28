@@ -254,8 +254,8 @@
 					<Field.Title>Hidden servers</Field.Title>
 					<Field.Description>
 						{preferences.hidden.current.length
-							? "Left out of both lists. Remove one to show it again."
-							: "Hide a server from its details to leave it out of both lists."}
+							? "Left out of the window and the menu bar list. Remove one to show it again."
+							: "None yet. To hide one, open a server's details and choose Hide. It then leaves the window and the menu bar list."}
 					</Field.Description>
 				</Field.Content>
 				{#if preferences.hidden.current.length}

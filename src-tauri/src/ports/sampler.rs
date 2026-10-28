@@ -459,7 +459,13 @@ fn describe(
         lan_url: None,
         process,
         command,
-        started_at: root.start_time() * 1000,
+        // sysinfo reports 0 for another user's process, such as launchd.
+        started_at: match root.start_time() {
+            0 => ProcessIdentity::read(root.pid().as_u32())
+                .and_then(|id| id.started_secs())
+                .unwrap_or_default(),
+            secs => secs,
+        } * 1000,
         last_active_at: tracked.last_active_at,
         memory_bytes,
         cpu_percent,
