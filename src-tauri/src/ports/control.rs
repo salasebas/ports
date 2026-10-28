@@ -158,7 +158,7 @@ impl Service {
                 };
                 (target, job)
             }
-            None => (target.clone(), with_group_members(job, &system)),
+            None => (target.clone(), job),
         };
         let (managed, unsupported) = match &found {
             Some(found) if parent.is_none() => match Managed::confirm(found, &system)? {
@@ -166,6 +166,12 @@ impl Service {
                 None => (None, Some(found.summary())),
             },
             _ => (None, None),
+        };
+        // Signals end the whole group; a supervisor ends only what it tracks.
+        let job = if managed.is_none() {
+            with_group_members(job, &system)
+        } else {
+            job
         };
         let mut ports: BTreeMap<u32, BTreeSet<u16>> = BTreeMap::new();
         for (socket, owners) in &sockets.listening {
@@ -279,8 +285,13 @@ impl Service {
             return Err(format!("Nothing listens on :{} anymore", self.target.port));
         };
         if let Some(managed) = &self.managed {
+            let before = self
+                .identities
+                .union(&managed.instances())
+                .cloned()
+                .collect();
             managed.restart()?;
-            return wait_until_supervised(&self.target, managed, &self.identities, LISTEN_TIMEOUT);
+            return wait_until_supervised(&self.target, managed, &before, LISTEN_TIMEOUT);
         }
         if let Some(supervisor) = &self.unsupported {
             return Err(format!(
@@ -616,8 +627,9 @@ fn wait_until_free(target: &ProcessTarget, timeout: Duration) -> Result<(), Stri
     }
 }
 
-/// Waits until the supervisor runs a new process on the port: one under
-/// the process it runs for the service now, that wasn't part of it before.
+/// Waits until the supervisor runs the service anew on the port: a process
+/// under the one it runs for the service now listens, and none from before
+/// does, such as an instance of a PM2 cluster that wasn't restarted.
 fn wait_until_supervised(
     target: &ProcessTarget,
     managed: &Managed,
@@ -630,14 +642,17 @@ fn wait_until_supervised(
             let sockets = Sockets::scan()?;
             let system = process_table();
             let descendants = ProcessTable::new(&system).descendants(anchor);
-            let replaced = sockets.listening.iter().any(|(socket, owners)| {
-                socket.port() == target.port
-                    && owners.iter().any(|pid| {
-                        descendants.contains(pid)
-                            && ProcessIdentity::read(*pid).is_some_and(|id| !before.contains(&id))
-                    })
-            });
-            if replaced {
+            let owners: Vec<_> = sockets
+                .listening
+                .iter()
+                .filter(|(socket, _)| socket.port() == target.port)
+                .flat_map(|(_, owners)| owners)
+                .filter_map(|pid| ProcessIdentity::read(*pid))
+                .collect();
+            let fresh = owners
+                .iter()
+                .any(|id| descendants.contains(&id.pid) && !before.contains(id));
+            if fresh && owners.iter().all(|id| !before.contains(id)) {
                 return Ok(());
             }
         }
@@ -1130,13 +1145,34 @@ while(1){my $pid=fork();if(!$pid){exec('python3','-c',$server,$port)}print "$pid
         }
         let _ = daemon.kill();
         let _ = daemon.wait();
-        let found_pm2 = match result {
-            Ok(preview) => preview
-                .supervisor
-                .is_some_and(|s| s.kind == supervisors::Kind::Pm2),
-            Err(error) => error.contains("PM2"),
-        };
-        assert!(found_pm2);
+        // Without a pm2 to confirm the app, the control stops instead of signalling it.
+        let error = result.unwrap_err();
+        assert!(
+            error.contains("can't find the pm2 command") || error.contains("Can't ask PM2"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_control_refuses_pm2s_own_daemon_since_it_runs_every_app() {
+        let port = free_port();
+        // PM2's daemon holds the port itself in cluster mode.
+        let mut daemon = Command::new("bash")
+            .args([
+                "-c",
+                &format!(
+                    "exec -a 'PM2 v5.3.0: God Daemon (/nonexistent/.pm2)' nc -l 127.0.0.1 {port}"
+                ),
+            ])
+            .spawn()
+            .unwrap();
+        let listening = listening_within(port, Duration::from_secs(5));
+        let result = Service::locate(&target(port, daemon.id()), None).map(|_| ());
+        let _ = daemon.kill();
+        let _ = daemon.wait();
+        assert!(listening);
+        let error = result.unwrap_err();
+        assert!(error.contains("would stop every PM2 app"), "{error}");
     }
 
     #[test]

@@ -244,7 +244,10 @@
 				</p>
 			{:else if managed}
 				<p class="text-xs text-muted-foreground">
-					Stop and Restart go through {supervisorNames[supervisor!.kind]}, so it doesn't start again on its own.
+					Stop and Restart go through {supervisorNames[supervisor!.kind]}, so it doesn't start again on its own.{supervisor!
+						.kind === "homebrew"
+						? " Stop also keeps it from starting at login."
+						: ""}
 				</p>
 			{/if}
 		{/if}

@@ -38,6 +38,14 @@ export type ServerAction = "stop" | "restart" | "forceKill" | "stopParent" | "st
 /** Broad or abrupt actions always show what they end, whatever the preference. */
 const alwaysConfirmed: ServerAction[] = ["forceKill", "stopParent", "stopAll"];
 
+/**
+ * Whether the action asks first even with confirmation off: broad or abrupt
+ * ones, and Homebrew's stop, which also keeps the service from starting at login.
+ */
+export const mustConfirm = (action: ServerAction, server: Server) =>
+	alwaysConfirmed.includes(action) ||
+	(action === "stop" && server.supervisor?.kind === "homebrew" && server.supervisor.supported);
+
 /** An action waiting for the user, with what the backend says it would end. */
 export interface PendingAction {
 	action: ServerAction;
@@ -324,7 +332,7 @@ export class PortsStore {
 	request = async (action: ServerAction, server: Server) => {
 		if (this.isBusy(server, "control")) return;
 		const servers = action === "stopAll" ? this.sameProgram(server) : [server];
-		if (!alwaysConfirmed.includes(action) && !preferences.confirmActions.current) {
+		if (!mustConfirm(action, server) && !preferences.confirmActions.current) {
 			await this.#execute(action, servers, null);
 			return;
 		}

@@ -7,7 +7,7 @@
 	import * as Field from "$lib/components/ui/field";
 	import { Spinner } from "$lib/components/ui/spinner";
 	import type { PendingAction, PortsStore } from "$lib/ports/ports-store.svelte";
-	import { isHidden } from "$lib/ports/ports-store.svelte";
+	import { isHidden, mustConfirm } from "$lib/ports/ports-store.svelte";
 	import { preferences } from "$lib/ports/preferences.svelte";
 	import { processKey } from "$lib/ports/resources";
 	import type { ControlPreview, Server, Supervisor } from "$lib/ports/types";
@@ -57,8 +57,6 @@
 				server.resources.some((resource) => keys.has(processKey(resource.process))),
 		),
 	);
-	const supervisor = $derived(pending?.previews?.find((preview) => preview.supervisor)?.supervisor);
-
 	function supervisorName(found: Supervisor) {
 		return { homebrew: "Homebrew", pm2: "PM2", supervisord: "supervisord" }[found.kind];
 	}
@@ -73,8 +71,9 @@
 		}
 		if (managed?.kind === "pm2") return `PM2 ${action === "restart" ? "restarts" : "stops"} ${managed.name}.`;
 		switch (action) {
-			case "stop":
 			case "stopAll":
+				return "Each server stops the way its line says.";
+			case "stop":
 				return `These processes get ${grace === 1 ? "1 second" : `${grace} seconds`} to exit before Ports kills them.`;
 			case "restart":
 				return `These processes stop, then ${server.name} starts again on :${server.port}.`;
@@ -91,6 +90,16 @@
 		store.confirm();
 	}
 </script>
+
+{#snippet respawn(preview: ControlPreview)}
+	{#if preview.supervisor && !preview.supervisor.supported}
+		<p class="text-warning">
+			{supervisorName(preview.supervisor)} runs it and may start it again. Stop it through {supervisorName(
+				preview.supervisor,
+			)} to keep it stopped.
+		</p>
+	{/if}
+{/snippet}
 
 <AlertDialog.Root
 	bind:open={
@@ -157,22 +166,21 @@
 						</p>
 					{/if}
 					{#if action === "stopAll"}
-						{#each pending.servers as row, i (row.id)}
-							{@const managed = previews[i].supervisor}
-							{#if managed?.supported}
-								<p class="text-muted-foreground">:{row.port} · {describe("stop", row, previews[i])}</p>
-							{/if}
-						{/each}
-					{/if}
-					{#if supervisor && !supervisor.supported}
-						<p class="text-warning">
-							{supervisorName(supervisor)} runs it and may start it again. Stop it with supervisorctl to keep it stopped.
-						</p>
+						<ul class="flex flex-col gap-1" aria-label="Servers">
+							{#each pending.servers as row, i (row.id)}
+								<li class="text-muted-foreground">
+									<span class="text-foreground">{row.name} :{row.port}</span> · {describe("stop", row, previews[i])}
+									{@render respawn(previews[i])}
+								</li>
+							{/each}
+						</ul>
+					{:else}
+						{@render respawn(previews[0])}
 					{/if}
 				</div>
 			{/if}
 
-			{#if action === "stop" || action === "restart"}
+			{#if !mustConfirm(action, server)}
 				<Field.Field orientation="horizontal" class="justify-center">
 					<Checkbox id="{id}-dont-ask" bind:checked={dontAskAgain} />
 					<Field.Label for="{id}-dont-ask" class="font-normal text-muted-foreground">Don't ask again</Field.Label>

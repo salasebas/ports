@@ -283,6 +283,16 @@ describe("stopping a server", () => {
 		]);
 	});
 
+	// brew services stop also keeps the service from starting at login, so it never happens unseen.
+	it("asks before stopping a Homebrew service even with confirmation off", async () => {
+		preferences.confirmActions.current = false;
+		const redis = server({ ...db, supervisor: { kind: "homebrew", name: "redis", supported: true } });
+		const store = storeWith(redis);
+		await store.request("stop", redis);
+		expect(store.pending?.action).toBe("stop");
+		expect(calls.map(([cmd]) => cmd)).toEqual(["preview_control"]);
+	});
+
 	// A watcher such as nodemon would start the server again; Stop parent ends it too.
 	it("previews and stops the parent of a server", async () => {
 		const nodemon = { process: { pid: 90, start: "1" }, name: "nodemon" };

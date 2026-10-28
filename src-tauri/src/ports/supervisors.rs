@@ -2,7 +2,7 @@
 //! and restarts the services they manage through their own commands, since
 //! a signal would only make them start the service again.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use sysinfo::{Pid, System};
 
+use super::identity::ProcessIdentity;
 use super::processes::ProcessTable;
 
 const HOMEBREW_LABEL: &str = "homebrew.mxcl.";
@@ -226,7 +227,9 @@ pub enum Managed {
         pm2: PathBuf,
         home: PathBuf,
         daemon: u32,
-        id: u64,
+        /// Every instance of the app, as a cluster runs several.
+        ids: Vec<u64>,
+        pids: Vec<u32>,
         name: String,
     },
 }
@@ -267,15 +270,17 @@ impl Managed {
                 )?;
                 let apps = pm2_apps(&pm2, home)?;
                 let app = apps
-                    .into_iter()
+                    .iter()
                     .find(|app| app.pid == Some(*pid))
                     .ok_or("PM2 no longer runs this server; refresh before trying again")?;
+                let instances = instances_of(&apps, app);
                 Ok(Some(Self::Pm2 {
                     pm2,
                     home: home.clone(),
                     daemon: *daemon,
-                    id: app.pm_id,
-                    name: app.name,
+                    ids: instances.iter().map(|app| app.pm_id).collect(),
+                    pids: instances.iter().filter_map(|app| app.pid).collect(),
+                    name: app.name.clone(),
                 }))
             }
         }
@@ -288,9 +293,12 @@ impl Managed {
                 name: Some(formula.clone()),
                 supported: true,
             },
-            Self::Pm2 { name, .. } => Supervisor {
+            Self::Pm2 { name, ids, .. } => Supervisor {
                 kind: Kind::Pm2,
-                name: Some(name.clone()),
+                name: Some(match ids.len() {
+                    0 | 1 => name.clone(),
+                    n => format!("{name} ({n} instances)"),
+                }),
                 supported: true,
             },
         }
@@ -321,10 +329,11 @@ impl Managed {
                     .env("HOMEBREW_NO_ENV_HINTS", "1");
                 command
             }
-            Self::Pm2 { pm2, home, id, .. } => {
+            Self::Pm2 { pm2, home, ids, .. } => {
                 let mut command = Command::new(pm2);
                 command
-                    .args([action, &id.to_string()])
+                    .arg(action)
+                    .args(ids.iter().map(u64::to_string))
                     .env("PM2_HOME", home);
                 command
             }
@@ -332,6 +341,18 @@ impl Managed {
         run(&mut command, CONTROL_TIMEOUT)
             .map(drop)
             .map_err(|error| format!("Can't {action} {}: {error}", self.label()))
+    }
+
+    /// The processes the supervisor runs for this service besides the located
+    /// tree, such as the other instances of a PM2 cluster.
+    pub fn instances(&self) -> BTreeSet<ProcessIdentity> {
+        match self {
+            Self::Homebrew { .. } => BTreeSet::new(),
+            Self::Pm2 { pids, .. } => pids
+                .iter()
+                .filter_map(|pid| ProcessIdentity::read(*pid))
+                .collect(),
+        }
     }
 
     /// The process the supervisor runs for this service now, which a restart replaces.
@@ -381,6 +402,24 @@ struct Pm2App {
     name: String,
     #[serde(default)]
     pid: Option<u32>,
+    #[serde(default)]
+    pm2_env: Pm2Env,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct Pm2Env {
+    #[serde(default)]
+    pm_exec_path: Option<String>,
+}
+
+/// A cluster's instances share the name and the script; another app may
+/// share only the name.
+fn instances_of<'a>(apps: &'a [Pm2App], app: &Pm2App) -> Vec<&'a Pm2App> {
+    apps.iter()
+        .filter(|other| {
+            other.name == app.name && other.pm2_env.pm_exec_path == app.pm2_env.pm_exec_path
+        })
+        .collect()
 }
 
 fn pm2_apps(pm2: &Path, home: &Path) -> Result<Vec<Pm2App>, String> {
@@ -490,6 +529,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(apps.len(), 2);
+        let cluster = parse_pm2(
+            r#"[{"pm_id":0,"name":"api","pid":10,"pm2_env":{"pm_exec_path":"/app/api.js"}},{"pm_id":1,"name":"api","pid":11,"pm2_env":{"pm_exec_path":"/app/api.js"}},{"pm_id":2,"name":"api","pid":12,"pm2_env":{"pm_exec_path":"/other/api.js"}},{"pm_id":3,"name":"web","pid":13,"pm2_env":{"pm_exec_path":"/app/api.js"}}]"#,
+        )
+        .unwrap();
+        let ids: Vec<_> = instances_of(&cluster, &cluster[1])
+            .iter()
+            .map(|app| app.pm_id)
+            .collect();
+        assert_eq!(ids, vec![0, 1]);
         assert_eq!(
             (apps[0].pm_id, apps[0].name.as_str(), apps[0].pid),
             (0, "api", Some(4100))
