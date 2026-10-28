@@ -149,7 +149,15 @@ export class PortsStore {
 		const q = this.query.trim().toLowerCase();
 		const matching = q
 			? this.shown.filter((server) =>
-					[server.port, server.name, server.process, server.framework, server.branch]
+					[
+						server.port,
+						server.name,
+						server.process,
+						server.framework,
+						server.branch,
+						server.projectName,
+						server.web.state === "page" && server.web.title,
+					]
 						.filter(Boolean)
 						.some((field) => String(field).toLowerCase().includes(q)),
 				)

@@ -21,6 +21,8 @@ function server(overrides: Partial<Server>): Server {
 		exposed: false,
 		protected: false,
 		restartable: true,
+		attribution: { confidence: "unknown", evidence: [] },
+		web: { state: "unknown" },
 		startedAt: 0,
 		lastActiveAt: 0,
 		memoryBytes: 0,

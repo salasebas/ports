@@ -4,12 +4,13 @@
 	import SquareIcon from "@lucide/svelte/icons/square";
 	import WifiIcon from "@lucide/svelte/icons/wifi";
 	import { Button } from "$lib/components/ui/button";
-	import { canStop, formatBytes, isMeasured, serverActivity } from "$lib/ports/format";
+	import { canStop, confirmedFramework, formatBytes, isMeasured, serverActivity } from "$lib/ports/format";
 	import type { PortsStore } from "$lib/ports/ports-store.svelte";
 	import { preferences } from "$lib/ports/preferences.svelte";
 	import type { Server } from "$lib/ports/types";
 	import { cn } from "$lib/utils";
 	import PortLabel from "./port-label.svelte";
+	import ServerIcon from "./server-icon.svelte";
 	import Sparkline from "./sparkline.svelte";
 
 	let { server, store }: { server: Server; store: PortsStore } = $props();
@@ -21,7 +22,7 @@
 	});
 	const attention = $derived(server.status === "attention");
 	const leaking = $derived(attention && server.responding);
-	const detail = $derived(server.branch ?? server.framework ?? server.process);
+	const detail = $derived(server.branch ?? confirmedFramework(server) ?? server.process);
 </script>
 
 <li
@@ -42,6 +43,7 @@
 
 	<div class="pointer-events-none flex min-w-0 flex-1 flex-col">
 		<span class="flex items-center gap-1.5 text-sm font-medium">
+			<ServerIcon {server} class="size-3.5" />
 			{#if store.isPinned(server)}
 				<PinIcon class="size-3 shrink-0 text-muted-foreground" aria-label="Pinned" />
 			{/if}

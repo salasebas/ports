@@ -30,7 +30,8 @@ sysinfo = { version = "0.38", default-features = false, features = ["system", "u
 tauri-plugin-notification = "2"
 tauri-plugin-store = "2"
 if-addrs = "0.15"
-reqwest = { version = "0.13", default-features = false, features = ["blocking"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "native-tls"] }
+toml = "1"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
@@ -48,3 +49,4 @@ tauri-plugin-global-shortcut = "2"
 tauri = { version = "2", features = ["test"] }
 tempfile = "3"
 socket2 = "0.6"
+native-tls = "0.2"

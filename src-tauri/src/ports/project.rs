@@ -1,9 +1,13 @@
-//! What a server is: its project folder, git branch and framework.
+//! What a server is: its project folder, git branch and framework, and why
+//! Ports thinks so.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
+use serde::Serialize;
 
 const PROJECT_MARKERS: [&str; 7] = [
     "package.json",
@@ -13,6 +17,26 @@ const PROJECT_MARKERS: [&str; 7] = [
     "Gemfile",
     "composer.json",
     ".git",
+];
+
+/// Locations of the system and of package managers, never a user's project,
+/// though some are git checkouts, like Homebrew's prefix.
+const SYSTEM_ROOTS: [&str; 15] = [
+    "/System",
+    "/Library",
+    "/Applications",
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/etc",
+    "/private/etc",
+    "/private/var/db",
+    "/var/lib",
+    "/opt/homebrew",
+    "/opt/local",
+    "/home/linuxbrew",
+    "/nix",
+    "/snap",
 ];
 
 /// Manifests whose dependency names identify a framework.
@@ -26,8 +50,9 @@ const MANIFESTS: [&str; 7] = [
     "composer.json",
 ];
 
-/// Executables that are a framework on their own. Checked in order.
-const COMMANDS: [(&str, &str); 22] = [
+/// Executables, scripts and Python modules that are a framework or a tool
+/// on their own. Checked in order.
+const COMMANDS: [(&str, &str); 34] = [
     ("postgres", "PostgreSQL"),
     ("postmaster", "PostgreSQL"),
     ("mysqld", "MySQL"),
@@ -50,6 +75,20 @@ const COMMANDS: [(&str, &str); 22] = [
     ("flask", "Flask"),
     ("artisan", "Laravel"),
     ("hugo", "Hugo"),
+    ("expo", "Expo"),
+    ("storybook", "Storybook"),
+    ("start-storybook", "Storybook"),
+    ("docusaurus", "Docusaurus"),
+    // `jupyter lab` execs `jupyter-lab`; `python -m jupyterlab` runs the module.
+    ("jupyter-lab", "Jupyter"),
+    ("jupyter-notebook", "Jupyter"),
+    ("jupyter-server", "Jupyter"),
+    ("jupyterlab", "Jupyter"),
+    ("mkdocs", "MkDocs"),
+    ("jekyll", "Jekyll"),
+    // `python -m http.server`.
+    ("http.server", "http.server"),
+    ("webpack-dev-server", "webpack"),
 ];
 
 /// Official images named differently from their server's executable.
@@ -81,14 +120,16 @@ const RUNNERS: [(&str, &str, &[&str]); 6] = [
 ];
 
 /// Dependency names, most specific first: a Next.js app also depends on React.
-const DEPENDENCIES: [(&str, &str); 28] = [
+const DEPENDENCIES: [(&str, &str); 30] = [
     ("next", "Next.js"),
     ("nuxt", "Nuxt"),
     ("@sveltejs/kit", "SvelteKit"),
     ("astro", "Astro"),
+    ("@docusaurus/core", "Docusaurus"),
     ("@remix-run/dev", "Remix"),
     ("@react-router/dev", "React Router"),
     ("gatsby", "Gatsby"),
+    ("expo", "Expo"),
     ("@angular/core", "Angular"),
     ("@nestjs/core", "NestJS"),
     ("express", "Express"),
@@ -163,14 +204,139 @@ pub fn is_database(framework: &str) -> bool {
     DATABASES.contains(&framework)
 }
 
-/// The nearest folder at or above `cwd` with a project marker. Only folders
-/// inside the home folder count, so services running from `/` or from
-/// Homebrew's prefix (itself a git checkout) have no project.
-pub fn project_folder(cwd: &Path, home: &Path) -> Option<PathBuf> {
+/// How sure Ports is of a server's framework. Ports never computes a score:
+/// each state names the kind of evidence it has. Mirrors `Confidence` in
+/// `src/lib/ports/types.ts`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Confidence {
+    /// The executable, the script it runs or the container image is the framework's own.
+    Confirmed,
+    /// Only the project's dependencies or the port number suggest it.
+    Likely,
+    /// Nothing names a framework.
+    #[default]
+    Unknown,
+}
+
+/// One reason behind what Ports says a server is. Mirrors `Evidence` in
+/// `src/lib/ports/types.ts`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "source", rename_all = "camelCase")]
+pub enum Evidence {
+    /// A file that makes the folder a project, such as `package.json` or `.git`.
+    Marker { file: &'static str },
+    /// The executable, or the script or Python module it runs: `vite`, `manage.py`.
+    Command { name: &'static str },
+    /// A dependency the project declares; it refines a generic runner or, on
+    /// its own, only suggests the framework.
+    Dependency {
+        manifest: &'static str,
+        name: &'static str,
+    },
+    /// The container's image.
+    Image { name: String },
+    /// What usually listens on the port, for a process Ports can't see.
+    WellKnownPort { port: u16 },
+}
+
+/// Why Ports names a server's project and framework, kept apart from its
+/// usage and health. Mirrors `Attribution` in `src/lib/ports/types.ts`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct Attribution {
+    pub confidence: Confidence,
+    pub evidence: Vec<Evidence>,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Detection {
+    pub framework: Option<&'static str>,
+    pub attribution: Attribution,
+}
+
+impl Detection {
+    fn new(framework: &'static str, confidence: Confidence, evidence: Vec<Evidence>) -> Self {
+        Self {
+            framework: Some(framework),
+            attribution: Attribution {
+                confidence,
+                evidence,
+            },
+        }
+    }
+}
+
+/// A container's framework, from its image.
+pub fn image_detection(image: &str) -> Detection {
+    image_framework(image).map_or_else(Detection::default, |framework| {
+        Detection::new(
+            framework,
+            Confidence::Confirmed,
+            vec![Evidence::Image { name: image.into() }],
+        )
+    })
+}
+
+/// What usually listens on the port, for a process Ports can't see.
+pub fn port_detection(port: u16) -> Detection {
+    match well_known(port) {
+        Some((_, Some(framework))) => Detection::new(
+            framework,
+            Confidence::Likely,
+            vec![Evidence::WellKnownPort { port }],
+        ),
+        _ => Detection::default(),
+    }
+}
+
+/// A project's root folder and the file that marks it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Project {
+    pub root: PathBuf,
+    pub marker: &'static str,
+}
+
+/// The nearest folder at or above `cwd` with a project marker. Inside the
+/// home folder the search stops below home, so dotfiles kept in git don't
+/// make home a project; elsewhere, such as on an external volume or in
+/// `/workspace`, it stops below `/`. Services running from a system location
+/// have no project. Both paths must be `canonical`.
+pub fn project_folder(cwd: &Path, home: &Path) -> Option<Project> {
+    let in_home = cwd.starts_with(home);
+    if !in_home && SYSTEM_ROOTS.iter().any(|root| cwd.starts_with(root)) {
+        return None;
+    }
     cwd.ancestors()
-        .take_while(|dir| dir.starts_with(home) && *dir != home)
-        .find(|dir| PROJECT_MARKERS.iter().any(|m| dir.join(m).exists()))
-        .map(Path::to_path_buf)
+        .take_while(|dir| {
+            if in_home {
+                *dir != home
+            } else {
+                dir.parent().is_some()
+            }
+        })
+        .find_map(|dir| {
+            // `exists` is false for a folder Ports may not read.
+            let marker = PROJECT_MARKERS.iter().find(|m| dir.join(m).exists())?;
+            Some(Project {
+                root: dir.to_path_buf(),
+                marker,
+            })
+        })
+}
+
+/// The path with symlinked aliases resolved, so each folder has one name. A
+/// deleted folder can't be resolved and stays as it is: its parents may
+/// still hold the project.
+pub fn canonical(path: &Path) -> PathBuf {
+    path.ancestors()
+        .find_map(|dir| {
+            let resolved = fs::canonicalize(dir).ok()?;
+            match path.strip_prefix(dir).ok()? {
+                rest if rest.as_os_str().is_empty() => Some(resolved),
+                rest => Some(resolved.join(rest)),
+            }
+        })
+        .unwrap_or_else(|| path.to_path_buf())
 }
 
 /// The checked-out branch, or the short commit when HEAD is detached.
@@ -218,7 +384,8 @@ pub fn command_words<'a>(commands: impl IntoIterator<Item = &'a [OsString]>) -> 
             .skip(1)
             .map(|arg| arg.to_string_lossy())
             .collect();
-        let script = if executable.starts_with("python") {
+        // A framework build of Python on macOS runs as `Python`.
+        let script = if executable.to_ascii_lowercase().starts_with("python") {
             match args.as_slice() {
                 [flag, module, ..] if flag == "-m" => Some(module.as_ref()),
                 [script, ..] if !script.starts_with('-') => Some(script.as_ref()),
@@ -245,36 +412,70 @@ pub fn is_http_command(words: &HashSet<String>) -> bool {
         || RUNNERS.iter().any(|(word, ..)| words.contains(*word))
 }
 
-pub fn framework(words: &HashSet<String>, folder: Option<&Path>) -> Option<&'static str> {
-    if let Some((_, name)) = COMMANDS.iter().find(|(word, _)| words.contains(*word)) {
-        return Some(name);
-    }
-    let from_dependencies = folder.and_then(dependency_framework);
-    if let Some((_, runner, refinements)) = RUNNERS.iter().find(|(word, ..)| words.contains(*word))
-    {
-        return Some(
-            from_dependencies
-                .filter(|name| refinements.contains(name))
-                .unwrap_or(runner),
+/// The framework and the evidence for it. Only the command confirms one: a
+/// project's dependencies refine a generic runner, or on their own only
+/// suggest a framework, since a project can also run unrelated servers.
+pub fn framework(words: &HashSet<String>, folder: Option<&Path>) -> Detection {
+    if let Some((word, name)) = COMMANDS.iter().find(|(word, _)| words.contains(*word)) {
+        return Detection::new(
+            name,
+            Confidence::Confirmed,
+            vec![Evidence::Command { name: word }],
         );
     }
+    let dependencies = folder.map(declared_frameworks).unwrap_or_default();
+    if let Some((word, runner, refinements)) =
+        RUNNERS.iter().find(|(word, ..)| words.contains(*word))
+    {
+        let mut evidence = vec![Evidence::Command { name: word }];
+        let refinement = dependencies
+            .first()
+            .filter(|(framework, _)| refinements.contains(framework));
+        if let Some((_, dependency)) = refinement {
+            evidence.push(dependency.clone());
+        }
+        let name = refinement.map_or(*runner, |(framework, _)| framework);
+        return Detection::new(name, Confidence::Confirmed, evidence);
+    }
     // Only a label: the HTTP probe needs executable evidence (`is_http_command`).
-    from_dependencies
+    // Every framework the project declares stays visible, so conflicting ones show.
+    match dependencies.first() {
+        Some((framework, _)) => Detection::new(
+            framework,
+            Confidence::Likely,
+            dependencies
+                .into_iter()
+                .map(|(_, evidence)| evidence)
+                .collect(),
+        ),
+        None => Detection::default(),
+    }
 }
 
-fn dependency_framework(folder: &Path) -> Option<&'static str> {
+/// The frameworks `folder` declares as dependencies, most specific first.
+fn declared_frameworks(folder: &Path) -> Vec<(&'static str, Evidence)> {
     let names = dependency_names(folder);
     DEPENDENCIES
         .iter()
-        .find(|(dependency, _)| names.contains(*dependency))
-        .map(|(_, name)| *name)
+        .filter_map(|(dependency, framework)| {
+            let manifest = names.get(*dependency)?;
+            Some((
+                *framework,
+                Evidence::Dependency {
+                    manifest,
+                    name: dependency,
+                },
+            ))
+        })
+        .collect()
 }
 
-/// Dependency names from every manifest in `folder`. `package.json` is read
-/// properly; the others are split into words, which finds dependency names in
-/// TOML, `go.mod`, `requirements.txt` and Gemfiles alike.
-fn dependency_names(folder: &Path) -> HashSet<String> {
-    let mut names = HashSet::new();
+/// Dependency names from every manifest in `folder`, with the manifest that
+/// declares each. `package.json` is read properly; the others are split into
+/// words, which finds dependency names in TOML, `go.mod`, `requirements.txt`
+/// and Gemfiles alike.
+fn dependency_names(folder: &Path) -> HashMap<String, &'static str> {
+    let mut names = HashMap::new();
     for manifest in MANIFESTS {
         let Ok(text) = fs::read_to_string(folder.join(manifest)) else {
             continue;
@@ -283,18 +484,263 @@ fn dependency_names(folder: &Path) -> HashSet<String> {
             let json: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
             for key in ["dependencies", "devDependencies"] {
                 if let Some(deps) = json.get(key).and_then(|d| d.as_object()) {
-                    names.extend(deps.keys().cloned());
+                    for name in deps.keys() {
+                        names.entry(name.clone()).or_insert(manifest);
+                    }
                 }
             }
         } else {
-            names.extend(
-                text.split(|c: char| !(c.is_alphanumeric() || "-_./@".contains(c)))
-                    .filter(|word| !word.is_empty())
-                    .map(str::to_lowercase),
-            );
+            for word in text
+                .split(|c: char| !(c.is_alphanumeric() || "-_./@".contains(c)))
+                .filter(|word| !word.is_empty())
+            {
+                names.entry(word.to_lowercase()).or_insert(manifest);
+            }
         }
     }
     names
+}
+
+/// Lockfiles that pin each package's installed version.
+const LOCKFILES: [&str; 6] = [
+    "Cargo.lock",
+    "uv.lock",
+    "poetry.lock",
+    "Gemfile.lock",
+    "composer.lock",
+    "go.mod",
+];
+
+/// How far above the project a monorepo keeps its `node_modules` and lockfiles.
+const MAX_WORKSPACE_DEPTH: usize = 4;
+
+/// The installed version of the framework, from the package Node would load
+/// or the project's lockfile; `None` when neither says. Databases run from
+/// their own installs, so a project's client library says nothing about them.
+pub fn framework_version(
+    framework: &str,
+    folder: &Path,
+    lockfiles: &mut Lockfiles,
+) -> Option<String> {
+    if is_database(framework) {
+        return None;
+    }
+    // The framework's own package first: `webpack-dev-server` runs webpack.
+    let packages: Vec<&str> = DEPENDENCIES
+        .iter()
+        .filter(|(_, name)| *name == framework)
+        .map(|(package, _)| *package)
+        .chain(
+            RUNNERS
+                .iter()
+                .filter(|(_, name, _)| *name == framework)
+                .map(|(word, ..)| *word),
+        )
+        .chain(
+            COMMANDS
+                .iter()
+                .filter(|(_, name)| *name == framework)
+                .map(|(word, _)| *word),
+        )
+        .collect();
+    // Up to the repository's root, where a workspace hoists its packages.
+    let mut ancestors = Vec::new();
+    for dir in folder.ancestors().take(MAX_WORKSPACE_DEPTH + 1) {
+        ancestors.push(dir);
+        if dir.join(".git").exists() {
+            break;
+        }
+    }
+    let from_node_modules = ancestors.iter().find_map(|dir| {
+        packages.iter().find_map(|package| {
+            let text =
+                fs::read_to_string(dir.join("node_modules").join(package).join("package.json"))
+                    .ok()?;
+            package_json_string(&text, "version")
+        })
+    });
+    from_node_modules.or_else(|| {
+        ancestors.iter().find_map(|dir| {
+            LOCKFILES.iter().find_map(|lockfile| {
+                let versions = lockfiles.versions(&dir.join(lockfile), lockfile)?;
+                packages
+                    .iter()
+                    .find_map(|package| versions.get(*package).cloned())
+            })
+        })
+    })
+}
+
+/// Lockfiles as last parsed, read again only when they change on disk:
+/// some run to megabytes and the sampler asks every few seconds.
+#[derive(Default)]
+pub struct Lockfiles {
+    parsed: HashMap<PathBuf, Parsed>,
+    used: HashSet<PathBuf>,
+}
+
+struct Parsed {
+    modified: Option<SystemTime>,
+    len: u64,
+    versions: HashMap<String, String>,
+}
+
+impl Lockfiles {
+    fn versions(&mut self, path: &Path, lockfile: &str) -> Option<&HashMap<String, String>> {
+        let metadata = fs::metadata(path).ok()?;
+        let modified = metadata.modified().ok();
+        self.used.insert(path.to_path_buf());
+        let fresh = self
+            .parsed
+            .get(path)
+            .is_some_and(|parsed| parsed.modified == modified && parsed.len == metadata.len());
+        if !fresh {
+            let versions = fs::read_to_string(path)
+                .map(|text| locked_versions(lockfile, &text))
+                .unwrap_or_default();
+            self.parsed.insert(
+                path.to_path_buf(),
+                Parsed {
+                    modified,
+                    len: metadata.len(),
+                    versions,
+                },
+            );
+        }
+        self.parsed.get(path).map(|parsed| &parsed.versions)
+    }
+
+    /// Forgets the lockfiles no sample read since the last call.
+    pub fn finish(&mut self) {
+        let used = std::mem::take(&mut self.used);
+        self.parsed.retain(|path, _| used.contains(path));
+    }
+}
+
+fn package_json_string(text: &str, key: &str) -> Option<String> {
+    let json: serde_json::Value = serde_json::from_str(text).ok()?;
+    json.get(key)?
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+/// Every package's version `lockfile` pins.
+fn locked_versions(lockfile: &str, text: &str) -> HashMap<String, String> {
+    match lockfile {
+        // `[[package]]` tables with `name` and `version`.
+        "Cargo.lock" | "uv.lock" | "poetry.lock" => text
+            .parse::<toml::Table>()
+            .ok()
+            .and_then(|lock| lock.get("package")?.as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|package| {
+                let field = |key: &str| package.get(key)?.as_str().map(str::to_string);
+                Some((field("name")?, field("version")?))
+            })
+            .collect(),
+        // `    rails (8.0.1)` among the specs; dependencies of a spec are indented further.
+        "Gemfile.lock" => text
+            .lines()
+            .filter_map(|line| {
+                let spec = line.strip_prefix("    ")?;
+                let (name, version) = spec.strip_suffix(')')?.split_once(" (")?;
+                (!name.starts_with(' ')).then(|| (name.to_string(), version.to_string()))
+            })
+            .collect(),
+        "composer.lock" => {
+            let lock: serde_json::Value = serde_json::from_str(text).unwrap_or_default();
+            ["packages", "packages-dev"]
+                .iter()
+                .filter_map(|key| lock.get(key)?.as_array())
+                .flatten()
+                .filter_map(|package| {
+                    let field = |key: &str| package.get(key)?.as_str().map(str::to_string);
+                    let version = field("version")?;
+                    Some((field("name")?, version.trim_start_matches('v').to_string()))
+                })
+                .collect()
+        }
+        // `require github.com/gin-gonic/gin v1.10.0`, alone or in a block.
+        "go.mod" => text
+            .lines()
+            .filter_map(|line| {
+                let mut words = line
+                    .split_whitespace()
+                    .skip_while(|word| *word == "require");
+                let name = words.next()?;
+                let version = words.next()?.strip_prefix('v')?;
+                Some((name.to_string(), version.to_string()))
+            })
+            .collect(),
+        _ => HashMap::new(),
+    }
+}
+
+/// The name the project gives itself in its manifest, which may differ from its folder's.
+pub fn manifest_name(folder: &Path) -> Option<String> {
+    for manifest in ["package.json", "composer.json"] {
+        if let Some(name) = fs::read_to_string(folder.join(manifest))
+            .ok()
+            .and_then(|text| package_json_string(&text, "name"))
+        {
+            return Some(name);
+        }
+    }
+    for (manifest, tables) in [
+        ("Cargo.toml", &["package"][..]),
+        ("pyproject.toml", &["project", "tool.poetry"][..]),
+    ] {
+        let Some(toml) = fs::read_to_string(folder.join(manifest))
+            .ok()
+            .and_then(|text| text.parse::<toml::Table>().ok())
+        else {
+            continue;
+        };
+        let name = tables.iter().find_map(|path| {
+            let table = path
+                .split('.')
+                .try_fold(&toml, |table, key| table.get(key)?.as_table())?;
+            table.get("name")?.as_str().map(str::to_string)
+        });
+        if name.is_some() {
+            return name;
+        }
+    }
+    None
+}
+
+/// Where projects keep the icon their pages use, by framework convention:
+/// Vite and Next.js in `public/` or `app/`, SvelteKit in `static/`, Expo in `assets/`.
+const ICON_FILES: [&str; 19] = [
+    "public/favicon.svg",
+    "public/favicon.ico",
+    "public/favicon.png",
+    "static/favicon.svg",
+    "static/favicon.png",
+    "static/favicon.ico",
+    "src/app/icon.svg",
+    "src/app/icon.png",
+    "src/app/favicon.ico",
+    "app/icon.svg",
+    "app/icon.png",
+    "app/favicon.ico",
+    "src/favicon.svg",
+    "src/favicon.ico",
+    "favicon.svg",
+    "favicon.ico",
+    "favicon.png",
+    "assets/icon.png",
+    "icon.png",
+];
+
+/// The project's own icon file, when it keeps one where its framework expects.
+pub fn icon_file(folder: &Path) -> Option<PathBuf> {
+    ICON_FILES
+        .iter()
+        .map(|file| folder.join(file))
+        .find(|path| path.is_file())
 }
 
 fn file_name(word: &str) -> &str {
@@ -376,13 +822,22 @@ mod tests {
         dir
     }
 
+    /// The temporary folder as working directories report it (`/private/var` on macOS).
+    fn root(dir: &TempDir) -> PathBuf {
+        canonical(dir.path())
+    }
+
+    fn found(root: PathBuf, marker: &'static str) -> Option<Project> {
+        Some(Project { root, marker })
+    }
+
     #[test]
     fn finds_the_nearest_project_above_the_working_directory() {
         let home = project(&[("projects/web/package.json", "{}")]);
         fs::create_dir_all(home.path().join("projects/web/src/routes")).unwrap();
         assert_eq!(
-            project_folder(&home.path().join("projects/web/src/routes"), home.path()),
-            Some(home.path().join("projects/web"))
+            project_folder(&root(&home).join("projects/web/src/routes"), &root(&home)),
+            found(root(&home).join("projects/web"), "package.json")
         );
     }
 
@@ -402,22 +857,82 @@ mod tests {
     }
 
     #[test]
-    fn has_no_project_outside_home_or_at_home_itself() {
+    fn has_no_project_at_home_itself_or_in_system_locations() {
         let home = project(&[(".git/HEAD", "ref: refs/heads/dotfiles\n")]);
-        let outside = project(&[("package.json", "{}")]);
-        assert_eq!(project_folder(home.path(), home.path()), None);
-        assert_eq!(project_folder(outside.path(), home.path()), None);
-        assert_eq!(project_folder(Path::new("/"), home.path()), None);
+        assert_eq!(project_folder(&root(&home), &root(&home)), None);
+        assert_eq!(project_folder(Path::new("/"), &root(&home)), None);
+        // Homebrew's prefix is a git checkout that its services run from.
+        assert_eq!(
+            project_folder(Path::new("/opt/homebrew/var/postgresql@16"), &root(&home)),
+            None
+        );
+        assert_eq!(
+            project_folder(Path::new("/usr/local/Homebrew"), &root(&home)),
+            None
+        );
+    }
+
+    // Like a project on an external volume or in a container's `/workspace`.
+    #[test]
+    fn finds_a_project_outside_home_with_its_branch() {
+        let home = TempDir::new().unwrap();
+        let workspace = project(&[
+            (".git/HEAD", "ref: refs/heads/release\n"),
+            ("package.json", "{}"),
+            ("src/main.ts", ""),
+        ]);
+        let folder = project_folder(&root(&workspace).join("src"), &root(&home));
+        assert_eq!(folder, found(root(&workspace), "package.json"));
+        assert_eq!(
+            git_branch(&folder.unwrap().root, &root(&home)),
+            Some("release".to_string())
+        );
     }
 
     #[test]
-    fn reads_the_branch_of_a_monorepo_package() {
+    fn resolves_symlinked_and_deleted_working_directories() {
+        let home = project(&[("web/package.json", "{}")]);
+        let web = root(&home).join("web");
+        std::os::unix::fs::symlink(&web, home.path().join("alias")).unwrap();
+        assert_eq!(
+            project_folder(&canonical(&home.path().join("alias")), &root(&home)),
+            found(web.clone(), "package.json")
+        );
+        let deleted = home.path().join("web/.svelte-kit/output");
+        fs::create_dir_all(&deleted).unwrap();
+        fs::remove_dir_all(home.path().join("web/.svelte-kit")).unwrap();
+        assert_eq!(
+            project_folder(&canonical(&deleted), &root(&home)),
+            found(web, "package.json")
+        );
+    }
+
+    #[test]
+    fn skips_a_folder_it_may_not_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = project(&[("web/package.json", "{}"), ("web/locked/inner/x", "")]);
+        let locked = home.path().join("web/locked");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let folder = project_folder(&canonical(&locked.join("inner")), &root(&home));
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(folder, found(root(&home).join("web"), "package.json"));
+    }
+
+    #[test]
+    fn keeps_a_monorepo_package_as_its_own_project_on_the_repository_branch() {
         let home = project(&[
             ("mono/.git/HEAD", "ref: refs/heads/feat/checkout\n"),
+            ("mono/package.json", "{}"),
             ("mono/apps/web/package.json", "{}"),
+            ("mono/apps/web/src/app.ts", ""),
         ]);
+        let folder = project_folder(&root(&home).join("mono/apps/web/src"), &root(&home));
         assert_eq!(
-            git_branch(&home.path().join("mono/apps/web"), home.path()),
+            folder,
+            found(root(&home).join("mono/apps/web"), "package.json")
+        );
+        assert_eq!(
+            git_branch(&folder.unwrap().root, &root(&home)),
             Some("feat/checkout".to_string())
         );
     }
@@ -431,6 +946,10 @@ mod tests {
             ),
             ("hotfix/.git", "gitdir: ../repo/.git/worktrees/hotfix\n"),
         ]);
+        assert_eq!(
+            project_folder(&root(&home).join("hotfix"), &root(&home)),
+            found(root(&home).join("hotfix"), ".git")
+        );
         assert_eq!(
             git_branch(&home.path().join("hotfix"), home.path()),
             Some("hotfix".to_string())
@@ -505,7 +1024,7 @@ mod tests {
         ];
         for (command, folder, expected) in cases {
             assert_eq!(
-                framework(&words(command), folder.map(TempDir::path)),
+                framework(&words(command), folder.map(TempDir::path)).framework,
                 Some(expected),
                 "{command}"
             );
@@ -513,9 +1032,132 @@ mod tests {
     }
 
     #[test]
+    fn detects_tools_by_their_own_command_only() {
+        let storybook = project(&[(
+            "package.json",
+            r#"{"devDependencies":{"storybook":"^9","vite":"^7"}}"#,
+        )]);
+        let python = "/opt/homebrew/Cellar/python@3.13/3.13.0/Frameworks/Python.framework/Versions/3.13/Resources/Python.app/Contents/MacOS/Python";
+        let jupyter = format!("{python} /opt/homebrew/bin/jupyter-lab --no-browser");
+        let cases = [
+            ("node /p/node_modules/.bin/expo start", None, Some("Expo")),
+            ("node server.js --platform expo", None, None),
+            (
+                "node /p/node_modules/.bin/storybook dev -p 6006",
+                None,
+                Some("Storybook"),
+            ),
+            // The project uses Storybook, but this server is Vite.
+            (
+                "node /p/node_modules/.bin/vite",
+                Some(&storybook),
+                Some("Vite"),
+            ),
+            (
+                "node /p/node_modules/.bin/docusaurus start",
+                None,
+                Some("Docusaurus"),
+            ),
+            ("node build.js docusaurus", None, None),
+            (jupyter.as_str(), None, Some("Jupyter")),
+            ("python3 -m jupyterlab", None, Some("Jupyter")),
+            ("python3 app.py --notebook jupyter-lab", None, None),
+            ("python3 /u/.venv/bin/mkdocs serve", None, Some("MkDocs")),
+            ("python3 serve.py mkdocs", None, None),
+            ("ruby /u/.gem/bin/jekyll serve", None, Some("Jekyll")),
+            ("ruby app.rb jekyll", None, None),
+            ("python3 -m http.server 8000", None, Some("http.server")),
+            ("python3 server.py http.server", None, None),
+            (
+                "node /p/node_modules/.bin/webpack-dev-server",
+                None,
+                Some("webpack"),
+            ),
+            ("node build.js webpack-dev-server", None, None),
+        ];
+        for (command, folder, expected) in cases {
+            assert_eq!(
+                framework(&words(command), folder.map(TempDir::path)).framework,
+                expected,
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn explains_why_it_names_a_framework() {
+        let sveltekit = project(&[(
+            "package.json",
+            r#"{"devDependencies":{"@sveltejs/kit":"^2","vite":"^7"}}"#,
+        )]);
+        assert_eq!(
+            framework(
+                &words("node /p/node_modules/.bin/vite dev"),
+                Some(sveltekit.path())
+            ),
+            Detection::new(
+                "SvelteKit",
+                Confidence::Confirmed,
+                vec![
+                    Evidence::Command { name: "vite" },
+                    Evidence::Dependency {
+                        manifest: "package.json",
+                        name: "@sveltejs/kit",
+                    },
+                ],
+            )
+        );
+        // A custom TCP service in a Vite project is only possibly Vite, and not a web server.
+        let vite = project(&[("package.json", r#"{"devDependencies":{"vite":"^7"}}"#)]);
+        let tcp = words("node custom-tcp.js");
+        assert_eq!(
+            framework(&tcp, Some(vite.path())),
+            Detection::new(
+                "Vite",
+                Confidence::Likely,
+                vec![Evidence::Dependency {
+                    manifest: "package.json",
+                    name: "vite",
+                }],
+            )
+        );
+        assert!(!is_http_command(&tcp));
+        // Conflicting dependencies all stay visible.
+        let both = project(&[(
+            "package.json",
+            r#"{"dependencies":{"fastify":"5","express":"5"}}"#,
+        )]);
+        assert_eq!(
+            framework(&words("node server.js"), Some(both.path()))
+                .attribution
+                .evidence
+                .len(),
+            2
+        );
+        assert_eq!(
+            framework(&words("node server.js"), None),
+            Detection::default()
+        );
+        assert_eq!(
+            image_detection("postgres").attribution,
+            Attribution {
+                confidence: Confidence::Confirmed,
+                evidence: vec![Evidence::Image {
+                    name: "postgres".into()
+                }],
+            }
+        );
+        assert_eq!(
+            port_detection(5432).attribution.confidence,
+            Confidence::Likely
+        );
+        assert_eq!(port_detection(22), Detection::default());
+    }
+
+    #[test]
     fn does_not_classify_option_values_or_unrelated_project_tools_as_servers() {
         assert_eq!(
-            framework(&words("python app.py --database postgres"), None),
+            framework(&words("python app.py --database postgres"), None).framework,
             None
         );
         // A project's dependencies name it, but only the command proves HTTP.
@@ -524,6 +1166,144 @@ mod tests {
         assert!(is_http_command(&words(
             "node /p/node_modules/.pnpm/vite@7.1.0/node_modules/vite/bin/vite.js"
         )));
+    }
+
+    #[test]
+    fn reads_the_installed_version_of_the_framework() {
+        // A workspace hoists packages to its root.
+        let mono = project(&[
+            (".git/HEAD", "ref: refs/heads/main\n"),
+            ("node_modules/vite/package.json", r#"{"version":"7.1.3"}"#),
+            (
+                "node_modules/@sveltejs/kit/package.json",
+                r#"{"version":"2.21.0"}"#,
+            ),
+            (
+                "node_modules/postgres/package.json",
+                r#"{"version":"3.4.0"}"#,
+            ),
+            (
+                "node_modules/webpack/package.json",
+                r#"{"version":"5.99.0"}"#,
+            ),
+            (
+                "node_modules/webpack-dev-server/package.json",
+                r#"{"version":"5.2.0"}"#,
+            ),
+            ("apps/web/package.json", "{}"),
+        ]);
+        let web = mono.path().join("apps/web");
+        assert_eq!(
+            framework_version("Vite", &web, &mut Lockfiles::default()).as_deref(),
+            Some("7.1.3")
+        );
+        assert_eq!(
+            framework_version("SvelteKit", &web, &mut Lockfiles::default()).as_deref(),
+            Some("2.21.0")
+        );
+        // `webpack-dev-server` runs webpack, whose version is the one that matters.
+        assert_eq!(
+            framework_version("webpack", &web, &mut Lockfiles::default()).as_deref(),
+            Some("5.99.0")
+        );
+        // The `postgres` client library is not the server.
+        assert_eq!(
+            framework_version("PostgreSQL", &web, &mut Lockfiles::default()),
+            None
+        );
+        assert_eq!(
+            framework_version("Next.js", &web, &mut Lockfiles::default()),
+            None
+        );
+
+        let locked = project(&[
+            (
+                "Cargo.lock",
+                "version = 4\n\n[[package]]\nname = \"axum\"\nversion = \"0.8.4\"\n",
+            ),
+            (
+                "uv.lock",
+                "version = 1\n\n[[package]]\nname = \"fastapi\"\nversion = \"0.115.12\"\n",
+            ),
+            (
+                "Gemfile.lock",
+                "GEM\n  specs:\n    actionpack (8.0.1)\n      rails-dom (~> 2.0)\n    rails (8.0.1)\n",
+            ),
+            (
+                "composer.lock",
+                r#"{"packages":[{"name":"laravel/framework","version":"v11.9.2"}]}"#,
+            ),
+            (
+                "go.mod",
+                "module app\n\nrequire (\n\tgithub.com/gin-gonic/gin v1.10.0\n)\n",
+            ),
+        ]);
+        for (framework, expected) in [
+            ("Axum", "0.8.4"),
+            ("FastAPI", "0.115.12"),
+            ("Rails", "8.0.1"),
+            ("Laravel", "11.9.2"),
+            ("Gin", "1.10.0"),
+        ] {
+            assert_eq!(
+                framework_version(framework, locked.path(), &mut Lockfiles::default()).as_deref(),
+                Some(expected),
+                "{framework}"
+            );
+        }
+
+        // Read on every sample, so an upgrade shows on the next one.
+        fs::write(
+            mono.path().join("node_modules/vite/package.json"),
+            r#"{"version":"7.2.0"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            framework_version("Vite", &web, &mut Lockfiles::default()).as_deref(),
+            Some("7.2.0")
+        );
+    }
+
+    #[test]
+    fn reads_the_name_the_manifest_gives_the_project() {
+        let cases = [
+            (
+                "package.json",
+                r#"{"name":"@acme/storefront"}"#,
+                Some("@acme/storefront"),
+            ),
+            ("Cargo.toml", "[package]\nname = \"ports\"\n", Some("ports")),
+            (
+                "pyproject.toml",
+                "[project]\nname = \"billing-api\"\n",
+                Some("billing-api"),
+            ),
+            (
+                "pyproject.toml",
+                "[tool.poetry]\nname = \"legacy\"\n",
+                Some("legacy"),
+            ),
+            ("package.json", r#"{"private":true}"#, None),
+        ];
+        for (manifest, contents, expected) in cases {
+            let dir = project(&[(manifest, contents)]);
+            assert_eq!(manifest_name(dir.path()).as_deref(), expected, "{contents}");
+        }
+    }
+
+    #[test]
+    fn finds_the_project_icon_where_its_framework_keeps_it() {
+        let sveltekit = project(&[("static/favicon.png", "png")]);
+        assert_eq!(
+            icon_file(sveltekit.path()),
+            Some(sveltekit.path().join("static/favicon.png"))
+        );
+        let vite = project(&[("public/favicon.svg", "svg"), ("favicon.ico", "ico")]);
+        assert_eq!(
+            icon_file(vite.path()),
+            Some(vite.path().join("public/favicon.svg"))
+        );
+        assert_eq!(icon_file(project(&[("README.md", "")]).path()), None);
     }
 
     #[test]

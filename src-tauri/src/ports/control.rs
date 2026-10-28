@@ -944,7 +944,8 @@ time.sleep(60)
             .split_whitespace()
             .map(|p| p.parse().unwrap())
             .collect();
-        let mut sampler = super::super::sampler::Sampler::new(dir.path().to_path_buf());
+        let mut sampler =
+            super::super::sampler::Sampler::new(dir.path().to_path_buf(), Default::default());
         let snapshot = sampler.sample().unwrap();
         let selected = snapshot
             .servers
@@ -1298,7 +1299,8 @@ time.sleep(60)
             .unwrap();
         assert!(submitted.success());
         let listening = listening_within(port, Duration::from_secs(10));
-        let mut sampler = super::super::sampler::Sampler::new(std::env::temp_dir());
+        let mut sampler =
+            super::super::sampler::Sampler::new(std::env::temp_dir(), Default::default());
         let row = sampler
             .sample()
             .unwrap()
