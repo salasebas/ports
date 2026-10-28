@@ -24,6 +24,8 @@ pub const DEFAULT_GRACE: Duration = Duration::from_secs(3);
 const KILL_GRACE: Duration = Duration::from_secs(2);
 const POLL: Duration = Duration::from_millis(100);
 const LISTEN_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long Stop watches for a supervisor it can't control to start the server again.
+const RESPAWN_CHECK: Duration = Duration::from_millis(1500);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessTarget {
@@ -103,6 +105,9 @@ pub struct Service {
     managed: Option<Managed>,
     /// A supervisor Ports found but can't control, so only signals reach the service.
     unsupported: Option<Supervisor>,
+    /// The processes the preview lists and the control may end, read once
+    /// when locating, so a PID reused afterwards can't join them.
+    identities: BTreeSet<ProcessIdentity>,
 }
 
 impl Service {
@@ -119,10 +124,17 @@ impl Service {
                 ports: BTreeMap::new(),
                 managed: None,
                 unsupported: None,
+                identities: BTreeSet::new(),
             });
         };
         let table = ProcessTable::new(&system);
-        let found = supervisors::find(job.listener, &system, &table, &mut LaunchdJobs::default());
+        let mut launchd = LaunchdJobs::default();
+        let found = supervisors::find(job.listener, &system, &table, &mut launchd);
+        if found.is_none() && launchd.failed() {
+            return Err(
+                "Ports couldn't ask launchd whether it restarts this server; try again".into(),
+            );
+        }
         let (target, job) = match parent {
             Some(parent) => {
                 if found.is_some()
@@ -146,7 +158,7 @@ impl Service {
                 };
                 (target, job)
             }
-            None => (target.clone(), job),
+            None => (target.clone(), with_group_members(job, &system)),
         };
         let (managed, unsupported) = match &found {
             Some(found) if parent.is_none() => match Managed::confirm(found, &system)? {
@@ -161,12 +173,18 @@ impl Service {
                 ports.entry(*pid).or_default().insert(socket.port());
             }
         }
+        let identities = job
+            .pids
+            .iter()
+            .filter_map(|pid| ProcessIdentity::read(*pid))
+            .collect();
         Ok(Self {
             target,
             job: Some((job, system)),
             ports,
             managed,
             unsupported,
+            identities,
         })
     }
 
@@ -175,7 +193,7 @@ impl Service {
     pub fn keys(&self) -> Vec<String> {
         let mut keys = vec![format!("process:{}", self.target.root.key())];
         keys.extend(
-            self.identities()
+            self.identities
                 .iter()
                 .map(|id| format!("process:{}", id.key())),
         );
@@ -184,25 +202,23 @@ impl Service {
         keys
     }
 
-    fn identities(&self) -> Vec<ProcessIdentity> {
-        self.job
-            .iter()
-            .flat_map(|(job, _)| &job.pids)
-            .filter_map(|pid| ProcessIdentity::read(*pid))
-            .collect()
-    }
-
     pub fn preview(&self) -> Preview {
         let processes = self
             .job
             .iter()
-            .flat_map(|(job, system)| {
-                job.pids.iter().filter_map(|pid| {
-                    let process = system.process(Pid::from_u32(*pid))?;
+            .flat_map(|(_, system)| {
+                self.identities.iter().filter_map(|identity| {
+                    let process = system.process(Pid::from_u32(identity.pid))?;
                     Some(Affected {
-                        process: ProcessIdentity::read(*pid)?,
+                        process: identity.clone(),
                         name: process.name().to_string_lossy().into_owned(),
-                        ports: self.ports.get(pid).into_iter().flatten().copied().collect(),
+                        ports: self
+                            .ports
+                            .get(&identity.pid)
+                            .into_iter()
+                            .flatten()
+                            .copied()
+                            .collect(),
                     })
                 })
             })
@@ -221,7 +237,7 @@ impl Service {
     /// preview: a process that took another's place, or one that joined.
     /// Processes that exited meanwhile don't matter.
     pub fn ensure_within(&self, confirmed: &[ProcessIdentity]) -> Result<(), String> {
-        if self.identities().iter().all(|id| confirmed.contains(id)) {
+        if self.identities.iter().all(|id| confirmed.contains(id)) {
             Ok(())
         } else {
             Err("What this would stop changed since you confirmed it; review it again".into())
@@ -242,8 +258,20 @@ impl Service {
             managed.stop()?;
             return wait_until_free(&self.target, shutdown.grace + KILL_GRACE + KILL_GRACE);
         }
-        end(&job, &system, &self.target, shutdown)?;
-        ensure_free(&self.target)
+        end(&job, &system, &self.target, &self.identities, shutdown)?;
+        ensure_free(&self.target)?;
+        if let Some(supervisor) = &self.unsupported {
+            // It ended, but its supervisor may start it again moments later.
+            thread::sleep(RESPAWN_CHECK);
+            if Sockets::scan()?.occupied(self.target.port, &self.target.addresses) {
+                return Err(format!(
+                    "{0} started it again on :{1}; stop it through {0} to keep it stopped",
+                    supervisor_name(supervisor),
+                    self.target.port
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub fn restart(self, shutdown: Shutdown) -> Result<(), String> {
@@ -251,13 +279,8 @@ impl Service {
             return Err(format!("Nothing listens on :{} anymore", self.target.port));
         };
         if let Some(managed) = &self.managed {
-            let before: BTreeSet<_> = job
-                .pids
-                .iter()
-                .filter_map(|pid| ProcessIdentity::read(*pid))
-                .collect();
             managed.restart()?;
-            return wait_until_supervised(&self.target, managed, &before, LISTEN_TIMEOUT);
+            return wait_until_supervised(&self.target, managed, &self.identities, LISTEN_TIMEOUT);
         }
         if let Some(supervisor) = &self.unsupported {
             return Err(format!(
@@ -266,11 +289,39 @@ impl Service {
             ));
         }
         let launch = Launch::capture(job.root, &mut system)?;
-        end(&job, &system, &self.target, shutdown)?;
+        end(&job, &system, &self.target, &self.identities, shutdown)?;
         ensure_free(&self.target)?;
         let child = launch.spawn()?;
         wait_until_listening(&self.target, child, &launch.name, LISTEN_TIMEOUT)
     }
+}
+
+/// The members of a shell job's process group that no longer descend from
+/// it, such as a child whose parent exited: Stop ends the whole group, so
+/// the preview lists them too.
+fn with_group_members(mut job: Job, system: &System) -> Job {
+    let Some(group) = job.group else {
+        return job;
+    };
+    let session = OsGroups.sid(job.root);
+    let uid = system
+        .process(Pid::from_u32(job.root))
+        .and_then(Process::user_id)
+        .map(|uid| **uid);
+    job.pids.extend(
+        system
+            .processes()
+            .iter()
+            .filter(|(pid, process)| {
+                let pid = pid.as_u32();
+                OsGroups.pgid(pid) == Some(group)
+                    && OsGroups.sid(pid) == session
+                    && process.user_id().map(|uid| **uid) == uid
+                    && process.status() != ProcessStatus::Zombie
+            })
+            .map(|(pid, _)| pid.as_u32()),
+    );
+    job
 }
 
 fn supervisor_name(supervisor: &Supervisor) -> &'static str {
@@ -311,12 +362,21 @@ pub fn is_forwarder(process: &Process) -> bool {
 }
 
 fn process_table() -> System {
+    refreshed(ProcessRefreshKind::nothing())
+}
+
+/// The table a control is located from, with command lines: supervisors
+/// such as PM2 are known by the title they give their process.
+fn inspection_table() -> System {
+    refreshed(ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always))
+}
+
+fn refreshed(kind: ProcessRefreshKind) -> System {
     let mut system = System::new();
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
         true,
-        ProcessRefreshKind::nothing()
-            .with_user(UpdateKind::Always)
+        kind.with_user(UpdateKind::Always)
             .with_exe(UpdateKind::Always)
             .without_tasks(),
     );
@@ -337,7 +397,7 @@ fn locate(target: &ProcessTarget) -> Result<Option<(Job, System, Sockets)>, Stri
             target.port
         ));
     }
-    let system = process_table();
+    let system = inspection_table();
     let table = ProcessTable::new(&system);
     let all = sockets.all_pids();
     for (socket, listeners) in &sockets.listening {
@@ -385,6 +445,7 @@ fn end(
     job: &Job,
     system: &System,
     selected: &ProcessTarget,
+    located: &BTreeSet<ProcessIdentity>,
     shutdown: Shutdown,
 ) -> Result<(), String> {
     if !selected.root.is_current() || !selected.listener.is_current() {
@@ -396,19 +457,8 @@ fn end(
         .process(Pid::from_u32(job.root))
         .and_then(Process::user_id)
         .map(|uid| **uid);
-    let mut targets: BTreeSet<_> = job
-        .pids
-        .iter()
-        .filter_map(|pid| {
-            if *pid == selected.root.pid {
-                Some(selected.root.clone())
-            } else if *pid == selected.listener.pid {
-                Some(selected.listener.clone())
-            } else {
-                ProcessIdentity::read(*pid)
-            }
-        })
-        .collect();
+    // The identities read when locating: a PID reused since can't join them.
+    let mut targets = located.clone();
     // A shared group (an editor's, the terminal's) can't be swept, but a child
     // that a shutdown handler forks keeps the group and the program when its
     // parent exits. Daemons the group's app starts meanwhile run other programs.
@@ -821,9 +871,14 @@ time.sleep(60)
         let (mut server, _) = start(port, dir.path(), &[]);
         let selected = target(port, server.id());
         let (job, system, _) = locate(&selected).unwrap().unwrap();
+        let located = job
+            .pids
+            .iter()
+            .filter_map(|pid| ProcessIdentity::read(*pid))
+            .collect();
         let mut stale = selected.clone();
         stale.root.start.push_str("-reused");
-        let result = end(&job, &system, &stale, Shutdown::default());
+        let result = end(&job, &system, &stale, &located, Shutdown::default());
         let survived = running(server.id());
         stop(&selected).unwrap();
         server.wait().unwrap();
@@ -1044,6 +1099,46 @@ while(1){my $pid=fork();if(!$pid){exec('python3','-c',$server,$port)}print "$pid
         assert!(!started_again);
     }
 
+    /// The control must see PM2 from its own lookup, not only the sampler's:
+    /// signalling a PM2 app only makes PM2 start it again.
+    #[test]
+    fn a_control_goes_through_pm2_for_an_app_of_its_daemon() {
+        let port = free_port();
+        let server = format!(
+            "import socket,time;s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);s.bind(('127.0.0.1',{port}));s.listen();print(1,flush=True);time.sleep(30)"
+        );
+        // Titled like PM2's daemon, whose home has no pm2 command to confirm the app.
+        let mut daemon = Command::new("bash")
+            .args([
+                "-c",
+                &format!(
+                    "exec -a 'PM2 v5.3.0: God Daemon (/nonexistent/.pm2)' bash -c \"python3 -c \\\"{server}\\\" & wait\""
+                ),
+            ])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(daemon.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let listener = *Sockets::scan().unwrap().listeners(port).first().unwrap();
+        let result =
+            Service::locate(&target(port, listener), None).map(|service| service.preview());
+        unsafe {
+            libc::kill(listener as i32, libc::SIGKILL);
+        }
+        let _ = daemon.kill();
+        let _ = daemon.wait();
+        let found_pm2 = match result {
+            Ok(preview) => preview
+                .supervisor
+                .is_some_and(|s| s.kind == supervisors::Kind::Pm2),
+            Err(error) => error.contains("PM2"),
+        };
+        assert!(found_pm2);
+    }
+
     #[test]
     fn force_kill_ends_the_server_without_its_shutdown_handler() {
         let dir = tempfile::tempdir().unwrap();
@@ -1120,12 +1215,26 @@ time.sleep(60)
             .collect();
 
         let refused = service.ensure_within(&without_worker);
+        // A process that took the worker's PID has another start identity.
+        let replaced: Vec<_> = listed
+            .iter()
+            .map(|id| ProcessIdentity {
+                start: if id.pid == worker {
+                    format!("{}-old", id.start)
+                } else {
+                    id.start.clone()
+                },
+                ..id.clone()
+            })
+            .collect();
+        let refused_replacement = service.ensure_within(&replaced);
         let accepted = service.ensure_within(&listed);
         let worker_alive = running(worker);
         stop(&selected).unwrap();
         server.wait().unwrap();
 
         assert!(refused.unwrap_err().contains("changed"));
+        assert!(refused_replacement.is_err());
         accepted.unwrap();
         assert!(worker_alive);
     }

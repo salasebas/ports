@@ -167,7 +167,7 @@ export class PortsStore {
 
 	selected = $derived(this.#customized.find((server) => server.id === this.selectedId) ?? null);
 
-	/** What clean up stops: shown idle servers Ports can stop, unless protected. */
+	/** What clean up stops: shown idle servers Ports can stop, unless protected or kept running by a supervisor. */
 	idle = $derived(
 		this.shown.filter(
 			(server) =>
@@ -178,6 +178,7 @@ export class PortsStore {
 						(sibling) =>
 							sibling.status === "idle" &&
 							!sibling.protected &&
+							!sibling.supervisor &&
 							!isHidden(sibling) &&
 							preferences.shownKinds.current.includes(sibling.kind),
 					),

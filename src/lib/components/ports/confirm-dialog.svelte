@@ -107,7 +107,9 @@
 			{@const { action, server, previews, error } = pending}
 			<AlertDialog.Header>
 				<AlertDialog.Title>{titles[action](pending)}</AlertDialog.Title>
-				<AlertDialog.Description>{describe(action, server, previews?.[0])}</AlertDialog.Description>
+				<AlertDialog.Description>
+					{describe(action, server, action === "stopAll" ? undefined : previews?.[0])}
+				</AlertDialog.Description>
 			</AlertDialog.Header>
 
 			{#if error}
@@ -153,6 +155,14 @@
 									: ""}{other.protected ? " (protected)" : ""}
 							{/each}
 						</p>
+					{/if}
+					{#if action === "stopAll"}
+						{#each pending.servers as row, i (row.id)}
+							{@const managed = previews[i].supervisor}
+							{#if managed?.supported}
+								<p class="text-muted-foreground">:{row.port} · {describe("stop", row, previews[i])}</p>
+							{/if}
+						{/each}
 					{/if}
 					{#if supervisor && !supervisor.supported}
 						<p class="text-warning">

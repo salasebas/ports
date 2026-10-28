@@ -57,6 +57,9 @@ pub enum Found {
     Supervisord {
         pid: u32,
     },
+    /// PM2's daemon itself holds the port for its cluster-mode apps; ending
+    /// it would end every PM2 app.
+    Pm2Daemon,
 }
 
 impl Found {
@@ -77,21 +80,38 @@ impl Found {
                 name: None,
                 supported: false,
             },
+            Self::Pm2Daemon => Supervisor {
+                kind: Kind::Pm2,
+                name: None,
+                supported: false,
+            },
         }
     }
+}
+
+fn title(process: &sysinfo::Process) -> Option<String> {
+    // A retitled process shows its title as the first argument.
+    let title = process.cmd().first()?.to_string_lossy();
+    Some(title.trim().to_string())
 }
 
 /// The launchd jobs of this user that have a process, by PID; read once
 /// per sample and only when a server's ancestry reaches launchd.
 #[derive(Default)]
-pub struct LaunchdJobs(Option<HashMap<u32, String>>);
+pub struct LaunchdJobs(Option<Option<HashMap<u32, String>>>);
 
 impl LaunchdJobs {
     fn label(&mut self, pid: u32) -> Option<&str> {
         self.0
-            .get_or_insert_with(|| launchd_jobs().unwrap_or_default())
+            .get_or_insert_with(launchd_jobs)
+            .as_ref()?
             .get(&pid)
             .map(String::as_str)
+    }
+
+    /// launchd was asked and couldn't answer, so a Homebrew service may have gone unnoticed.
+    pub fn failed(&self) -> bool {
+        matches!(self.0, Some(None))
     }
 }
 
@@ -103,6 +123,13 @@ pub fn find(
     table: &ProcessTable,
     jobs: &mut LaunchdJobs,
 ) -> Option<Found> {
+    if system
+        .process(Pid::from_u32(pid))
+        .and_then(title)
+        .is_some_and(|title| pm2_home(&title).is_some())
+    {
+        return Some(Found::Pm2Daemon);
+    }
     let chain: Vec<u32> = std::iter::once(pid).chain(table.ancestors(pid)).collect();
     for pair in chain.windows(2) {
         let [child, ancestor] = [pair[0], pair[1]];
@@ -122,9 +149,7 @@ pub fn find(
             });
         }
         let process = system.process(Pid::from_u32(ancestor))?;
-        // A retitled process shows its title as the first argument.
-        let title = process.cmd().first().map(|arg| arg.to_string_lossy());
-        if let Some(home) = title.as_deref().and_then(|title| pm2_home(title.trim())) {
+        if let Some(home) = title(process).and_then(|title| pm2_home(&title)) {
             return Some(Found::Pm2 {
                 home,
                 daemon: ancestor,
@@ -187,7 +212,7 @@ fn launchd_jobs() -> Option<HashMap<u32, String>> {
 /// Homebrew on Linux runs services through systemd, which Ports doesn't control yet.
 #[cfg(not(target_os = "macos"))]
 fn launchd_jobs() -> Option<HashMap<u32, String>> {
-    None
+    Some(HashMap::new())
 }
 
 /// A supervised service, confirmed by the supervisor itself just now.
@@ -212,6 +237,10 @@ impl Managed {
     pub fn confirm(found: &Found, system: &System) -> Result<Option<Self>, String> {
         match found {
             Found::Supervisord { .. } => Ok(None),
+            Found::Pm2Daemon => Err(
+                "PM2's daemon holds this port for its cluster-mode apps, and stopping it would stop every PM2 app. Stop the app with `pm2 stop <name>`."
+                    .into(),
+            ),
             Found::Homebrew { formula, pid } => {
                 let brew = homebrew_command().ok_or_else(|| {
                     format!(
@@ -483,6 +512,8 @@ mod tests {
         std::io::BufReader::new(parent.stdout.take().unwrap())
             .read_line(&mut line)
             .unwrap();
+        // The child runs bash's title until it execs `sleep`.
+        thread::sleep(Duration::from_millis(200));
         (parent, line.trim().parse().unwrap())
     }
 

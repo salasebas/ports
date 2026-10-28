@@ -461,8 +461,11 @@ fn ensure_idle(
                     .any(|ours| ours.process == resource.process)
             })
     });
+    // A supervisor keeps its services running on purpose; Homebrew's stop
+    // would also keep one from starting at login.
     if affected.into_iter().any(|server| {
         server.status != history::Status::Idle
+            || server.supervisor.is_some()
             || !allowed_ids.is_some_and(|ids| ids.contains(&server.id))
     }) {
         return Err(

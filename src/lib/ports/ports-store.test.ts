@@ -491,6 +491,12 @@ describe("clean up", () => {
 		expect(calls.filter(([cmd]) => cmd === "stop_server")).toHaveLength(1);
 	});
 
+	// Homebrew keeps its services running on purpose, and its stop also removes them from login.
+	it("leaves servers a supervisor runs out of clean up", () => {
+		const brewed = server({ ...idleApi, supervisor: { kind: "homebrew", name: "redis", supported: true } });
+		expect(storeWith(idleWeb, brewed).idle).toEqual([idleWeb]);
+	});
+
 	it("stops every idle server after one confirmation, leaving the rest running", async () => {
 		const store = storeWith(idleWeb, idleApi, busy, idleDb);
 		store.cleanUp();
