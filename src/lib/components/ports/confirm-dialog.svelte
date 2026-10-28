@@ -4,7 +4,7 @@
 	import * as AlertDialog from "$lib/components/ui/alert-dialog";
 	import { Checkbox } from "$lib/components/ui/checkbox";
 	import * as Field from "$lib/components/ui/field";
-	import { Skeleton } from "$lib/components/ui/skeleton";
+	import { Spinner } from "$lib/components/ui/spinner";
 	import type { PendingAction, PortsStore } from "$lib/ports/ports-store.svelte";
 	import { isHidden, mustConfirm } from "$lib/ports/ports-store.svelte";
 	import { preferences } from "$lib/ports/preferences.svelte";
@@ -102,8 +102,6 @@
 	const warning = $derived(
 		pending?.action !== "stopAll" && pending?.previews ? respawnWarning(pending.previews[0]) : undefined,
 	);
-	/** Stop all waits for every preview, so its skeleton has a line per server. */
-	const skeletonRows = $derived(pending?.action === "stopAll" ? Math.min(pending.servers.length, SHOWN_ROWS) : 1);
 
 	function supervisorName(found: Supervisor) {
 		return { homebrew: "Homebrew", pm2: "PM2", supervisord: "supervisord" }[found.kind];
@@ -187,18 +185,9 @@
 						</Alert.Root>
 					</div>
 				{:else if !previews}
-					<!-- Shows only when checking takes a moment, in the shape of what it will show. -->
-					<div class="flex flex-col gap-3" in:fade|global={appear} out:fade={leave}>
-						<ul class="flex flex-col divide-y divide-border/60 rounded-xl bg-muted/50">
-							{#each { length: skeletonRows }, i (i)}
-								<li class="flex h-10 items-center gap-3 px-3">
-									<Skeleton class="h-3.5 w-16" />
-									<Skeleton class="h-3.5 w-10" />
-									<Skeleton class="ms-auto h-3.5 w-12" />
-								</li>
-							{/each}
-						</ul>
-						<span class="sr-only">Checking what this would stop</span>
+					<!-- Shows only when checking takes a moment, so a fast preview doesn't flash it. -->
+					<div class="flex h-10 items-center justify-center" in:fade|global={appear} out:fade={leave}>
+						<Spinner class="size-5 text-muted-foreground" aria-label="Checking what this would stop" />
 					</div>
 				{:else}
 					<div class="flex flex-col gap-3" in:fly={enter}>
