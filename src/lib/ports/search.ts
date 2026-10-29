@@ -26,13 +26,16 @@ function paths(path: string | undefined, home: string | null): string[] {
  * Whether a search for text matches the server: its names, process, command,
  * framework, branch, session and page title, and its folders, so two
  * projects with the same name differ by path. A number matches the port or
- * a PID exactly. Matching text never counts as evidence of what a server is.
+ * a PID exactly, including PIDs above the highest port. Matching text never counts as evidence of what a server is.
  */
 export function matchesSearch(server: Server, query: string, home: string | null = null): boolean {
 	const q = query.trim().toLowerCase();
 	if (!q) return true;
-	const number = portQuery(q);
-	if (number !== null) return server.port === number || hasPid(server, number);
+	// PIDs go past the highest port: 99999 on macOS, millions on Linux.
+	if (/^:?\d+$/.test(q)) {
+		const number = Number(q.replace(/^:/, ""));
+		return server.port === number || hasPid(server, number);
+	}
 	return [
 		server.name,
 		server.process,

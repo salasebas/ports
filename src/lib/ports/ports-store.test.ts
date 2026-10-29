@@ -257,6 +257,7 @@ describe("search", () => {
 	// #59: a PID, a command argument or a full path finds the server, and tells same-named projects apart.
 	it.each([
 		["a PID", "200", 8080],
+		["a PID above the highest port", "70000", 3002],
 		["a command argument", "--port 3001", 3001],
 		["a project path", "~/work/web", 3001],
 		["a working folder", "apps/site", 3001],
@@ -270,7 +271,8 @@ describe("search", () => {
 			folder: "~/work/web",
 			cwd: "~/work/web/apps/site",
 		});
-		const store = storeWith(mine, work, api);
+		const late = server({ port: 3002, pid: 70_000, name: "late" });
+		const store = storeWith(mine, work, api, late);
 		store.query = query;
 		expect(store.filtered.map((row) => row.port)).toEqual([port]);
 	});
@@ -591,7 +593,7 @@ describe("renaming and hiding", () => {
 		expect(store.filtered.map((row) => row.port)).toEqual([web.port]);
 		await store.hide(hiddenPort(web.port));
 		expect(store.filtered).toEqual([]);
-		await store.unhide(hiddenProcess("ControlCenter"));
+		await store.changeRules({ kind: "unhide", entry: hiddenProcess("ControlCenter") });
 		expect(store.filtered.map((row) => row.port)).toEqual([airplay.port, airplay2.port]);
 	});
 

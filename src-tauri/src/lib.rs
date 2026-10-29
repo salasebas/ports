@@ -92,7 +92,10 @@ pub fn run() {
                 .path()
                 .app_log_dir()
                 .or_else(|_| app.path().app_data_dir())?;
-            std::fs::create_dir_all(&log_dir)?;
+            // Only automatic clean up's log lives there; Ports runs without it.
+            if let Err(error) = std::fs::create_dir_all(&log_dir) {
+                eprintln!("could not create the log folder: {error}");
+            }
             app.manage(ports::Monitor::new(
                 app.path().home_dir()?,
                 settings::alerts(app.handle()),

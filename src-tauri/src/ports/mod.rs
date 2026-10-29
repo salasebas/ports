@@ -297,14 +297,10 @@ impl Monitor {
         }
     }
 
-    fn wake(&self) {
+    /// Samples again now, whatever the refresh interval.
+    pub(crate) fn wake(&self) {
         *lock(&self.woken) = true;
         self.wake.notify_one();
-    }
-
-    /// Samples again now, whatever the refresh interval, so a changed setting shows at once.
-    pub fn wake_now(&self) {
-        self.wake();
     }
 
     /// Samples now instead of at the end of the interval, so a window that
@@ -393,18 +389,10 @@ impl Monitor {
                 })
             })
             .ok_or("The server changed; refresh before cleaning up")?;
-        let mut affected = fresh.servers.iter().filter(|other| {
-            other
-                .target
-                .as_ref()
-                .is_some_and(|current| current.key() == target.key())
-                || other.resources.iter().any(|resource| {
-                    selected
-                        .resources
-                        .iter()
-                        .any(|ours| ours.process == resource.process)
-                })
-        });
+        let mut affected = fresh
+            .servers
+            .iter()
+            .filter(|other| shares_tree(target, &selected.resources, other));
         // A supervisor keeps its services running on purpose; Homebrew's stop
         // would also keep one from starting at login.
         if affected.any(|server| {
@@ -416,6 +404,23 @@ impl Monitor {
         }
         Ok(())
     }
+}
+
+/// Whether stopping `target`, whose tree holds `resources`, also ends `other`:
+/// the same root, or a process the two share.
+fn shares_tree(
+    target: &Target,
+    resources: &[sampler::ProcessUsage],
+    other: &sampler::Server,
+) -> bool {
+    other
+        .target
+        .as_ref()
+        .is_some_and(|current| current.key() == target.key())
+        || other
+            .resources
+            .iter()
+            .any(|theirs| resources.iter().any(|ours| ours.process == theirs.process))
 }
 
 /// Bounds of the shutdown grace period, in seconds.

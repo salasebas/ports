@@ -176,7 +176,8 @@ pub fn set_idle_after(app: AppHandle, minutes: u64) -> Result<Settings, String> 
     write(&app, IDLE_AFTER, minutes)?;
     let monitor = app.state::<Monitor>();
     monitor.set_idle_after_ms(minutes * 60_000);
-    monitor.wake_now();
+    // Samples now, so the new threshold shows at once.
+    monitor.wake();
     *revision += 1;
     Ok(broadcast(&app, *revision))
 }

@@ -420,8 +420,6 @@ export class PortsStore {
 		if (this.selected?.hidden) this.selectedId = null;
 	};
 
-	unhide = (entry: string) => this.changeRules({ kind: "unhide", entry });
-
 	open = async (server: Server) => {
 		await attempt(openUrl(serverUrl(server)));
 	};

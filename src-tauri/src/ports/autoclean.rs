@@ -22,7 +22,7 @@ use tauri_plugin_notification::NotificationExt;
 use super::control::Target;
 use super::rules::{Policy, Scope};
 use super::sampler::{Kind, Server, Snapshot, now_ms};
-use super::{Located, Monitor, blocking, containers, lock};
+use super::{Located, Monitor, blocking, containers, lock, shares_tree};
 
 /// The log keeps the newest entries within this size.
 const LOG_LIMIT: u64 = 64 * 1024;
@@ -67,18 +67,7 @@ fn candidates(servers: &[Server], policy: Policy, now: u64) -> Vec<Server> {
         let Some(target) = &server.target else {
             continue;
         };
-        let shares = |other: &Server| {
-            other
-                .target
-                .as_ref()
-                .is_some_and(|t| t.key() == target.key())
-                || other.resources.iter().any(|r| {
-                    server
-                        .resources
-                        .iter()
-                        .any(|ours| ours.process == r.process)
-                })
-        };
+        let shares = |other: &Server| shares_tree(target, &server.resources, other);
         if servers
             .iter()
             .filter(|other| shares(other))
