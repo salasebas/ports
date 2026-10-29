@@ -1,5 +1,3 @@
-//! Kernel process identity, retained from discovery through every control action.
-
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -106,7 +104,6 @@ mod tests {
         assert!(started > 0 && started <= now);
     }
 
-    // Another user's process, such as launchd or init, still has an identity.
     #[test]
     fn reads_the_identity_of_another_users_process() {
         assert!(ProcessIdentity::read(1).is_some());

@@ -34,6 +34,7 @@
 		"@sveltejs/vite-plugin-svelte": "^7.1.2",
 		"@tailwindcss/vite": "^4",
 		"@tauri-apps/cli": "^2",
+		"@types/node": "^26.6.6",
 		"bits-ui": "^2.20.0",
 		"cn": "^0.5.0",
 		"embla-carousel-svelte": "^8.6.0",

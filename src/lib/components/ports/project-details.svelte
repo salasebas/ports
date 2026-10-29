@@ -150,10 +150,10 @@
 					<li class="flex items-center gap-1">
 						<Button
 							class="min-w-0 flex-1 justify-start"
-							variant={script.run === project.command ? "secondary" : "ghost"}
+							variant={script.runCommand === project.command ? "secondary" : "ghost"}
 							size="sm"
 							disabled={script.missing}
-							onclick={() => store.setSavedCommand(project, script.run)}
+							onclick={() => store.setSavedCommand(project, script.runCommand)}
 						>
 							<span class="truncate">{script.missing ? `${script.name} (missing)` : script.name}</span>
 						</Button>

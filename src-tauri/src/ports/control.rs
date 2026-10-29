@@ -1,5 +1,3 @@
-//! Identity-checked control of one logical service and its bindings.
-
 use super::containers::ContainerTarget;
 use super::identity::ProcessIdentity;
 use super::processes::{self, Groups, Job, OsGroups, ProcessTable};
@@ -19,12 +17,10 @@ use sysinfo::{
     Pid, Process, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System, UpdateKind, Users,
 };
 
-/// How long Stop waits after SIGTERM before it sends SIGKILL, unless the user chose otherwise.
 pub const DEFAULT_GRACE: Duration = Duration::from_secs(3);
 const KILL_GRACE: Duration = Duration::from_secs(2);
 const POLL: Duration = Duration::from_millis(100);
 const LISTEN_TIMEOUT: Duration = Duration::from_secs(30);
-/// How long Stop watches for a supervisor it can't control to start the server again.
 const RESPAWN_CHECK: Duration = Duration::from_millis(1500);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,8 +53,6 @@ impl Target {
     }
 }
 
-/// How Stop ends a process tree: SIGTERM, then SIGKILL after `grace`; or
-/// SIGKILL right away for Force Kill.
 #[derive(Debug, Clone, Copy)]
 pub struct Shutdown {
     pub grace: Duration,
@@ -74,18 +68,14 @@ impl Default for Shutdown {
     }
 }
 
-/// One process a control ends, for the preview the user confirms.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Affected {
     pub process: ProcessIdentity,
     pub name: String,
-    /// The ports it listens on itself.
     pub ports: Vec<u16>,
 }
 
-/// Everything a Stop, Restart or Force Kill would end, from the same lookup
-/// the control itself uses. Mirrors `ControlPreview` in `src/lib/ports/types.ts`.
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Preview {
@@ -94,25 +84,16 @@ pub struct Preview {
     pub supervisor: Option<Supervisor>,
 }
 
-/// A process target checked against the live system once, then reserved
-/// and stopped or restarted from that same lookup.
 pub struct Service {
     target: ProcessTarget,
     job: Option<(Job, System)>,
-    /// The ports each process of the job listens on.
     ports: BTreeMap<u32, BTreeSet<u16>>,
-    /// The supervisor that would start it again, confirmed by its own tooling.
     managed: Option<Managed>,
-    /// A supervisor Ports found but can't control, so only signals reach the service.
     unsupported: Option<Supervisor>,
-    /// The processes the preview lists and the control may end, read once
-    /// when locating, so a PID reused afterwards can't join them.
     identities: BTreeSet<ProcessIdentity>,
 }
 
 impl Service {
-    /// Locates the service, or with `parent` the process that started it and
-    /// everything that process runs, such as a watcher that restarts it.
     pub fn locate(
         target: &ProcessTarget,
         parent: Option<&ProcessIdentity>,
@@ -167,7 +148,6 @@ impl Service {
             },
             _ => (None, None),
         };
-        // Signals end the whole group; a supervisor ends only what it tracks.
         let job = if managed.is_none() {
             with_group_members(job, &system)
         } else {
@@ -194,8 +174,6 @@ impl Service {
         })
     }
 
-    /// Every affected process, since a parent and child listener can have
-    /// different roots while their destructive scopes still overlap.
     pub fn keys(&self) -> Vec<String> {
         let mut keys = vec![format!("process:{}", self.target.root.key())];
         keys.extend(
@@ -239,9 +217,6 @@ impl Service {
         }
     }
 
-    /// Refuses a control whose scope grew since the user confirmed its
-    /// preview: a process that took another's place, or one that joined.
-    /// Processes that exited meanwhile don't matter.
     pub fn ensure_within(&self, confirmed: &[ProcessIdentity]) -> Result<(), String> {
         if self.identities.iter().all(|id| confirmed.contains(id)) {
             Ok(())
@@ -267,7 +242,6 @@ impl Service {
         end(&job, &system, &self.target, &self.identities, shutdown)?;
         ensure_free(&self.target)?;
         if let Some(supervisor) = &self.unsupported {
-            // It ended, but its supervisor may start it again moments later.
             thread::sleep(RESPAWN_CHECK);
             if Sockets::scan()?.occupied(self.target.port, &self.target.addresses) {
                 return Err(format!(
@@ -307,9 +281,6 @@ impl Service {
     }
 }
 
-/// The members of a shell job's process group that no longer descend from
-/// it, such as a child whose parent exited: Stop ends the whole group, so
-/// the preview lists them too.
 fn with_group_members(mut job: Job, system: &System) -> Job {
     let Some(group) = job.group else {
         return job;
@@ -376,8 +347,6 @@ fn process_table() -> System {
     refreshed(ProcessRefreshKind::nothing())
 }
 
-/// The table a control is located from, with command lines: supervisors
-/// such as PM2 are known by the title they give their process.
 fn inspection_table() -> System {
     refreshed(ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always))
 }
@@ -468,11 +437,7 @@ fn end(
         .process(Pid::from_u32(job.root))
         .and_then(Process::user_id)
         .map(|uid| **uid);
-    // The identities read when locating: a PID reused since can't join them.
     let mut targets = located.clone();
-    // A shared group (an editor's, the terminal's) can't be swept, but a child
-    // that a shutdown handler forks keeps the group and the program when its
-    // parent exits. Daemons the group's app starts meanwhile run other programs.
     let shared_group = job
         .group
         .is_none()
@@ -510,7 +475,6 @@ fn end(
             let table = ProcessTable::new(&current);
             let leader_now = ProcessIdentity::read(leader.pid);
             let group_not_reused = leader_now.as_ref().is_none_or(|id| id == &leader);
-            // Children forked while a known member still lives are its descendants.
             let descendants: BTreeSet<_> = targets
                 .iter()
                 .filter(|target| target.is_current())
@@ -524,8 +488,6 @@ fn end(
                         .is_some_and(|group| OsGroups.pgid(pid) == Some(group))
                     && OsGroups.sid(pid) == session
                     && process.user_id().map(|uid| **uid) == uid;
-                // New since the shutdown began and orphaned out of the group:
-                // other members' children keep a parent inside it.
                 let escaped = shared_group.is_some_and(|group| {
                     process.exe().is_some_and(|exe| programs.contains(exe))
                         && OsGroups.pgid(pid) == Some(group)
@@ -546,8 +508,6 @@ fn end(
             }
             let living = alive(&targets);
             if living.is_empty() {
-                // A parent may fork after this round's process scan and exit
-                // before alive() runs. Scan again after observing its exit.
                 empty_rounds += 1;
                 if empty_rounds >= 2 {
                     return Ok(());
@@ -627,9 +587,6 @@ fn wait_until_free(target: &ProcessTarget, timeout: Duration) -> Result<(), Stri
     }
 }
 
-/// Waits until the supervisor runs the service anew on the port: a process
-/// under the one it runs for the service now listens, and none from before
-/// does, such as an instance of a PM2 cluster that wasn't restarted.
 fn wait_until_supervised(
     target: &ProcessTarget,
     managed: &Managed,
@@ -690,7 +647,6 @@ fn owner(system: &System, pid: u32) -> Option<String> {
         .map(|user| user.name().to_string())
 }
 
-/// Everything needed to start a server the way it was started before.
 struct Launch {
     program: PathBuf,
     args: Vec<OsString>,
@@ -720,7 +676,6 @@ impl Launch {
             return Err(cannot());
         }
         let args = process.cmd().to_vec();
-        // Prefer the exact binary; fall back to a PATH lookup if it was replaced since.
         let program = match process.exe() {
             Some(exe) if exe.exists() => exe.to_path_buf(),
             _ => PathBuf::from(args.first().ok_or_else(cannot)?),
@@ -757,7 +712,6 @@ impl Launch {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            // Its own group, so it outlives Ports and Stop can end it as a whole.
             .process_group(0)
             .spawn()
             .map_err(|error| format!("Can't start {} again: {error}", self.name))
@@ -811,8 +765,6 @@ mod tests {
     use std::io::{BufRead, BufReader};
     use std::net::TcpListener;
 
-    /// Listens on the port in argv[1], spawns a child, and prints the child's
-    /// PID once ready. With "ignore-term" it shrugs off SIGTERM.
     const SERVER: &str = r#"
 import signal, socket, subprocess, sys, time
 if "ignore-term" in sys.argv:
@@ -852,7 +804,6 @@ time.sleep(60)
             .port()
     }
 
-    /// Starts the server in its own process group, as a shell job would be.
     fn start(port: u16, cwd: &std::path::Path, extra: &[&str]) -> (Child, u32) {
         std::fs::write(cwd.join("server.py"), SERVER).unwrap();
         let mut child = Command::new("python3")
@@ -964,8 +915,6 @@ time.sleep(60)
         assert!(!children_alive);
     }
 
-    /// Servers spawned without their own group share the test runner's, so
-    /// one test's shutdown sweep could otherwise end the other's child.
     static SHARED_GROUP: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
@@ -992,7 +941,6 @@ time.sleep(60)
             command
                 .args(["-c", code, path.to_str().unwrap()])
                 .stdout(Stdio::piped());
-            // Without its own group, the server shares the test runner's.
             if private {
                 command.process_group(0);
             }
@@ -1003,8 +951,6 @@ time.sleep(60)
                 .unwrap();
             let port = line.trim().parse().unwrap();
             let result = stop(&target(port, server.id()));
-            // A child that escaped records its PID within moments; one ended
-            // before recording it leaves no file.
             thread::sleep(Duration::from_millis(300));
             let forked = std::fs::read_to_string(path)
                 .ok()
@@ -1025,8 +971,6 @@ time.sleep(60)
     #[test]
     fn a_server_in_a_shared_group_still_gets_to_shut_down_gracefully() {
         let _shared = SHARED_GROUP.lock().unwrap_or_else(|e| e.into_inner());
-        // Spawned without its own group, the server shares the test runner's
-        // group, like a dev server started by an editor task.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("terminated");
         let code = r#"import signal,socket,sys,time
@@ -1070,9 +1014,6 @@ time.sleep(60)
     fn stopping_the_parent_keeps_a_watcher_from_starting_the_server_again() {
         let _shared = SHARED_GROUP.lock().unwrap_or_else(|e| e.into_inner());
         let port = free_port();
-        // Like nodemon run by an editor task: it starts the server again
-        // whenever it exits. Another program than the server's, so it can't
-        // pass for a prefork master.
         let server = "import socket,sys,time;s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);s.bind(('127.0.0.1',int(sys.argv[1])));s.listen();time.sleep(60)";
         let code = r#"$|=1;my($server,$port)=@ARGV;
 while(1){my $pid=fork();if(!$pid){exec('python3','-c',$server,$port)}print "$pid\n";waitpid($pid,0);select(undef,undef,undef,0.1)}"#;
@@ -1115,15 +1056,12 @@ while(1){my $pid=fork();if(!$pid){exec('python3','-c',$server,$port)}print "$pid
         assert!(!started_again);
     }
 
-    /// The control must see PM2 from its own lookup, not only the sampler's:
-    /// signalling a PM2 app only makes PM2 start it again.
     #[test]
     fn a_control_goes_through_pm2_for_an_app_of_its_daemon() {
         let port = free_port();
         let server = format!(
             "import socket,time;s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);s.bind(('127.0.0.1',{port}));s.listen();print(1,flush=True);time.sleep(30)"
         );
-        // Titled like PM2's daemon, whose home has no pm2 command to confirm the app.
         let mut daemon = Command::new("bash")
             .args([
                 "-c",
@@ -1146,7 +1084,6 @@ while(1){my $pid=fork();if(!$pid){exec('python3','-c',$server,$port)}print "$pid
         }
         let _ = daemon.kill();
         let _ = daemon.wait();
-        // Without a pm2 to confirm the app, the control stops instead of signalling it.
         let error = result.unwrap_err();
         assert!(
             error.contains("can't find the pm2 command") || error.contains("Can't ask PM2"),
@@ -1157,7 +1094,6 @@ while(1){my $pid=fork();if(!$pid){exec('python3','-c',$server,$port)}print "$pid
     #[test]
     fn a_control_refuses_pm2s_own_daemon_since_it_runs_every_app() {
         let port = free_port();
-        // PM2's daemon holds the port itself in cluster mode.
         let mut daemon = Command::new("bash")
             .args([
                 "-c",
@@ -1252,7 +1188,6 @@ time.sleep(60)
             .collect();
 
         let refused = service.ensure_within(&without_worker);
-        // A process that took the worker's PID has another start identity.
         let replaced: Vec<_> = listed
             .iter()
             .map(|id| ProcessIdentity {
@@ -1276,9 +1211,7 @@ time.sleep(60)
         assert!(worker_alive);
     }
 
-    /// launchd runs a listener under a Homebrew label, as `brew services` would,
-    /// and starts it again when it exits. Needs a macOS login session, so it
-    /// runs only on request: `cargo test -- --ignored`.
+    /// Needs a macOS login session, so it runs only on request: `cargo test -- --ignored`.
     #[test]
     #[ignore]
     #[cfg(target_os = "macos")]
@@ -1314,7 +1247,6 @@ time.sleep(60)
         let preview = located
             .as_ref()
             .map(|service| service.as_ref().map(Service::preview).map_err(Clone::clone));
-        // brew has no such formula, so the stop must fail and leave it listening.
         let stopped = located.map(|service| service.and_then(|s| s.stop(Shutdown::default())));
         let still_listening = !Sockets::scan().unwrap().listeners(port).is_empty();
         let _ = Command::new("/bin/launchctl")

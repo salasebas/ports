@@ -1,22 +1,3 @@
-//! Saved projects and the runs Ports starts for them.
-//!
-//! Projects, favorite scripts, the expected binding, the manual recovery policy
-//! and the last launch result live in `projects.json` through tauri-plugin-store
-//! (the app data directory). Logs of those runs are text files in the app log
-//! directory, trimmed while Ports is open and the next time it lists them;
-//! the window shows the newest 64 KB. Ports stores no environment and no secrets: a launch
-//! inherits the app's own environment.
-//!
-//! Script discovery reads `package.json` and chooses npm, pnpm, yarn or bun
-//! from the lockfile. A custom command is stored as the user wrote it.
-//! Recovery is manual, and it is not Restart: when a run Ports started exits,
-//! the result is recorded and nothing starts it again.
-//!
-//! A run is detached (`setsid`) and writes straight to its log file, so it
-//! keeps going after Ports quits. Its process identity (pid and start time) is
-//! stored so the next time Ports opens it can tell that process from a new one
-//! that reused the pid.
-
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -36,17 +17,12 @@ use crate::ports::Monitor;
 
 const STORE: &str = "projects.json";
 const KEY: &str = "projects";
-/// Tells the windows a saved project changed without a command of theirs.
 const PROJECTS_EVENT: &str = "ports://projects";
 const LOG_LIMIT: usize = 64 * 1024;
-/// How often a run's log is checked for trimming while Ports is open.
 const TRIM_EVERY: Duration = Duration::from_secs(1);
-/// How often the wait thread checks whether a run exited. Stop waits on it.
 const REAP_EVERY: Duration = Duration::from_millis(50);
 const COMMAND_LIMIT: usize = 4_096;
 
-/// What starts a saved project again after it exits. Only manual recovery is
-/// offered: Ports never restarts a saved project on its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Recovery {
@@ -91,7 +67,6 @@ pub struct LaunchResult {
 #[serde(rename_all = "camelCase")]
 pub struct SavedProject {
     pub id: String,
-    /// Display path, the same form as a server's `folder`.
     pub folder: String,
     pub command: String,
     pub favorites: Vec<String>,
@@ -100,7 +75,6 @@ pub struct SavedProject {
     pub recovery: Recovery,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_result: Option<LaunchResult>,
-    /// The process Ports started, when it may still be running.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub process: Option<ProcessIdentity>,
 }
@@ -118,12 +92,9 @@ pub enum PackageManager {
 #[serde(rename_all = "camelCase")]
 pub struct ScriptView {
     pub name: String,
-    /// The script body from `package.json`.
-    pub command: String,
-    /// The command Ports runs for this script.
-    pub run: String,
+    pub body: String,
+    pub run_command: String,
     pub favorite: bool,
-    /// A favorite whose script is no longer in `package.json`.
     pub missing: bool,
 }
 
@@ -135,7 +106,6 @@ pub struct ProjectView {
     pub manager: PackageManager,
     pub scripts: Vec<ScriptView>,
     pub folder_missing: bool,
-    /// A listener matches the saved folder and port, or the process Ports started is alive.
     pub running: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub matched_server_id: Option<String>,
@@ -145,11 +115,9 @@ pub struct ProjectView {
 #[serde(rename_all = "camelCase")]
 pub struct ProjectLog {
     pub text: String,
-    /// True when older output was dropped to keep the file within its cap.
     pub truncated: bool,
 }
 
-/// A listener Ports already knows about, used to refuse a conflicting start.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Listener {
     pub id: String,
@@ -162,19 +130,8 @@ pub struct Listener {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PortState {
     Free,
-    /// Something else already listens on the expected port. Do not stop it.
     Conflict(ConflictOwner),
-    /// The saved project is the listener. This is not a new launch.
-    AlreadyServing {
-        server_id: String,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExitPlan {
-    pub result: LaunchResult,
-    /// Manual recovery never continues into another launch.
-    pub relaunch: bool,
+    AlreadyServing { server_id: String },
 }
 
 pub struct Projects {
@@ -293,8 +250,6 @@ fn is_script_name(name: &str) -> bool {
         })
 }
 
-/// A port already taken by another server is a conflict. The same folder on
-/// that port is the saved project itself, already serving.
 pub fn classify_port(folder: &str, port: u16, listeners: &[Listener]) -> PortState {
     match listeners.iter().find(|listener| listener.port == port) {
         Some(listener) if listener.folder.as_deref() == Some(folder) => PortState::AlreadyServing {
@@ -310,17 +265,14 @@ pub fn classify_port(folder: &str, port: u16, listeners: &[Listener]) -> PortSta
     }
 }
 
-pub fn plan_exit(code: Option<i32>, stopped: bool, now: u64) -> ExitPlan {
+pub fn exit_result(code: Option<i32>, stopped: bool, now: u64) -> LaunchResult {
     if stopped {
-        return ExitPlan {
-            result: LaunchResult {
-                at: now,
-                outcome: Outcome::Stopped,
-                message: "Stopped. Ports will not start it again.".into(),
-                exit_code: code,
-                owner: None,
-            },
-            relaunch: false,
+        return LaunchResult {
+            at: now,
+            outcome: Outcome::Stopped,
+            message: "Stopped. Ports will not start it again.".into(),
+            exit_code: code,
+            owner: None,
         };
     }
     let (outcome, message) = match code {
@@ -334,16 +286,12 @@ pub fn plan_exit(code: Option<i32>, stopped: bool, now: u64) -> ExitPlan {
             "The project stopped without an exit status.".into(),
         ),
     };
-    ExitPlan {
-        result: LaunchResult {
-            at: now,
-            outcome,
-            message,
-            exit_code: code,
-            owner: None,
-        },
-        // Recovery is manual for every saved project.
-        relaunch: false,
+    LaunchResult {
+        at: now,
+        outcome,
+        message,
+        exit_code: code,
+        owner: None,
     }
 }
 
@@ -356,13 +304,10 @@ pub fn stable_id(canonical: &Path) -> String {
     format!("{hash:016x}")
 }
 
-/// The run Ports started is still this process, not a new one that reused its pid.
 fn alive(process: &ProcessIdentity) -> bool {
     process.pid > 1 && process.is_current()
 }
 
-/// Ends the run's process group. The leader's identity is checked before each
-/// signal, so a reused pid never reaches another app.
 fn stop_run(process: &ProcessIdentity) {
     if !alive(process) {
         return;
@@ -381,11 +326,6 @@ fn stop_run(process: &ProcessIdentity) {
     }
 }
 
-/// Cuts a run's log back to its newest `LOG_LIMIT` bytes once it grows past
-/// twice that. `project_log` shows only the newest `LOG_LIMIT`, so the slack
-/// is never seen, and trims stay rare: the run keeps appending through its
-/// own descriptor, so output written during a trim can be lost or land
-/// before the kept tail.
 fn trim_log(path: &Path) {
     let Ok(mut file) = fs::OpenOptions::new().read(true).append(true).open(path) else {
         return;
@@ -410,11 +350,6 @@ fn trim_log(path: &Path) {
     }
 }
 
-/// Starts `command` in `folder`, detached from Ports, with its output going
-/// straight to `log_path`: the run never writes to a pipe Ports holds, so it
-/// keeps going after Ports quits. While Ports is open the log is trimmed
-/// (see `trim_log`). `on_exit` runs once, with the exit code, and must not
-/// start the command again.
 pub fn spawn_logged(
     folder: &Path,
     command: &str,
@@ -553,8 +488,8 @@ fn view_of(home: &Path, project: &SavedProject, listeners: &[Listener]) -> Proje
         .filter_map(|(name, body)| {
             Some(ScriptView {
                 name: name.clone(),
-                command: body.clone(),
-                run: run_command(manager, name)?,
+                body: body.clone(),
+                run_command: run_command(manager, name)?,
                 favorite: project.favorites.iter().any(|favorite| favorite == name),
                 missing: false,
             })
@@ -564,8 +499,8 @@ fn view_of(home: &Path, project: &SavedProject, listeners: &[Listener]) -> Proje
         if !shown.iter().any(|script| script.name == *favorite) {
             shown.push(ScriptView {
                 name: favorite.clone(),
-                command: String::new(),
-                run: favorite.clone(),
+                body: String::new(),
+                run_command: favorite.clone(),
                 favorite: true,
                 missing: true,
             });
@@ -615,7 +550,6 @@ fn check_binding(port: u16, address: &str) -> Result<String, String> {
     Ok(address.to_string())
 }
 
-/// Clears runs that ended while nobody watched. Returns whether anything changed.
 fn reconcile(projects: &mut [SavedProject], now: u64) -> bool {
     let mut changed = false;
     for project in projects {
@@ -630,7 +564,7 @@ fn reconcile(projects: &mut [SavedProject], now: u64) -> bool {
                 .is_some_and(|result| result.outcome == Outcome::Stopped);
             project.process = None;
             if !stopped {
-                project.last_result = Some(plan_exit(None, false, now).result);
+                project.last_result = Some(exit_result(None, false, now));
             }
             changed = true;
         }
@@ -648,7 +582,6 @@ pub async fn list_projects(app: AppHandle) -> Result<Vec<ProjectView>, String> {
         if reconcile(&mut saved, now_ms()) {
             save(&app, &saved)?;
         }
-        // A run keeps writing while Ports is closed; trim what it wrote meanwhile.
         for project in &saved {
             trim_log(&projects.log_dir.join(format!("{}.log", project.id)));
         }
@@ -913,11 +846,9 @@ fn finish_run(app: &AppHandle, id: &str, code: Option<i32>) {
         .last_result
         .as_ref()
         .is_some_and(|result| result.outcome == Outcome::Stopped);
-    let plan = plan_exit(code, stopped, now_ms());
-    // `relaunch` is false for manual recovery. A finished run is only recorded.
     project.process = None;
-    if !stopped && !plan.relaunch {
-        project.last_result = Some(plan.result);
+    if !stopped {
+        project.last_result = Some(exit_result(code, false, now_ms()));
     }
     let _ = save(app, &saved);
     if let Err(error) = app.emit(PROJECTS_EVENT, ()) {
@@ -935,7 +866,7 @@ pub async fn stop_project(app: AppHandle, id: String) -> Result<ProjectView, Str
         let process = require(&mut saved, &id)?.process.clone();
         {
             let project = require(&mut saved, &id)?;
-            project.last_result = Some(plan_exit(None, true, now_ms()).result);
+            project.last_result = Some(exit_result(None, true, now_ms()));
         }
         save(&app, &saved)?;
         drop(_guard);
@@ -947,7 +878,7 @@ pub async fn stop_project(app: AppHandle, id: String) -> Result<ProjectView, Str
         let mut saved = load(&app);
         if let Some(project) = saved.iter_mut().find(|project| project.id == id) {
             project.process = None;
-            project.last_result = Some(plan_exit(None, true, now_ms()).result);
+            project.last_result = Some(exit_result(None, true, now_ms()));
         }
         save(&app, &saved)?;
         let project = require(&mut saved, &id)?;
@@ -984,6 +915,12 @@ pub async fn project_log(app: AppHandle, id: String) -> Result<ProjectLog, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_windows_listen_to_the_projects_event() {
+        let windows = include_str!("../../../src/lib/ports/ports-store.svelte.ts");
+        assert!(windows.contains(&format!("= \"{PROJECTS_EVENT}\";")));
+    }
 
     #[test]
     fn discovers_package_scripts_and_the_lockfile_manager() {
@@ -1037,15 +974,13 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_run_is_not_started_again() {
-        let failed = plan_exit(Some(1), false, 10);
-        assert!(!failed.relaunch);
-        assert_eq!(failed.result.outcome, Outcome::Failed);
-        assert_eq!(failed.result.exit_code, Some(1));
+    fn an_exit_is_recorded_with_its_outcome() {
+        let failed = exit_result(Some(1), false, 10);
+        assert_eq!(failed.outcome, Outcome::Failed);
+        assert_eq!(failed.exit_code, Some(1));
 
-        let stopped = plan_exit(None, true, 10);
-        assert!(!stopped.relaunch);
-        assert_eq!(stopped.result.outcome, Outcome::Stopped);
+        let stopped = exit_result(None, true, 10);
+        assert_eq!(stopped.outcome, Outcome::Stopped);
     }
 
     #[test]
@@ -1079,7 +1014,6 @@ mod tests {
         assert_eq!(kept.len(), LOG_LIMIT);
         assert!(kept.ends_with(b"tail"));
 
-        // Within the slack the file is left alone.
         let within = vec![b'b'; LOG_LIMIT + 4];
         fs::write(&log, &within).unwrap();
         trim_log(&log);
@@ -1110,8 +1044,6 @@ mod tests {
         let text = fs::read_to_string(&log).unwrap();
         assert!(text.contains("hello-from-ports"));
         assert!(!text.contains("stdout-is-a-pipe"));
-        let plan = plan_exit(code, false, 1);
-        assert!(!plan.relaunch);
     }
 
     #[test]
@@ -1145,11 +1077,9 @@ mod tests {
         assert!(!alive(&process));
     }
 
-    // After a reboot the stored pid can belong to another app. Stop must not reach it.
     #[test]
     fn a_reused_pid_is_not_the_run_and_is_not_stopped() {
         use std::os::unix::process::CommandExt;
-        // Its own group leader, like an app launchd started, so a group signal would reach it.
         let mut other = Command::new("sleep")
             .arg("30")
             .process_group(0)

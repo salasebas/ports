@@ -1,7 +1,3 @@
-//! Supervisors that start a service again as soon as it exits. Ports stops
-//! and restarts the services they manage through their own commands, since
-//! a signal would only make them start the service again.
-
 use std::collections::{BTreeSet, HashMap};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -27,29 +23,21 @@ pub enum Kind {
     Supervisord,
 }
 
-/// What manages a server, as the snapshot reports it. Mirrors `Supervisor`
-/// in `src/lib/ports/types.ts`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Supervisor {
     pub kind: Kind,
-    /// The Homebrew formula, or the PM2 app once PM2 confirmed it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// Ports stops and restarts it through the supervisor; otherwise only
-    /// signals reach it, and the supervisor may start it again.
-    pub supported: bool,
+    pub controllable: bool,
 }
 
-/// A supervisor found from the process tree, before its own tooling confirms it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Found {
-    /// A launchd job of this user labelled `homebrew.mxcl.<formula>`.
     Homebrew {
         formula: String,
         pid: u32,
     },
-    /// A child of the PM2 daemon whose home is `home`.
     Pm2 {
         home: PathBuf,
         daemon: u32,
@@ -69,22 +57,22 @@ impl Found {
             Self::Homebrew { formula, .. } => Supervisor {
                 kind: Kind::Homebrew,
                 name: Some(formula.clone()),
-                supported: true,
+                controllable: true,
             },
             Self::Pm2 { .. } => Supervisor {
                 kind: Kind::Pm2,
                 name: None,
-                supported: true,
+                controllable: true,
             },
             Self::Supervisord { .. } => Supervisor {
                 kind: Kind::Supervisord,
                 name: None,
-                supported: false,
+                controllable: false,
             },
             Self::Pm2Daemon => Supervisor {
                 kind: Kind::Pm2,
                 name: None,
-                supported: false,
+                controllable: false,
             },
         }
     }
@@ -96,8 +84,6 @@ fn title(process: &sysinfo::Process) -> Option<String> {
     Some(title.trim().to_string())
 }
 
-/// The launchd jobs of this user that have a process, by PID; read once
-/// per sample and only when a server's ancestry reaches launchd.
 #[derive(Default)]
 pub struct LaunchdJobs(Option<Option<HashMap<u32, String>>>);
 
@@ -110,14 +96,11 @@ impl LaunchdJobs {
             .map(String::as_str)
     }
 
-    /// launchd was asked and couldn't answer, so a Homebrew service may have gone unnoticed.
     pub fn failed(&self) -> bool {
         matches!(self.0, Some(None))
     }
 }
 
-/// The nearest supervisor above `pid`: PM2's daemon, supervisord, or launchd
-/// running a Homebrew service. Watchers such as nodemon are parents, not supervisors.
 pub fn find(
     pid: u32,
     system: &System,
@@ -171,7 +154,6 @@ pub fn find(
     None
 }
 
-/// `postgresql@16` for `homebrew.mxcl.postgresql@16`, if it is a name brew accepts.
 fn homebrew_formula(label: &str) -> Option<String> {
     let formula = label.strip_prefix(HOMEBREW_LABEL)?;
     let valid = !formula.is_empty()
@@ -211,13 +193,11 @@ fn launchd_jobs() -> Option<HashMap<u32, String>> {
     Some(parse_launchctl(&output))
 }
 
-/// Homebrew on Linux runs services through systemd, which Ports doesn't control yet.
 #[cfg(not(target_os = "macos"))]
 fn launchd_jobs() -> Option<HashMap<u32, String>> {
     Some(HashMap::new())
 }
 
-/// A supervised service, confirmed by the supervisor itself just now.
 #[derive(Debug, Clone)]
 pub enum Managed {
     Homebrew {
@@ -228,7 +208,6 @@ pub enum Managed {
         pm2: PathBuf,
         home: PathBuf,
         daemon: u32,
-        /// Every instance of the app, as a cluster runs several.
         ids: Vec<u64>,
         pids: Vec<u32>,
         name: String,
@@ -236,8 +215,6 @@ pub enum Managed {
 }
 
 impl Managed {
-    /// Asks the supervisor whether it really runs `found`, so the same
-    /// executable on another port, or a name alone, can't be mistaken for it.
     pub fn confirm(found: &Found, system: &System) -> Result<Option<Self>, String> {
         match found {
             Found::Supervisord { .. } => Ok(None),
@@ -292,7 +269,7 @@ impl Managed {
             Self::Homebrew { formula, .. } => Supervisor {
                 kind: Kind::Homebrew,
                 name: Some(formula.clone()),
-                supported: true,
+                controllable: true,
             },
             Self::Pm2 { name, ids, .. } => Supervisor {
                 kind: Kind::Pm2,
@@ -300,7 +277,7 @@ impl Managed {
                     0 | 1 => name.clone(),
                     n => format!("{name} ({n} instances)"),
                 }),
-                supported: true,
+                controllable: true,
             },
         }
     }
@@ -344,8 +321,6 @@ impl Managed {
             .map_err(|error| format!("Can't {action} {}: {error}", self.label()))
     }
 
-    /// The processes the supervisor runs for this service besides the located
-    /// tree, such as the other instances of a PM2 cluster.
     pub fn instances(&self) -> BTreeSet<ProcessIdentity> {
         match self {
             Self::Homebrew { .. } => BTreeSet::new(),
@@ -356,7 +331,6 @@ impl Managed {
         }
     }
 
-    /// The process the supervisor runs for this service now, which a restart replaces.
     pub fn anchor(&self) -> Option<u32> {
         match self {
             Self::Homebrew { formula, .. } => {
@@ -413,8 +387,6 @@ struct Pm2Env {
     pm_exec_path: Option<String>,
 }
 
-/// A cluster's instances share the name and the script; another app may
-/// share only the name.
 fn instances_of<'a>(apps: &'a [Pm2App], app: &Pm2App) -> Vec<&'a Pm2App> {
     apps.iter()
         .filter(|other| {
@@ -442,8 +414,6 @@ fn parse_pm2(output: &str) -> Result<Vec<Pm2App>, String> {
     serde_json::from_str(json).map_err(|error| format!("Can't read PM2's apps: {error}"))
 }
 
-/// Runs a supervisor command and returns its output, or the last line it
-/// printed when it fails. A command that hangs is killed after `timeout`.
 fn run(command: &mut Command, timeout: Duration) -> Result<String, String> {
     let mut child = command
         .stdin(Stdio::null())
@@ -545,8 +515,6 @@ mod tests {
         );
     }
 
-    /// Starts a process titled `title`, like PM2 titles its daemon, with a
-    /// child standing for the app it runs.
     fn titled(title: &str) -> (std::process::Child, u32) {
         use std::io::BufRead;
         let mut parent = Command::new("bash")

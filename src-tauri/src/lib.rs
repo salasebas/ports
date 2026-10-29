@@ -15,8 +15,7 @@ mod shortcut;
 
 const MAIN_WINDOW: &str = "main";
 const TRAY_WINDOW: &str = "tray";
-/// Asks the main window to show its settings page. Must match `src/routes/+layout.svelte`.
-const SETTINGS_EVENT: &str = "ports://open-settings";
+const OPEN_SETTINGS_EVENT: &str = "ports://open-settings";
 
 fn show_main(app: &AppHandle) {
     if let Some(window) = app.get_webview_window(TRAY_WINDOW) {
@@ -53,11 +52,10 @@ fn open_main_window(app: AppHandle) {
     show_main(&app);
 }
 
-/// Settings are a page of the main window, so the popover's gear opens them there.
 #[tauri::command]
 fn open_settings(app: AppHandle) {
     show_main(&app);
-    if let Err(error) = app.emit_to(MAIN_WINDOW, SETTINGS_EVENT, ()) {
+    if let Err(error) = app.emit_to(MAIN_WINDOW, OPEN_SETTINGS_EVENT, ()) {
         eprintln!("could not open the settings: {error}");
     }
 }
@@ -133,10 +131,8 @@ pub fn run() {
             (TRAY_WINDOW, WindowEvent::Focused(false)) => {
                 let _ = window.hide();
             }
-            // Polling pauses while every window is hidden; catch up as one appears.
             (_, WindowEvent::Focused(true)) => window.state::<ports::Monitor>().window_shown(),
             (MAIN_WINDOW, WindowEvent::CloseRequested { api, .. }) => {
-                // Keep running in the menu bar; quitting happens from the tray.
                 api.prevent_close();
                 let _ = window.hide();
             }
@@ -182,4 +178,15 @@ pub fn run() {
         #[cfg(not(target_os = "macos"))]
         let _ = (app, event);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_main_window_listens_to_the_open_settings_event() {
+        let layout = include_str!("../../src/routes/+layout.svelte");
+        assert!(layout.contains(&format!("= \"{OPEN_SETTINGS_EVENT}\";")));
+    }
 }

@@ -1,14 +1,14 @@
 <script lang="ts">
 	import * as AlertDialog from "$lib/components/ui/alert-dialog";
+	import { LastShown } from "$lib/hooks/last-shown.svelte";
 	import { serverActivity } from "$lib/ports/format";
 	import type { PortsStore } from "$lib/ports/ports-store.svelte";
 	import PortLabel from "./port-label.svelte";
 
 	let { store }: { store: PortsStore } = $props();
 
-	// Keeps the list in place while the dialog animates out.
-	let last: PortsStore["cleaning"] = null;
-	const servers = $derived.by(() => (last = store.cleaning ?? last) ?? []);
+	const cleaning = new LastShown(() => store.cleaning);
+	const servers = $derived(cleaning.current ?? []);
 	const count = $derived(servers.length === 1 ? "1 idle server" : `${servers.length} idle servers`);
 </script>
 

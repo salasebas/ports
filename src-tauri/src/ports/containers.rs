@@ -1,5 +1,3 @@
-//! Published container bindings, collected and controlled through the local Engine API.
-
 use super::control::Shutdown;
 use reqwest::Method;
 use reqwest::blocking::Client;
@@ -247,8 +245,6 @@ fn by_container(listed: Vec<Listed>, socket: &Path) -> Vec<Container> {
         .collect()
 }
 
-/// Milliseconds since the epoch for Docker's UTC times, e.g.
-/// `2026-10-27T07:21:04.123456789Z`.
 fn parse_time(text: &str) -> Option<u64> {
     let (date, time) = text.strip_suffix('Z')?.split_once('T')?;
     let numbers = |text: &str, separator| -> Option<Vec<i64>> {
@@ -262,7 +258,6 @@ fn parse_time(text: &str) -> Option<u64> {
         return None;
     };
     let millis: i64 = format!("{fraction:0<3}")[..3].parse().ok()?;
-    // Days since 1970-01-01, from Howard Hinnant's `days_from_civil`.
     let year = if month <= 2 { year - 1 } else { year };
     let era = year.div_euclid(400);
     let year_of_era = year - era * 400;
@@ -273,7 +268,6 @@ fn parse_time(text: &str) -> Option<u64> {
     u64::try_from(seconds * 1_000 + millis).ok()
 }
 
-/// What the image is, e.g. `postgres` for `docker.io/library/postgres:16-alpine`.
 pub fn image_name(image: &str) -> &str {
     let without_digest = image.split('@').next().unwrap_or(image);
     let last = without_digest.rsplit('/').next().unwrap_or(without_digest);
@@ -296,8 +290,6 @@ fn locate(home: &Path, target: &ContainerTarget) -> Result<Container, String> {
         .ok_or_else(|| format!(":{} is no longer published by that container", target.port))
 }
 
-/// Docker's own stop waits `grace` before it kills the container; Force Kill
-/// kills it right away. Restart stops it the same way first.
 pub fn stop(home: &Path, target: &ContainerTarget, shutdown: Shutdown) -> Result<(), String> {
     if shutdown.force {
         control(home, target, "kill", Duration::ZERO)
@@ -367,7 +359,6 @@ mod tests {
                     r#"{"State":{"StartedAt":"2026-10-27T07:21:04Z"}}"#
                 };
                 stream.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").unwrap();
-                // Single-byte chunks deliberately split the UTF-8 name across frames.
                 for byte in body.as_bytes() {
                     stream
                         .write_all(&[b'1', b'\r', b'\n', *byte, b'\r', b'\n'])
@@ -390,7 +381,6 @@ mod tests {
 
     #[test]
     fn maps_each_published_tcp_port_to_its_container() {
-        // Trimmed from Docker Engine API 1.47 `GET /containers/json`.
         let body = r#"[
             {"Id":"4a1b2c3d4e5f6a7b8c9d","Names":["/shop-db"],"Image":"postgres:16-alpine","Created":1761530000,
              "Ports":[{"IP":"0.0.0.0","PrivatePort":5432,"PublicPort":5433,"Type":"tcp"},
@@ -418,7 +408,6 @@ mod tests {
 
     #[test]
     fn reads_the_start_time_docker_reports() {
-        // Expected values from Python's `datetime(..., tzinfo=timezone.utc).timestamp()`.
         assert_eq!(
             parse_time("2026-10-27T07:21:04.500123456Z"),
             Some(1_793_085_664_500)

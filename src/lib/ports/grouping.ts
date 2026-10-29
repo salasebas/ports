@@ -11,7 +11,6 @@ export interface GroupRow {
 	count: number;
 	memoryBytes: number;
 	cpuPercent: number;
-	/** Worktrees sit under their repository. */
 	depth: 0 | 1;
 }
 
@@ -40,7 +39,6 @@ const usage = (servers: Server[]) => ({
 	cpuPercent: servers.reduce((sum, server) => sum + server.cpuPercent, 0),
 });
 
-/** Reads a stored grouping, including the previous on/off project setting. */
 export function groupByFromStorage(stored: string | null, legacy: string | null): GroupBy {
 	const value = stored ? parseStored(stored) : null;
 	if (value) return value;
@@ -62,11 +60,6 @@ export function toggleCollapsed(current: readonly string[], key: string): string
 	return current.includes(key) ? current.filter((item) => item !== key) : [...current, key];
 }
 
-/**
- * The list, in `servers` order, grouped when asked.
- * Pinning and hiding stay on each server; a group's totals are the sum of the
- * servers it still contains, so changing the grouping does not move or drop one.
- */
 export function listRows(servers: Server[], mode: GroupBy, collapsed: readonly string[]): ListRow[] {
 	if (mode === "flat") return servers.map((server) => ({ kind: "server", key: server.id, server }));
 	if (mode === "project") return projectRows(servers, collapsed);
@@ -96,7 +89,6 @@ function repositoryRows(servers: Server[], collapsed: readonly string[]): ListRo
 			repos.get(repoKey) ?? bucket(repoKey, server.repositoryName ?? "Outside a repository", server.repository);
 		repo.servers.push(server);
 		repos.set(repoKey, repo);
-		// Outside a repository there are no worktrees: the servers sit under its header.
 		if (!repoId) continue;
 		const treeId = server.worktreePath ?? server.folder ?? server.id;
 		const treeKey = `worktree:${repoId}:${treeId}`;

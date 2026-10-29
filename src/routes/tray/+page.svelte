@@ -26,7 +26,6 @@
 	const store = new PortsStore();
 	onMount(store.connect);
 
-	/** Details push in from the right and return the same way. */
 	const slide = (direction: 1 | -1) => ({
 		x: prefersReducedMotion.current ? 0 : 24 * direction,
 		duration: 200,
@@ -34,7 +33,6 @@
 	});
 
 	function onkeydown(event: KeyboardEvent) {
-		// Overlays such as the stop dialog handle Escape first and prevent default.
 		if (event.key !== "Escape" || event.defaultPrevented) return;
 		if (store.selected) store.select(null);
 		else getCurrentWindow().hide();

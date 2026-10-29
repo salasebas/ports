@@ -83,7 +83,6 @@ function storeWith(...servers: Server[]) {
 	return store;
 }
 
-/** What the fake backend ends for a target: the processes of the rows it controls. */
 function previewOf({ target }: { target: ServerTarget }): ControlPreview {
 	const rows = backendRows.filter((row) => JSON.stringify(row.target) === JSON.stringify(target));
 	return {
@@ -91,7 +90,6 @@ function previewOf({ target }: { target: ServerTarget }): ControlPreview {
 	};
 }
 
-/** Commands the store sent to the Rust backend, with their arguments. */
 let calls: [string, unknown][];
 
 function backend(reply?: (cmd: string) => unknown) {
@@ -100,7 +98,6 @@ function backend(reply?: (cmd: string) => unknown) {
 	vi.stubGlobal("isTauri", true);
 	mockIPC(
 		(cmd, args) => {
-			// Every change of listeners rereads saved projects; that read is not a control.
 			if (cmd !== "list_projects") calls.push([cmd, args]);
 			if (reply) return reply(cmd);
 			if (cmd === "preview_control") return previewOf(args as { target: ServerTarget });
@@ -156,7 +153,6 @@ describe("live updates", () => {
 		await refreshing;
 		expect(store.servers).toEqual([api]);
 	});
-	// A server started in a terminal must reach an open window without pressing refresh.
 	it("shows each snapshot the backend pushes", async () => {
 		backend((cmd) => (cmd === "snapshot" ? { revision: 0, servers: [], system: mockSnapshot().system } : undefined));
 		const store = new PortsStore();
@@ -172,7 +168,6 @@ describe("live updates", () => {
 		disconnect();
 	});
 
-	// A saved project hides while its server listens, so it must come back once that server stops.
 	it("shows a saved project again when its server stops", async () => {
 		const project: SavedProject = {
 			id: "p1",
@@ -207,7 +202,6 @@ describe("live updates", () => {
 		disconnect();
 	});
 
-	// The interval is saved in the webview, so the backend only learns it from the windows.
 	it("tells the backend the saved refresh interval when connecting", () => {
 		backend((cmd) => (cmd === "snapshot" ? mockSnapshot() : undefined));
 		preferences.refreshInterval.current = 5000;
@@ -218,7 +212,6 @@ describe("live updates", () => {
 });
 
 describe("search", () => {
-	// The search field promises "port, project, branch".
 	it.each([
 		["port", "8080", [api]],
 		["project", "POST", [db]],
@@ -237,7 +230,6 @@ describe("search", () => {
 });
 
 describe("kinds of server", () => {
-	// Desktop apps like Zed listen on ports too, but they aren't what Ports is for.
 	it("hides apps and system services until the user shows them", () => {
 		const store = storeWith(web, editor);
 		expect(store.filtered).toEqual([web]);
@@ -245,7 +237,6 @@ describe("kinds of server", () => {
 		expect(store.filtered).toEqual([web, editor]);
 	});
 
-	// The summary must add up to what the list shows.
 	it("counts hidden servers as other apps in the usage summary", () => {
 		const store = storeWith(server({ ...web, memoryBytes: 300, cpuPercent: 2 }), editor);
 		store.system = {
@@ -288,7 +279,6 @@ describe("stopping a server", () => {
 		expect(calls.map(([cmd]) => cmd)).toEqual(["preview_control"]);
 	});
 
-	// The backend refuses any process the user wasn't shown, e.g. a replacement.
 	it("asks before restarting too, and restarts only what the preview showed", async () => {
 		const store = storeWith(web);
 		await store.request("restart", web);
@@ -312,7 +302,6 @@ describe("stopping a server", () => {
 		expect(calls.map(([cmd]) => cmd)).toEqual(["preview_control"]);
 	});
 
-	// Force Kill gives a server no chance to save its work, so it always asks first.
 	it("asks before a Force Kill even with confirmation off, then kills only the previewed scope", async () => {
 		preferences.confirmActions.current = false;
 		const store = storeWith(web);
@@ -325,17 +314,15 @@ describe("stopping a server", () => {
 		]);
 	});
 
-	// brew services stop also keeps the service from starting at login, so it never happens unseen.
 	it("asks before stopping a Homebrew service even with confirmation off", async () => {
 		preferences.confirmActions.current = false;
-		const redis = server({ ...db, supervisor: { kind: "homebrew", name: "redis", supported: true } });
+		const redis = server({ ...db, supervisor: { kind: "homebrew", name: "redis", controllable: true } });
 		const store = storeWith(redis);
 		await store.request("stop", redis);
 		expect(store.pending?.action).toBe("stop");
 		expect(calls.map(([cmd]) => cmd)).toEqual(["preview_control"]);
 	});
 
-	// A watcher such as nodemon would start the server again; Stop parent ends it too.
 	it("previews and stops the parent of a server", async () => {
 		const nodemon = { process: { pid: 90, start: "1" }, name: "nodemon" };
 		const watched = server({ ...web, parent: nodemon });
@@ -355,7 +342,6 @@ describe("stopping a server", () => {
 		]);
 	});
 
-	// "Stop every node server" lists them first and stops each process tree once.
 	it("stops every unprotected server of the same program once per process tree", async () => {
 		const second = server({ port: 3001, pid: 101, name: "docs" });
 		const secondPort = server({ ...second, port: 3002 });
@@ -392,7 +378,6 @@ describe("stopping a server", () => {
 		expect(calls).toEqual([["stop_server", { target: container.target, onlyIfIdle: false }]]);
 	});
 
-	// Stopping waits up to seconds for the server to exit; a second click must not stop it twice.
 	it("ignores another stop of a server that is still stopping", async () => {
 		const stopping = Promise.withResolvers<Snapshot>();
 		backend((cmd) => (cmd === "stop_server" ? stopping.promise : undefined));
@@ -407,7 +392,6 @@ describe("stopping a server", () => {
 		expect(store.isBusy(web, "control")).toBe(false);
 	});
 
-	// The restarted process has a new identity, but it is the same server to the user.
 	it("keeps the details of a restarted server open", async () => {
 		const restarted = server({ ...web, pid: 101, startedAt: 5 });
 		backend((cmd) => (cmd === "restart_server" ? snapshot([restarted, api]) : undefined));
@@ -427,7 +411,6 @@ describe("stopping a server", () => {
 		expect(store.servers).toEqual([api]);
 	});
 
-	// A root-owned process can't be signalled; the row must not pretend it stopped.
 	it("keeps the server listed when the backend can't stop it", async () => {
 		backend((cmd) => {
 			if (cmd === "stop_server") throw "Can't stop postgres (PID 300): it belongs to root.";
@@ -443,7 +426,6 @@ describe("order", () => {
 	const heavy = server({ port: 4000, pid: 201, name: "heavy", memoryBytes: 900, cpuPercent: 1, startedAt: 10 });
 	const medium = server({ port: 5000, pid: 202, name: "medium", memoryBytes: 500, cpuPercent: 5, startedAt: 20 });
 
-	// Clicking the Memory header should bring the heaviest server to the top.
 	it.each([
 		["memory", true, [heavy, medium, light]],
 		["cpu", true, [light, medium, heavy]],
@@ -464,7 +446,6 @@ describe("order", () => {
 		expect(store.filtered).toEqual([heavy, medium, light]);
 	});
 
-	// Pinning the main app should pin its API port too.
 	it("pins every port of a project together", () => {
 		const app = server({ port: 3000, name: "shop", folder: "~/shop" });
 		const appApi = server({ port: 9000, pid: 201, name: "shop", folder: "~/shop" });
@@ -515,7 +496,6 @@ describe("renaming and hiding", () => {
 		expect(preferences.names.current).toEqual({});
 	});
 
-	// AirPlay's ControlCenter holds 5000 and 7000; hiding the process hides both.
 	it("hides a port or every port of a process until unhidden", () => {
 		const airplay = server({ port: 5000, pid: 500, process: "ControlCenter", kind: "dev" });
 		const airplay2 = server({ port: 7000, pid: 500, process: "ControlCenter", kind: "dev" });
@@ -560,9 +540,8 @@ describe("clean up", () => {
 		expect(calls.filter(([cmd]) => cmd === "stop_server")).toHaveLength(1);
 	});
 
-	// Homebrew keeps its services running on purpose, and its stop also removes them from login.
 	it("leaves servers a supervisor runs out of clean up", () => {
-		const brewed = server({ ...idleApi, supervisor: { kind: "homebrew", name: "redis", supported: true } });
+		const brewed = server({ ...idleApi, supervisor: { kind: "homebrew", name: "redis", controllable: true } });
 		expect(storeWith(idleWeb, brewed).idle).toEqual([idleWeb]);
 	});
 
@@ -586,7 +565,6 @@ describe("clean up", () => {
 		expect(store.idle.map((s) => s.port)).toEqual([idleWeb.port, idleDb.port]);
 	});
 
-	// Desktop apps idle on ports too; clean up must not quit what the list doesn't show.
 	it("leaves hidden servers alone", () => {
 		const idleApp = server({ port: 44438, pid: 400, kind: "other", status: "idle" });
 		const store = storeWith(idleWeb, idleApp);
@@ -596,8 +574,6 @@ describe("clean up", () => {
 	});
 });
 
-// The resource owner is a kernel process identity, even when jobs overlap or a row is hidden.
-/** One process of a prefork gunicorn. */
 const workerUsage = (pid: number, parent: number, memoryBytes: number, ports: number[] = []) => ({
 	process: { pid, start: "1" },
 	parent,
@@ -621,7 +597,6 @@ describe("resource allocation and row identity", () => {
 		expect(store.usage.serversBytes).toBe(0);
 	});
 
-	// A prefork master with two workers: each worker shows the port it holds, under its master.
 	it("lists a server's processes as a tree that adds up to its total", () => {
 		const master = server({ port: 8000, pid: 10, process: "gunicorn", memoryBytes: 600 });
 		master.resources = [workerUsage(12, 10, 200, [8000]), workerUsage(10, 1, 300), workerUsage(11, 10, 100, [8000])];
