@@ -10,11 +10,8 @@
 		class: className,
 	}: {
 		values: number[];
-		/** Scale from 0 instead of zooming into the data range. */
 		fromZero?: boolean;
-		/** Fixed 0 to `max` scale, so series with a known range (like percentages) compare across rows. */
 		max?: number;
-		/** Draws a dashed reference line, e.g. a memory warning limit. */
 		threshold?: number;
 		area?: boolean;
 		class?: string;
@@ -28,7 +25,6 @@
 		const hi = Math.max(...values, threshold ?? 0);
 		if (fromZero) return { lo: 0, hi: hi * 1.15 || 1 };
 		const lo = Math.min(...values);
-		// Keep stable series flat instead of magnifying noise.
 		const span = Math.max(hi - lo, hi * 0.25) || 1;
 		const pad = (span - (hi - lo)) / 2;
 		return { lo: lo - pad, hi: hi + pad };

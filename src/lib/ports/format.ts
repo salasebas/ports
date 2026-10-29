@@ -40,19 +40,16 @@ export function serverActivity(server: Server, now = Date.now()): string {
 	return `up ${formatDuration(now - server.startedAt)}`;
 }
 
-/** `PID 4821`, the container, or who owns the process when Ports can't see it. */
 export function serverProcessId(server: Server): string {
 	if (server.pid !== undefined) return `PID ${server.pid}`;
 	if (server.container) return `container ${server.container.id.slice(0, 12)}`;
 	return `owned by ${server.owner}`;
 }
 
-/** Memory and CPU are measured for processes Ports can see, not for containers or other users' processes. */
 export const isMeasured = (server: Server) => server.resources.length > 0;
 
 export const canStop = (server: Server) => server.target !== undefined;
 
-/** How to start each framework's dev server on every interface instead of loopback only. */
 const exposeFlags: Record<string, string> = {
 	Vite: "--host",
 	SvelteKit: "--host",
@@ -73,16 +70,13 @@ const exposeFlags: Record<string, string> = {
 	Hugo: "--bind 0.0.0.0",
 };
 
-/** The flag that exposes the server, e.g. `--host` for Vite, when Ports knows it. */
 export const exposeFlag = (server: Server): string | undefined =>
 	server.framework ? exposeFlags[server.framework] : undefined;
 
 const reachesLocalhost = (ip: string) => ["0.0.0.0", "::", "127.0.0.1", "::1"].includes(ip);
 
-/** The scheme of the page Ports found; plain HTTP when it found none, which is what most servers speak. */
 const scheme = (server: Pick<Server, "web">) => (server.web.state === "page" ? server.web.scheme : "http");
 
-/** The server's page, when Ports verified it answers HTTPS or HTTP. */
 export const verifiedPage = (server: Pick<Server, "web">) => (server.web.state === "page" ? server.web : undefined);
 
 /**
@@ -96,26 +90,21 @@ export function serverUrl(server: Pick<Server, "port" | "addresses" | "web">): s
 	return `${scheme(server)}://${host}:${server.port}`;
 }
 
-/** Where another device opens the server, with the same scheme as `serverUrl`. */
 export const lanUrl = (server: Pick<Server, "lanHost" | "web">) =>
 	server.lanHost ? `${scheme(server)}://${server.lanHost}` : undefined;
 
-/** The worktree and branch, without repeating a worktree whose name is the branch. */
 export function placeLabel(server: Pick<Server, "worktree" | "branch">): string | undefined {
 	const parts = [server.worktree, server.branch].filter((part): part is string => Boolean(part));
 	const unique = parts.filter((part, index) => parts.indexOf(part) === index);
 	return unique.length ? unique.join(" · ") : undefined;
 }
 
-/** The framework when its command or image names it; a guess from dependencies stays in the details. */
 export const confirmedFramework = (server: Server) =>
 	server.attribution.confidence === "confirmed" ? server.framework : undefined;
 
-/** `SvelteKit 2.21.0`, or the framework alone when its version is unknown. */
 export const frameworkLabel = (server: Server) =>
 	server.framework && [server.framework, server.frameworkVersion].filter(Boolean).join(" ");
 
-/** One line of the details' "Identified by" list. */
 export function describeEvidence(evidence: Evidence): string {
 	switch (evidence.source) {
 		case "marker":
@@ -131,13 +120,10 @@ export function describeEvidence(evidence: Evidence): string {
 	}
 }
 
-/** Must match `SCHEME` in `src-tauri/src/ports/icons.rs`. */
 const ICON_SCHEME = "ports-icon";
 
-/** The URL of a page's or project's icon; a plain browser tab has no backend to serve it. */
 export const iconUrl = (key: string | undefined) => (key && isTauri() ? convertFileSrc(key, ICON_SCHEME) : undefined);
 
-/** Stable color slot so a port keeps its color across refreshes. */
 export function portColor(port: number): string {
 	return `var(--port-${(port % 6) + 1})`;
 }

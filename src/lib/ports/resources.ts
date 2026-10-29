@@ -14,7 +14,6 @@ export function sharesControl(a: Server, b: Server): boolean {
 	return b.resources.some((resource) => processes.has(processKey(resource.process)));
 }
 
-/** Each process contributes to one visible slice, including overlapping service trees. */
 export function allocateUsage(servers: readonly Server[]): { server: Server; usage: Usage }[] {
 	const counted = new Set<string>();
 	return servers.map((server) => {
@@ -30,10 +29,6 @@ export function allocateUsage(servers: readonly Server[]): { server: Server; usa
 	});
 }
 
-/**
- * The server's processes as a tree, parents before their children, with
- * each one's depth. A process whose parent isn't part of the server is a top.
- */
 export function processTree(server: Server): { usage: ProcessUsage; depth: number }[] {
 	const pids = new Set(server.resources.map((resource) => resource.process.pid));
 	const children = new Map<number | undefined, ProcessUsage[]>();

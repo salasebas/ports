@@ -1,5 +1,3 @@
-/** Shapes of `list_projects` and `pull_request`. Keep them in sync with the Rust commands. */
-
 import type { ProcessIdentity } from "./types";
 
 export type Recovery = "manual";
@@ -23,12 +21,9 @@ export interface LaunchResult {
 
 export interface ScriptView {
 	name: string;
-	/** The script body from package.json. */
-	command: string;
-	/** The command Ports runs for this script. */
-	run: string;
+	body: string;
+	runCommand: string;
 	favorite: boolean;
-	/** A favorite whose script is no longer in package.json. */
 	missing: boolean;
 }
 
@@ -41,7 +36,6 @@ export interface SavedProject {
 	expectedAddress: string;
 	recovery: Recovery;
 	lastResult?: LaunchResult;
-	/** Process Ports started, when it may still be running. */
 	process?: ProcessIdentity;
 	manager: "npm" | "pnpm" | "yarn" | "bun";
 	scripts: ScriptView[];
@@ -64,7 +58,6 @@ export interface Pull {
 
 export interface Preview {
 	provider: string;
-	/** A remote deployment URL, never the local server. */
 	url: string;
 	label: string;
 }

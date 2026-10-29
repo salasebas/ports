@@ -9,12 +9,9 @@ import { savedMatches, type SavedProject } from "./projects";
 import type { ControlPreview, ProcessIdentity, Server, Snapshot, SystemUsage } from "./types";
 import { allocateUsage, controlKey, sharesControl } from "./resources";
 
-/** Must match `SNAPSHOT_EVENT` in `src-tauri/src/ports/mod.rs`. */
 export const SNAPSHOT_EVENT = "ports://snapshot";
-/** Must match `PROJECTS_EVENT` in `src-tauri/src/ports/saved.rs`. */
 export const PROJECTS_EVENT = "ports://projects";
 
-/** Runs a system action and reports its failure, e.g. a missing folder or editor, as a toast. */
 async function attempt(action: Promise<unknown>): Promise<boolean> {
 	try {
 		await action;
@@ -25,20 +22,13 @@ async function attempt(action: Promise<unknown>): Promise<boolean> {
 	}
 }
 
-/** Saves the interval and tells the backend; the other window picks the preference up through storage events. */
 export function setRefreshInterval(ms: number) {
 	preferences.refreshInterval.current = ms;
 	return attempt(invoke("set_refresh_interval", { ms }));
 }
 
-/**
- * `forceKill` skips the graceful shutdown; `stopParent` also ends what
- * started the server, such as nodemon; `stopAll` stops every server of the
- * same program.
- */
 export type ServerAction = "stop" | "restart" | "forceKill" | "stopParent" | "stopAll";
 
-/** Broad or abrupt actions always show what they end, whatever the preference. */
 const alwaysConfirmed: ServerAction[] = ["forceKill", "stopParent", "stopAll"];
 
 /**
@@ -47,15 +37,12 @@ const alwaysConfirmed: ServerAction[] = ["forceKill", "stopParent", "stopAll"];
  */
 export const mustConfirm = (action: ServerAction, server: Server) =>
 	alwaysConfirmed.includes(action) ||
-	(action === "stop" && server.supervisor?.kind === "homebrew" && server.supervisor.supported);
+	(action === "stop" && server.supervisor?.kind === "homebrew" && server.supervisor.controllable);
 
-/** An action waiting for the user, with what the backend says it would end. */
 export interface PendingAction {
 	action: ServerAction;
 	server: Server;
-	/** Every server the action controls: the one chosen, or each server of its program for `stopAll`. */
 	servers: Server[];
-	/** One per server, in the same order; null while the backend works them out. */
 	previews: ControlPreview[] | null;
 	error: string | null;
 }
@@ -63,30 +50,21 @@ export interface PendingAction {
 interface StopOptions {
 	force?: boolean;
 	parent?: ProcessIdentity;
-	/** The processes of the preview the user confirmed; the backend refuses to reach others. */
 	confirmed?: ProcessIdentity[];
 }
 
-/**
- * Work a button starts; its button stays disabled until the work ends. Stop
- * and restart share `control`: intersecting process scopes run one action at a time.
- */
 type Busy = "control" | "editor" | "terminal" | "folder";
 
-/** What the window saw on the port, so the backend never stops something that took its place. */
 const target = (server: Server) => {
 	if (!server.target) throw new Error("Ports cannot control this server");
 	return server.target;
 };
 
-/** A project's ports share one key, so pinning or protecting one covers all of them. */
 export const serverKey = (server: Server) => (server.folder ? `project:${server.folder}` : `port:${server.port}`);
 
-/** Entries of `preferences.hidden`: one port, or every port of a process. */
 export const hiddenPort = (port: number) => `port:${port}`;
 export const hiddenProcess = (process: string) => `process:${process}`;
 
-/** Ascending order for each sort key; `uptime` puts the longest running first. */
 const ascending: Record<SortKey, (a: Server, b: Server) => number> = {
 	port: (a, b) => a.port - b.port,
 	name: (a, b) => a.name.localeCompare(b.name),
@@ -95,7 +73,6 @@ const ascending: Record<SortKey, (a: Server, b: Server) => number> = {
 	uptime: (a, b) => b.startedAt - a.startedAt,
 };
 
-/** The server with the name and protection the user gave it, or the same object when there are none. */
 function customize(server: Server): Server {
 	const name = preferences.names.current[server.port];
 	const isProtected = preferences.protection.current[serverKey(server)];
@@ -107,7 +84,6 @@ export function unhide(entry: string) {
 	preferences.hidden.current = preferences.hidden.current.filter((e) => e !== entry);
 }
 
-/** `:5000` or `ControlCenter`, for the list of hidden entries. */
 export const hiddenLabel = (entry: string) => entry.replace(/^port:/, ":").replace(/^process:/, "");
 
 const idleCount = (n: number) => (n === 1 ? "1 idle server" : `${n} idle servers`);
@@ -117,36 +93,27 @@ export function isHidden(server: Server) {
 	return hidden.includes(hiddenPort(server.port)) || hidden.includes(hiddenProcess(server.process));
 }
 
-/** UI state for the server list, fed by the snapshots the Rust backend publishes. */
 export class PortsStore {
 	servers = $state.raw<Server[]>([]);
 	system = $state.raw<SystemUsage>({ totalBytes: 0, usedBytes: 0, cpuPercent: 0 });
 	#revision = -1;
-	/** The listener ids of the last snapshot, to refresh saved projects when they change. */
 	#listeners: string | null = null;
 	query = $state("");
 	selectedId = $state<string | null>(null);
-	/** Saved project open in the drawer. Separate from a live server: Start is not Restart. */
 	selectedProjectId = $state<string | null>(null);
 	saved = $state.raw<SavedProject[]>([]);
-	/** Action waiting for the user to confirm it. */
 	pending = $state.raw<PendingAction | null>(null);
-	/** Idle servers clean up will stop once the user confirms. */
 	cleaning = $state.raw<Server[] | null>(null);
-	/** Server whose name the user is editing. */
 	renaming = $state.raw<Server | null>(null);
-	/** Work in progress, keyed by action and service identity. */
 	#busy = new SvelteSet<string>();
 	#controlling = $state.raw<Server[]>([]);
 
 	#customized = $derived(this.servers.map(customize));
 
-	/** Servers of the kinds the user shows, without the ones they hid. */
 	shown = $derived(
 		this.#customized.filter((server) => preferences.shownKinds.current.includes(server.kind) && !isHidden(server)),
 	);
 
-	/** The shown servers matching the search: pinned ones first, then in the chosen order. */
 	filtered = $derived.by(() => {
 		const q = this.query.trim().toLowerCase();
 		const matching = q
@@ -179,7 +146,6 @@ export class PortsStore {
 
 	selectedProject = $derived(this.saved.find((project) => project.id === this.selectedProjectId) ?? null);
 
-	/** Saved projects that are not currently the listener on their expected port. */
 	savedProjects = $derived(
 		this.saved.filter((project) => !project.matchedServerId && savedMatches(project, this.query)),
 	);
@@ -188,7 +154,6 @@ export class PortsStore {
 		this.saved.find((project) => project.matchedServerId === server.id) ??
 		this.saved.find((project) => project.folder === server.folder && project.expectedPort === server.port);
 
-	/** What clean up stops: shown idle servers Ports can stop, unless protected or kept running by a supervisor. */
 	idle = $derived(
 		this.shown.filter(
 			(server) =>
@@ -208,7 +173,6 @@ export class PortsStore {
 
 	allocations = $derived(allocateUsage(this.shown));
 
-	/** Hidden processes belong to Other apps; shared trees count once. */
 	usage = $derived.by(() => {
 		const serversBytes = this.allocations.reduce((sum, row) => sum + row.usage.memoryBytes, 0);
 		const serversCpuPercent = this.allocations.reduce((sum, row) => sum + row.usage.cpuPercent, 0);
@@ -220,15 +184,12 @@ export class PortsStore {
 		};
 	});
 
-	/** Follows the backend's snapshots until the returned cleanup runs. */
 	connect = () => {
-		// A plain browser tab on the dev server has no backend to follow.
 		if (!isTauri()) return () => {};
 		let connected = true;
 		const unlisten = listen<Snapshot>(SNAPSHOT_EVENT, (event) => {
 			if (connected) this.apply(event.payload);
 		});
-		// A run Ports started can exit before it ever listens, which no snapshot shows.
 		const unlistenProjects = listen(PROJECTS_EVENT, () => {
 			if (connected) void this.refreshSaved();
 		});
@@ -253,7 +214,6 @@ export class PortsStore {
 		this.#revision = snapshot.revision;
 		this.servers = snapshot.servers;
 		this.system = snapshot.system;
-		// A saved project's match is computed against the listeners, so it changes with them.
 		const listeners = snapshot.servers
 			.map((server) => server.id)
 			.toSorted()
@@ -355,7 +315,6 @@ export class PortsStore {
 			? this.#controlling.some((busy) => sharesControl(busy, server))
 			: this.#busy.has(`${work}:${server.id}`);
 
-	/** Runs `work` unless the same work on the same server, or a control of its processes, is still running. */
 	async #run<T>(server: Server, work: Busy, run: () => Promise<T>): Promise<T | undefined> {
 		if (this.isBusy(server, work)) return;
 		const key = `${work}:${server.id}`;
@@ -377,10 +336,8 @@ export class PortsStore {
 		preferences.pinned.current = pinned.includes(key) ? pinned.filter((k) => k !== key) : [...pinned, key];
 	};
 
-	/** The name Ports detected, before the user renamed the port. */
 	detectedName = (port: number) => this.servers.find((server) => server.port === port)?.name ?? "";
 
-	/** Gives the port a name; a blank one, or the detected one, goes back to the detected name. */
 	rename = (port: number, name: string) => {
 		const names = { ...preferences.names.current };
 		delete names[port];
@@ -419,7 +376,6 @@ export class PortsStore {
 	revealFolder = (server: Server) =>
 		this.#run(server, "folder", () => attempt(invoke("reveal_folder", { folder: server.folder })));
 
-	/** The other servers `stopAll` reaches: each shown, unprotected server of the same program, once per process tree. */
 	sameProgram = (server: Server) => {
 		const servers: Server[] = [server];
 		for (const other of this.shown) {
@@ -429,7 +385,6 @@ export class PortsStore {
 		return servers;
 	};
 
-	/** Entry point for every control button: asks first, with a preview, when the action or the preference says so. */
 	request = async (action: ServerAction, server: Server) => {
 		if (this.isBusy(server, "control")) return;
 		const servers = action === "stopAll" ? this.sameProgram(server) : [server];
@@ -485,18 +440,20 @@ export class PortsStore {
 						...(confirmed ? { scope: { confirmed } } : {}),
 					}),
 				);
-				// The new process has a new identity; keep its details open.
-				if (this.selectedId === server.id && !this.selected) {
-					this.selectedId =
-						this.#customized.find(
-							(row) => row.port === server.port && row.process === server.process && row.folder === server.folder,
-						)?.id ?? null;
-				}
+				this.#keepRestartedSelected(server);
 				toast.success(`Restarted ${server.name}`, { id, description: `:${server.port}` });
 			} catch (error) {
 				toast.error(String(error), { id });
 			}
 		});
+
+	#keepRestartedSelected(server: Server) {
+		if (this.selectedId !== server.id || this.selected) return;
+		this.selectedId =
+			this.#customized.find(
+				(row) => row.port === server.port && row.process === server.process && row.folder === server.folder,
+			)?.id ?? null;
+	}
 
 	stop = (server: Server, options: StopOptions = {}) =>
 		this.#run(server, "control", async () => {
@@ -508,7 +465,6 @@ export class PortsStore {
 			else toast.success(`${verb[1]} ${what}`, { id, description: `:${server.port}` });
 		});
 
-	/** Stops the server and takes it off the list; returns why it couldn't. */
 	async #stop(server: Server, onlyIfIdle = false, options: StopOptions = {}): Promise<string | null> {
 		const { force, parent, confirmed } = options;
 		try {
@@ -528,7 +484,6 @@ export class PortsStore {
 		return null;
 	}
 
-	/** Asks once before stopping every idle server; protected ones are never listed. */
 	cleanUp = () => {
 		if (this.idle.length) this.cleaning = this.idle;
 	};
@@ -547,7 +502,6 @@ export class PortsStore {
 			if (!servers.some((chosen) => sharesControl(chosen, server))) servers.push(server);
 		}
 		if (!servers.length) return;
-		// Count rows, like the dialog: one stop can end several ports of a process.
 		const rows = (stopped: Server[]) => eligible.filter((row) => stopped.some((s) => sharesControl(s, row))).length;
 		const id = toast.loading("Stopping " + idleCount(eligible.length) + "…", { id: "clean-up" });
 		const results = await Promise.all(

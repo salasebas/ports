@@ -1,5 +1,3 @@
-//! The processes that make up a server: what Ports measures and what Stop ends.
-
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 
@@ -49,7 +47,6 @@ impl ProcessTable {
         self.parents.get(&pid).copied()
     }
 
-    /// Parent, grandparent and so on, nearest first.
     pub fn ancestors(&self, pid: u32) -> Vec<u32> {
         let mut chain = Vec::new();
         let mut current = pid;
@@ -63,9 +60,6 @@ impl ProcessTable {
         chain
     }
 
-    /// `pid` and everything it spawned as the same user. A root daemon such
-    /// as `sshd` spawns whole user sessions, which aren't part of it; and the
-    /// init process spawned everything.
     pub fn descendants(&self, pid: u32) -> BTreeSet<u32> {
         let mut found = BTreeSet::from([pid]);
         if pid <= 1 {
@@ -90,10 +84,6 @@ impl ProcessTable {
 
 const SHELLS: [&str; 8] = ["sh", "bash", "zsh", "dash", "fish", "ksh", "tcsh", "csh"];
 
-/// What started a service and may start it again when it exits, such as
-/// nodemon or turbo: the nearest ancestor of `root` past any shell wrapper.
-/// Only this user's own programs count, never a terminal or shell session,
-/// an app, Ports or what started it, or the system.
 pub fn watcher(root: u32, table: &ProcessTable, groups: &impl Groups) -> Option<u32> {
     let user = table.user(root)?;
     let own = groups.own_pid();
@@ -118,11 +108,9 @@ pub fn watcher(root: u32, table: &ProcessTable, groups: &impl Groups) -> Option<
     None
 }
 
-/// Process group and session lookups, injectable so the ownership rules can be tested.
 pub trait Groups {
     fn pgid(&self, pid: u32) -> Option<u32>;
     fn sid(&self, pid: u32) -> Option<u32>;
-    /// Ports' own process group.
     fn own_pgid(&self) -> u32;
     fn own_pid(&self) -> u32;
 }
@@ -151,19 +139,12 @@ impl Groups for OsGroups {
 
 #[derive(Debug, PartialEq)]
 pub struct Job {
-    /// The process holding the port.
     pub listener: u32,
-    /// What the user launched, e.g. `npm run dev` above the `node` that listens.
     pub root: u32,
-    /// Tracked through shutdown so newly spawned group members go too.
     pub group: Option<u32>,
     pub pids: BTreeSet<u32>,
 }
 
-/// The server behind the PIDs listening on one port: the first listener's
-/// descendants (its workers among them), plus the listener's process group when that group is a job
-/// started from a shell (such as `npm run dev`) or by Ports, never the group
-/// of a terminal, of an app like an editor, or of Ports itself.
 #[cfg(test)]
 pub fn job(listeners: &BTreeSet<u32>, table: &ProcessTable, groups: &impl Groups) -> Job {
     scoped_job(listeners, table, groups, listeners)
@@ -176,7 +157,6 @@ pub fn scoped_job(
     groups: &impl Groups,
     all_listeners: &BTreeSet<u32>,
 ) -> Job {
-    // Workers sharing the port (SO_REUSEPORT) hang off the first one.
     let first = listeners
         .iter()
         .copied()
@@ -210,8 +190,6 @@ pub fn scoped_job_for(
             .iter()
             .any(|pid| members.contains(pid) && !descendants.contains(pid))
     });
-    // Unrelated processes can listen on one port too, e.g. on 127.0.0.1 and
-    // ::1; they aren't part of this server and must survive its stop.
     let mut pids = table.descendants(listener);
     if let Some(group) = group {
         pids.extend(
@@ -314,7 +292,6 @@ mod tests {
     const NODE: u32 = 202;
     const ESBUILD: u32 = 203;
 
-    /// Terminal → zsh → `npm run dev` → sh → node (listens) → esbuild.
     fn npm_run_dev() -> ProcessTable {
         ProcessTable::from_parents([
             (SHELL, TERMINAL),
@@ -327,7 +304,6 @@ mod tests {
 
     #[test]
     fn a_watcher_is_the_nearest_own_program_above_the_shell_wrappers() {
-        // Editor task: zsh (session) → nodemon → sh -c → node (listens).
         const NODEMON: u32 = 300;
         let mut table = ProcessTable::from_parents([(NODEMON, SHELL), (SH, NODEMON), (NODE, SH)]);
         table.programs = HashMap::from([
@@ -343,9 +319,7 @@ mod tests {
             own: 999,
         };
         assert_eq!(watcher(NODE, &table, &groups), Some(NODEMON));
-        // A shell job's own leader sits right under the session: no watcher.
         assert_eq!(watcher(NODEMON, &table, &groups), None);
-        // Nor an app, another user's process, or what started Ports.
         let app = FakeGroups {
             own: NODEMON,
             ..groups
@@ -440,7 +414,6 @@ mod tests {
 
     #[test]
     fn never_takes_the_group_of_an_app_for_its_helper() {
-        // launchd → Cursor → Cursor Helper → extension host (listens), all in Cursor's group.
         const LAUNCHD: u32 = 1;
         const APP: u32 = 300;
         const HELPER: u32 = 301;
@@ -459,7 +432,6 @@ mod tests {
 
     #[test]
     fn a_pre_forked_worker_leads_back_to_its_master() {
-        // Linux names a worker as the socket's owner; the master forked it.
         const MASTER: u32 = 10;
         let mut table = ProcessTable::from_parents([(MASTER, SHELL), (11, MASTER), (12, MASTER)]);
         table.programs = [MASTER, 11, 12]
@@ -513,7 +485,6 @@ mod tests {
 
     #[test]
     fn leaves_out_an_unrelated_process_on_the_same_port() {
-        // Node on [::1]:3000 next to Python on 127.0.0.1:3000.
         let table = ProcessTable::from_parents([(20, 5), (21, 20), (30, 6)]);
         let groups = FakeGroups {
             pgids: HashMap::from([(20, 20), (21, 20), (30, 30)]),

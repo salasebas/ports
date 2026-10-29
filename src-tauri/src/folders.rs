@@ -1,5 +1,3 @@
-//! Opens a server's project folder in the user's editor, terminal or file manager.
-
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -16,7 +14,6 @@ pub enum Editor {
 }
 
 impl Editor {
-    /// macOS launches apps by name; Linux runs the editor's command line launcher.
     fn program(&self) -> &'static str {
         #[cfg(target_os = "macos")]
         let program = match self {
@@ -114,6 +111,23 @@ pub async fn reveal_folder(app: AppHandle, folder: String) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_editor_the_windows_offer_is_one_ports_launches() {
+        let preferences = include_str!("../../src/lib/ports/preferences.svelte.ts");
+        let union = preferences
+            .lines()
+            .find_map(|line| line.strip_prefix("export type Editor = "))
+            .expect("preferences.svelte.ts declares the Editor type");
+        let offered: Vec<&str> = union.split('"').skip(1).step_by(2).collect();
+        assert!(!offered.is_empty());
+        for name in offered {
+            assert!(
+                serde_json::from_value::<Editor>(serde_json::json!(name)).is_ok(),
+                "{name}"
+            );
+        }
+    }
 
     #[test]
     fn expands_a_home_relative_folder() {

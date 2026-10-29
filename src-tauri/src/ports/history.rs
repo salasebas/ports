@@ -1,19 +1,14 @@
-//! Ten minutes of samples per server and the statuses derived from them.
-
 use std::collections::VecDeque;
 
 use serde::Serialize;
 
 const BUCKET_MS: u64 = 10_000;
-/// Ten minutes of ten-second buckets.
 const BUCKETS: u64 = 60;
-/// A leak is only called over (nearly) the whole window.
 const LEAK_MIN_BUCKETS: usize = 54;
 const LEAK_MIN_GROWTH_BYTES: f64 = 50.0 * 1024.0 * 1024.0;
 const LEAK_MIN_GROWTH_RATIO: f64 = 0.1;
 
 pub const IDLE_AFTER_MS: u64 = 5 * 60_000;
-/// Percent of one core; dev servers idle well below this, file watchers included.
 pub const ACTIVE_CPU_PERCENT: f64 = 1.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
@@ -32,9 +27,6 @@ struct Bucket {
     samples: u32,
 }
 
-/// Samples folded into ten-second buckets: the latest memory and the
-/// average CPU of each bucket. Buckets older than ten minutes fall off, so
-/// a gap while polling was paused shortens the history instead of stretching it.
 #[derive(Debug, Default)]
 pub struct History {
     buckets: VecDeque<Bucket>,
@@ -72,7 +64,6 @@ impl History {
         self.buckets.iter().map(|b| b.memory).collect()
     }
 
-    /// How many ten-second buckets the history covers, gaps included.
     pub fn span(&self) -> usize {
         match (self.buckets.front(), self.buckets.back()) {
             (Some(first), Some(last)) => (last.slot - first.slot + 1) as usize,
@@ -88,22 +79,24 @@ impl History {
     }
 }
 
-/// Memory that grew by a meaningful amount and kept rising across a window
-/// of `span` buckets. Comparing the means of six slices rides out garbage
-/// collector sawtooths, and a one-off jump (a cache filling once) rises in a
-/// single slice only.
 pub fn is_leaking(memory: &[u64], span: usize) -> bool {
     const SLICES: usize = 6;
     if span < LEAK_MIN_BUCKETS || memory.len() < SLICES {
         return false;
     }
-    let means: Vec<f64> = (0..SLICES)
-        .map(|i| &memory[i * memory.len() / SLICES..(i + 1) * memory.len() / SLICES])
-        .map(|slice| slice.iter().map(|&m| m as f64).sum::<f64>() / slice.len() as f64)
-        .collect();
+    let means = slice_means(memory, SLICES);
     let growth = means[SLICES - 1] - means[0];
-    let rises = means.windows(2).filter(|pair| pair[1] > pair[0]).count();
-    growth >= LEAK_MIN_GROWTH_BYTES.max(means[0] * LEAK_MIN_GROWTH_RATIO) && rises >= SLICES - 2
+    let grew_enough = growth >= LEAK_MIN_GROWTH_BYTES.max(means[0] * LEAK_MIN_GROWTH_RATIO);
+    let rising_slices = means.windows(2).filter(|pair| pair[1] > pair[0]).count();
+    let rose_through_garbage_collections = rising_slices >= SLICES - 2;
+    grew_enough && rose_through_garbage_collections
+}
+
+fn slice_means(memory: &[u64], slices: usize) -> Vec<f64> {
+    (0..slices)
+        .map(|i| &memory[i * memory.len() / slices..(i + 1) * memory.len() / slices])
+        .map(|slice| slice.iter().map(|&m| m as f64).sum::<f64>() / slice.len() as f64)
+        .collect()
 }
 
 pub fn status(leaking: bool, now_ms: u64, last_active_at: u64) -> Status {
@@ -149,10 +142,8 @@ mod tests {
 
     #[test]
     fn flags_memory_that_grows_steadily() {
-        // +5 MB per bucket with a garbage-collector sawtooth on top.
         let growing = window(|i| 400 * MB + i * 5 * MB + (i % 4) * 8 * MB);
         assert!(is_leaking(&growing, 60));
-        // Sampled every 30 s while Ports is hidden: fewer points, same ten minutes.
         let sparse: Vec<u64> = growing.iter().step_by(3).copied().collect();
         assert!(is_leaking(&sparse, 60));
     }

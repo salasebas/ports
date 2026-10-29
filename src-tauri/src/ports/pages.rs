@@ -1,7 +1,3 @@
-//! Checks which servers serve a web page, over HTTPS or HTTP, and reads the
-//! page's title and icon. A listening socket alone doesn't say: databases
-//! and custom TCP services listen too.
-
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::net::SocketAddr;
@@ -18,19 +14,12 @@ use super::network;
 use super::project;
 use super::sampler::{Kind, Server};
 
-/// How often Ports looks for servers due a check.
 pub const CHECK_EVERY_MS: u64 = 10_000;
-/// A server that just started may still be compiling before it answers.
 const STARTING_MS: u64 = 2 * 60_000;
 const STARTING_RECHECK_MS: u64 = 15_000;
-/// A server that took the connection but didn't answer in time may be
-/// compiling its first page.
 const TIMED_OUT_RECHECK_MS: u64 = 60_000;
-/// A server that answered neither is asked again rarely: each check is a
-/// connection, which would keep a forgotten server from turning idle.
 const NO_PAGE_RECHECK_MS: u64 = 10 * 60_000;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
-/// Generous enough for a dev server compiling its first page.
 const TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_HTML_BYTES: u64 = 512 * 1024;
 const MAX_TITLE_CHARS: usize = 120;
@@ -51,33 +40,25 @@ impl Scheme {
     }
 }
 
-/// Whether a server serves a web page. Mirrors `Web` in `src/lib/ports/types.ts`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "lowercase")]
 pub enum Web {
-    /// Not checked: Ports doesn't check databases, desktop apps or other
-    /// users' processes, and a new server waits for the next round.
     #[default]
     Unknown,
-    /// Answered an HTTPS or HTTP request for `/`, with any status.
     Page {
         scheme: Scheme,
         #[serde(skip_serializing_if = "Option::is_none")]
         title: Option<String>,
     },
-    /// Answered neither: it speaks another protocol, or didn't answer in time.
     None,
 }
 
-/// A server's identity in the snapshot.
 type Key = String;
 
-/// What one check found.
 #[derive(Debug, Default)]
 pub struct Found {
     web: Web,
     icon: Option<Arc<Icon>>,
-    /// Some request connected but got no answer in time.
     timed_out: bool,
 }
 
@@ -86,7 +67,6 @@ struct Checked {
     found: Found,
 }
 
-/// What the latest checks found, and when the next round is due.
 #[derive(Default)]
 pub struct Pages {
     checked: HashMap<Key, Checked>,
@@ -122,8 +102,6 @@ pub fn target(server: &Server) -> Option<Target> {
 }
 
 impl Pages {
-    /// Starts a round once the last one is old enough; returns the servers
-    /// due a check, and forgets the ones that are gone.
     pub fn due(&mut self, targets: Vec<Target>, now: u64) -> Option<Vec<Target>> {
         if self.checking || now.saturating_sub(self.last_round_at) < CHECK_EVERY_MS {
             return None;
@@ -134,9 +112,6 @@ impl Pages {
             .into_iter()
             .filter(|target| {
                 self.checked.get(&target.key).is_none_or(|checked| {
-                    // A page is checked once per server: a `GET /` renders it,
-                    // and that work would keep the server from turning idle.
-                    // A restarted server has a new key and is checked again.
                     let every = match &checked.found {
                         Found {
                             web: Web::Page { .. },
@@ -159,7 +134,6 @@ impl Pages {
         self.checking.then_some(due)
     }
 
-    /// Records a round's results; true when any server's page changed.
     pub fn finish(&mut self, results: Vec<(Key, Found)>, now: u64) -> bool {
         self.checking = false;
         let mut changed = false;
@@ -179,8 +153,6 @@ impl Pages {
         self.checking = false;
     }
 
-    /// Adds what the checks found to the snapshot. A page's own icon wins
-    /// over the project's icon file.
     pub fn apply(&self, servers: &mut [Server]) {
         for server in servers {
             if let Some(checked) = self.checked.get(&server.id) {
@@ -193,7 +165,6 @@ impl Pages {
     }
 }
 
-/// Checks every target at once.
 pub fn check_all(targets: &[Target], icons: &Icons) -> Vec<(Key, Found)> {
     thread::scope(|scope| {
         let checks: Vec<_> = targets
@@ -226,7 +197,6 @@ fn check(address: SocketAddr, icons: &Icons) -> Found {
             }
         };
         let page = response.url().clone();
-        // The head comes first, so a long page still has its title.
         let head = is_html(&response)
             .then(|| read(response, MAX_HTML_BYTES))
             .flatten()
@@ -265,7 +235,6 @@ fn client(address: SocketAddr, scheme: Scheme) -> Option<(Client, Url)> {
         .user_agent("Ports")
         .tls_danger_accept_invalid_certs(true)
         .tls_danger_accept_invalid_hostnames(true)
-        // Only within the server: a redirect elsewhere says nothing more about it.
         .redirect(redirect::Policy::custom(|attempt| {
             let first = &attempt.previous()[0];
             if attempt.previous().len() < 5 && same_origin(attempt.url(), first) {
@@ -291,15 +260,12 @@ fn is_html(response: &Response) -> bool {
         .is_none_or(|value| value.to_ascii_lowercase().contains("text/html"))
 }
 
-/// Up to `limit` bytes of the body.
 fn read(response: Response, limit: u64) -> Option<Vec<u8>> {
     let mut body = Vec::new();
     response.take(limit).read_to_end(&mut body).ok()?;
     Some(body)
 }
 
-/// The icon the page links to on the same server, else `/favicon.ico`:
-/// Ports makes no request anywhere else.
 fn fetch_icon(client: &Client, page: &Url, href: Option<&str>, icons: &Icons) -> Option<Arc<Icon>> {
     let url = href
         .and_then(|href| page.join(href).ok())
@@ -321,22 +287,17 @@ fn fetch_icon(client: &Client, page: &Url, href: Option<&str>, icons: &Icons) ->
     if !mime.starts_with("image/") {
         return None;
     }
-    // A longer file isn't an icon, and a cut one wouldn't show.
     let bytes = read(response, icons::MAX_BYTES + 1)?;
     (!bytes.is_empty() && bytes.len() as u64 <= icons::MAX_BYTES)
         .then(|| icons.insert(&mime, bytes))
 }
 
-/// What Ports reads from a page's `<head>`.
 #[derive(Debug, Default, PartialEq)]
 struct Head {
     title: Option<String>,
-    /// The `href` of its icon link.
     icon: Option<String>,
 }
 
-/// Reads the title and icon link of an HTML page. Tags are found by name,
-/// case-insensitively, which is all a `<head>` needs.
 fn read_head(html: &str) -> Head {
     // ASCII lowercasing keeps every byte offset, so positions carry over to `html`.
     let lower = html.to_ascii_lowercase();
@@ -385,7 +346,6 @@ fn read_head(html: &str) -> Head {
     head
 }
 
-/// `name="value"`, `name='value'` and `name=value` pairs, names lowercased.
 fn attributes(tag: &str) -> HashMap<String, String> {
     let mut attributes = HashMap::new();
     let mut rest = tag.trim_start();
@@ -414,7 +374,6 @@ fn attributes(tag: &str) -> HashMap<String, String> {
             value = text.to_string();
             rest = remaining;
         } else if name.is_empty() {
-            // A stray `/` of a self-closing tag.
             rest = &rest[1.min(rest.len())..];
         }
         if !name.is_empty() {
@@ -425,17 +384,17 @@ fn attributes(tag: &str) -> HashMap<String, String> {
     attributes
 }
 
-/// The character references titles use; others stay as written.
+const MAX_REFERENCE_BYTES: usize = 12;
+
 fn decode_entities(text: &str) -> String {
     let mut decoded = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find('&') {
         decoded.push_str(&rest[..start]);
         rest = &rest[start..];
-        // References are short; looking further would make `&&&…` quadratic.
         let reference = rest
             .bytes()
-            .take(12)
+            .take(MAX_REFERENCE_BYTES)
             .position(|byte| byte == b';')
             .map(|end| (&rest[1..end], end));
         let character = reference.and_then(|(name, _)| match name {
@@ -505,7 +464,6 @@ mod tests {
         assert_eq!(read_head("not html at all"), Head::default());
     }
 
-    /// Answers `connections` requests with `answer`; the first line of each request goes to the returned channel.
     fn serve(
         listener: TcpListener,
         connections: usize,
@@ -541,7 +499,6 @@ mod tests {
     fn an_http_server_is_a_page_with_its_title_and_icon() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
-        // The HTTPS attempt, the page, then its icon.
         let server = serve(listener, 3, |line| match line {
             "GET / HTTP/1.1" => http(
                 "200 OK",
@@ -575,7 +532,6 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
-            // The page, then the icon it doesn't have.
             for status in ["200 OK", "404 Not Found"] {
                 let (stream, _) = listener.accept().unwrap();
                 let mut stream = acceptor.accept(stream).unwrap();
@@ -596,7 +552,6 @@ mod tests {
         server.join().unwrap();
     }
 
-    // A custom TCP service in a Vite project, or a database: it speaks its own protocol.
     #[test]
     fn a_tcp_service_that_does_not_speak_http_is_not_a_page() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -611,7 +566,6 @@ mod tests {
     #[test]
     fn a_closed_port_is_not_a_page() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        // Reserve a port nothing listens on.
         let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let address = client.local_addr().unwrap();
         assert_eq!(check(address, &Icons::default()).web, Web::None);
@@ -636,7 +590,6 @@ mod tests {
         )]
     }
 
-    /// Whether the server is due at `now`, as the only server in a fresh round.
     fn due_at(pages: &mut Pages, started_at: u64, now: u64) -> bool {
         pages.last_round_at = 0;
         let due = pages.due(vec![target("web", started_at)], now);
@@ -649,17 +602,14 @@ mod tests {
         let mut pages = Pages::default();
         let start = 1_000_000;
         assert!(pages.due(vec![target("web", start)], start).is_some());
-        // One round at a time.
         assert!(
             pages
                 .due(vec![target("web", start)], start + CHECK_EVERY_MS)
                 .is_none()
         );
-        // A server still starting gets another look soon.
         assert!(pages.finish(found(Web::None, false), start));
         assert!(!due_at(&mut pages, start, start + STARTING_RECHECK_MS - 1));
         assert!(due_at(&mut pages, start, start + STARTING_RECHECK_MS));
-        // Later, one that timed out sooner than one that answered something else.
         let later = start + STARTING_MS;
         pages.finish(found(Web::None, true), later);
         assert!(!due_at(&mut pages, start, later + STARTING_RECHECK_MS));
@@ -667,14 +617,12 @@ mod tests {
         assert!(!pages.finish(found(Web::None, false), later));
         assert!(!due_at(&mut pages, start, later + TIMED_OUT_RECHECK_MS));
         assert!(due_at(&mut pages, start, later + NO_PAGE_RECHECK_MS));
-        // A page isn't asked for again while the same server runs.
         let page = Web::Page {
             scheme: Scheme::Http,
             title: None,
         };
         assert!(pages.finish(found(page, false), later));
         assert!(!due_at(&mut pages, start, later + 100 * NO_PAGE_RECHECK_MS));
-        // A server that is gone is forgotten.
         assert!(
             pages
                 .due(Vec::new(), later + 101 * NO_PAGE_RECHECK_MS)

@@ -5,7 +5,6 @@
 
 @custom-variant dark (&:is(.dark *));
 
-/* Palette taken from Notion's app tokens (--c-*). The note marks the one value adjusted for contrast. */
 :root {
 	--background: #ffffff;
 	--foreground: #2c2c2b;
@@ -17,8 +16,6 @@
 	--primary-foreground: #ffffff;
 	--secondary: #f0efed;
 	--secondary-foreground: #2c2c2b;
-	/* Fills are translucent so they stay visible on any surface and stack, e.g. a button on a hovered row.
-	   On white these match Notion's button hover (#efefee) and pressed (#dfdfde). */
 	--muted: rgb(55 53 47 / 8%);
 	--muted-foreground: #7d7a75;
 	--selected: rgb(55 53 47 / 16%);
@@ -43,7 +40,6 @@
 	--sidebar-border: #f0efed;
 	--sidebar-ring: #2383e2;
 	--success: #46a171;
-	/* Notion's yellow (#d8a32f) is 2.3:1 on white; this keeps its hue at 4.6:1. */
 	--warning: #a8650f;
 	--surface-translucent: rgb(255 255 255 / 75%);
 	/* QR codes need dark modules on a light ground in both themes for phone cameras to read them. */
@@ -68,8 +64,6 @@
 	--primary-foreground: #ffffff;
 	--secondary: #2f2f2f;
 	--secondary-foreground: #f0efed;
-	/* On #191919 the hover fill matches Notion's dark hover (#2f2f2f). The selected fill sits a step above
-	   Notion's pressed (#383836) so selected and hovered segments stay apart on the popover. */
 	--muted: rgb(255 255 255 / 9.5%);
 	--muted-foreground: #ada9a3;
 	--selected: rgb(255 255 255 / 16%);
@@ -170,7 +164,6 @@
 	* {
 		@apply border-border outline-ring/50;
 	}
-	/* Native scrollbars that remain, e.g. in menus and dialogs, stay thin like the ScrollArea ones. */
 	html,
 	* {
 		scrollbar-width: thin;
@@ -181,10 +174,8 @@
 	}
 	html {
 		@apply font-sans antialiased;
-		/* Reserve the scrollbar lane so content doesn't jump when it appears or a dialog locks scroll. */
 		scrollbar-gutter: stable;
 	}
-	/* The menu bar popover window is transparent so the native material shows through. */
 	html:has([data-surface="tray"]),
 	html:has([data-surface="tray"]) body {
 		background: transparent;
@@ -203,7 +194,6 @@
 [data-sonner-toaster] [data-sonner-toast][data-visible="false"] {
 	pointer-events: none;
 }
-/* The close button sits at the end of the row, like a ghost icon button. */
 [data-sonner-toaster] [data-sonner-toast][data-styled="true"] [data-close-button] {
 	position: static;
 	order: 99;

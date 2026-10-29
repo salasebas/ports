@@ -23,12 +23,10 @@
 	function onkeydown(event: KeyboardEvent) {
 		if (!recording) return;
 		const plain = !event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey;
-		// Plain Tab still moves focus.
 		if (plain && event.key === "Tab") {
 			recording = false;
 			return;
 		}
-		// The key press is the shortcut, not a command for the popover or the window.
 		event.preventDefault();
 		event.stopPropagation();
 		if (plain && event.key === "Escape") {

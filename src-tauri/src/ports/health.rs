@@ -1,6 +1,3 @@
-//! Probes whether servers still answer, to spot one that holds its port but
-//! hangs, e.g. a dev server stuck in an infinite loop.
-
 use std::collections::HashSet;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -12,17 +9,13 @@ use super::network;
 use super::sampler::Server;
 
 pub const PROBE_EVERY_MS: u64 = 10_000;
-/// Generous enough for a dev server busy compiling, well below the interval.
 pub const TIMEOUT: Duration = Duration::from_secs(3);
 
-/// A snapshot service identity that did not answer its last probe.
 pub type Key = String;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Probe {
-    /// Web frameworks speak HTTP: one that accepts connections but never answers is hung.
     Http,
-    /// Databases and other servers speak their own protocols; only a connection is tried.
     Tcp,
 }
 
@@ -33,8 +26,6 @@ pub struct Target {
     probe: Probe,
 }
 
-/// Servers Ports runs a probe on: the processes it sees. Containers are
-/// left out, since the runtime's forwarder answers for them.
 pub fn target(server: &Server) -> Option<Target> {
     server.pid?;
     Some(Target {
@@ -44,7 +35,6 @@ pub fn target(server: &Server) -> Option<Target> {
     })
 }
 
-/// Probes every target at once and returns the ones that didn't answer.
 pub fn unresponsive(targets: &[Target]) -> HashSet<Key> {
     thread::scope(|scope| {
         let probes: Vec<_> = targets
@@ -67,8 +57,6 @@ pub fn unresponsive(targets: &[Target]) -> HashSet<Key> {
     })
 }
 
-/// Marks the servers that didn't answer as needing attention. An idle one
-/// stays idle, so clean up still stops a forgotten server that also hangs.
 pub fn apply(unresponsive: &HashSet<Key>, servers: &mut [Server]) {
     for server in servers {
         if unresponsive.contains(&server.id) {
@@ -80,9 +68,6 @@ pub fn apply(unresponsive: &HashSet<Key>, servers: &mut [Server]) {
     }
 }
 
-/// Whether the server at `address` answered in time; `None` when nothing
-/// listens there anymore. Any reply counts, an error or a closed connection
-/// included: only a process that can't run its event loop says nothing.
 fn probe(address: SocketAddr, probe: Probe, timeout: Duration) -> Option<bool> {
     let mut stream = match TcpStream::connect_timeout(&address, timeout) {
         Ok(stream) => stream,
@@ -138,16 +123,14 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         assert_eq!(probe(address, Probe::Http, SHORT), Some(false));
-        // Only an HTTP request can tell; the connection itself succeeds.
         assert_eq!(probe(address, Probe::Tcp, SHORT), Some(true));
     }
 
     #[test]
     fn a_free_port_has_nothing_to_probe() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        // Reserve the non-listening client port so parallel tests cannot take it.
-        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let address = client.local_addr().unwrap();
-        assert_eq!(probe(address, Probe::Http, SHORT), None);
+        let connection = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let nothing_listens = connection.local_addr().unwrap();
+        assert_eq!(probe(nothing_listens, Probe::Http, SHORT), None);
     }
 }

@@ -1,5 +1,3 @@
-//! TCP bindings and their owners. Numeric ports alone do not identify a service.
-
 use listeners::{Protocol, SocketState};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::net::{IpAddr, SocketAddr};
@@ -8,7 +6,6 @@ use std::net::{IpAddr, SocketAddr};
 pub struct Sockets {
     pub listening: BTreeMap<SocketAddr, BTreeSet<u32>>,
     pub unowned: BTreeMap<SocketAddr, Option<u32>>,
-    /// Ports whose `::` socket refuses IPv4 (`IPV6_V6ONLY`, nginx's `[::]` default).
     pub v6only: BTreeSet<u16>,
     established: HashSet<(u16, u32)>,
 }
@@ -358,7 +355,6 @@ mod proc_net {
         }
     }
 
-    /// (local address, uid) of the listening sockets in one table.
     pub fn parse(table: &str) -> Vec<(SocketAddr, u32)> {
         table
             .lines()
@@ -401,7 +397,6 @@ mod tests {
         );
     }
 
-    // A JVM server bound to 127.0.0.1 shows up in Linux's IPv6 table.
     #[test]
     fn reads_ipv4_mapped_addresses_as_ipv4() {
         let sockets =
@@ -417,7 +412,6 @@ mod tests {
         let sockets = Sockets::from_entries([
             (at("127.0.0.1:3000"), 10, SocketState::Listen),
             (at("127.0.0.1:3000"), 10, SocketState::Established),
-            // The browser's side of the same connection.
             (at("127.0.0.1:61000"), 99, SocketState::Established),
         ]);
         assert!(sockets.has_connections(3000, &BTreeSet::from([10])));
@@ -426,7 +420,6 @@ mod tests {
 
     #[test]
     fn reads_listeners_of_every_user_from_proc_net_tcp() {
-        // Postgres (uid 113) and sshd (root) listening, plus an established connection.
         let table = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
    0: 0100007F:1538 00000000:0000 0A 00000000:00000000 00:00000000 00000000   113        0 23154 1 0000000000000000 100 0 0 10 0
    1: 00000000:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 19876 1 0000000000000000 100 0 0 10 0
@@ -440,7 +433,6 @@ mod tests {
 
     #[test]
     fn reads_ipv6_addresses_from_proc_net_tcp6() {
-        // `::` and `::1` as an x86 kernel prints them.
         let table = "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
    0: 00000000000000000000000000000000:1F90 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 1 1 0000000000000000 100 0 0 10 0
    1: 00000000000000000000000001000000:0BB8 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 2 1 0000000000000000 100 0 0 10 0

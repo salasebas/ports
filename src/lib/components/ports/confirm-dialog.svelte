@@ -5,6 +5,7 @@
 	import { Checkbox } from "$lib/components/ui/checkbox";
 	import * as Field from "$lib/components/ui/field";
 	import { Spinner } from "$lib/components/ui/spinner";
+	import { LastShown } from "$lib/hooks/last-shown.svelte";
 	import type { PendingAction, PortsStore } from "$lib/ports/ports-store.svelte";
 	import { isHidden, mustConfirm } from "$lib/ports/ports-store.svelte";
 	import { preferences } from "$lib/ports/preferences.svelte";
@@ -21,19 +22,16 @@
 	const id = $props.id();
 	let dontAskAgain = $state(false);
 
-	// Short, opacity and transform only; nothing moves when the user asks for less motion.
 	const reduced = $derived(prefersReducedMotion.current);
-	/** Most previews arrive within a frame or two; the skeleton waits so it doesn't flash. */
-	const appear = $derived({ delay: 150, duration: reduced ? 0 : 150 });
+	const SPINNER_DELAY_MS = 150;
+	const appear = $derived({ delay: SPINNER_DELAY_MS, duration: reduced ? 0 : 150 });
 	const leave = $derived({ duration: reduced ? 0 : 120 });
 	const enter = $derived({ y: reduced ? 0 : 4, duration: reduced ? 0 : 200, easing: cubicOut });
 
-	/** Long lists fold into a count past this many rows. */
 	const SHOWN_ROWS = 6;
 
-	// Keeps the text in place while the dialog animates out.
-	let last: PendingAction | null = null;
-	const pending = $derived.by(() => (last = store.pending ?? last));
+	const shownAction = new LastShown(() => store.pending);
+	const pending = $derived(shownAction.current);
 
 	const titles: Record<PendingAction["action"], (p: PendingAction) => string> = {
 		stop: (p) => `Stop ${p.server.name}?`,
@@ -50,15 +48,12 @@
 		stopAll: "Stop all",
 	};
 
-	/** One line of the preview: a process, or a whole server for Stop all. */
 	interface Row {
 		key: string;
 		name: string;
 		ports: number[];
 		pids: number[];
-		/** How a supervisor stops it, when Ports goes through one. */
 		note?: string;
-		/** A supervisor Ports can't control may start it again. */
 		warning?: string;
 	}
 
@@ -78,7 +73,6 @@
 			}));
 		}
 		const [preview] = previews;
-		// A container has no processes of its own here; Docker stops it as a whole.
 		if (!preview.processes.length) return [{ key: server.id, name: server.name, ports: [server.port], pids: [] }];
 		return preview.processes.map((affected) => ({
 			key: processKey(affected.process),
@@ -91,7 +85,6 @@
 	const keys = $derived(
 		new Set(pending?.previews?.flatMap((preview) => preview.processes.map((p) => processKey(p.process))) ?? []),
 	);
-	/** Other servers these processes also run, including ones the list hides or protects. */
 	const alsoAffected = $derived(
 		store.servers.filter(
 			(server) =>
@@ -108,14 +101,14 @@
 	}
 
 	function managedNote(preview: ControlPreview) {
-		const managed = preview.supervisor?.supported ? preview.supervisor : undefined;
+		const managed = preview.supervisor?.controllable ? preview.supervisor : undefined;
 		if (managed?.kind === "homebrew") return "Through brew services, which also keeps it off at login";
 		if (managed?.kind === "pm2") return "Through PM2";
 	}
 
 	function respawnWarning(preview: ControlPreview) {
 		const found = preview.supervisor;
-		if (!found || found.supported) return;
+		if (!found || found.controllable) return;
 		return `${supervisorName(found)} may start it again; stop it there to keep it stopped`;
 	}
 
@@ -125,17 +118,17 @@
 		const { action, server, previews } = shown;
 		const grace = seconds(settings.current.stopGraceSeconds);
 		const managed = action === "stopAll" ? undefined : previews?.[0].supervisor;
-		if (managed?.supported && managed.kind === "homebrew") {
+		if (managed?.controllable && managed.kind === "homebrew") {
 			return action === "restart"
 				? `Homebrew restarts ${managed.name} with brew services restart.`
 				: `Homebrew stops ${managed.name} with brew services stop, which also keeps it from starting at login.`;
 		}
-		if (managed?.supported && managed.kind === "pm2") {
+		if (managed?.controllable && managed.kind === "pm2") {
 			return `PM2 ${action === "restart" ? "restarts" : "stops"} ${managed.name}.`;
 		}
 		switch (action) {
 			case "stopAll":
-				return previews?.some((preview) => preview.supervisor?.supported)
+				return previews?.some((preview) => preview.supervisor?.controllable)
 					? `Each gets ${grace} to exit before Ports kills it, unless its line says otherwise.`
 					: `Each gets ${grace} to exit before Ports kills it.`;
 			case "stop":
@@ -174,7 +167,6 @@
 				<AlertDialog.Description>{describe(pending)}</AlertDialog.Description>
 			</AlertDialog.Header>
 
-			<!-- Loading, error and preview share one cell, so they crossfade in place instead of jumping. -->
 			<div class="grid text-sm *:col-start-1 *:row-start-1" aria-live="polite" aria-busy={!previews && !error}>
 				{#if error}
 					<div in:fly={enter}>
@@ -185,7 +177,6 @@
 						</Alert.Root>
 					</div>
 				{:else if !previews}
-					<!-- Shows only when checking takes a moment, so a fast preview doesn't flash it. -->
 					<div class="flex h-10 items-center justify-center" in:fade|global={appear} out:fade={leave}>
 						<Spinner class="size-5 text-muted-foreground" aria-label="Checking what this would stop" />
 					</div>

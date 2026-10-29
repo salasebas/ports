@@ -30,7 +30,6 @@
 	const id = $props.id();
 	const desktop = isTauri();
 
-	/** Owned by the OS, so it's read whenever the window comes forward instead of stored. */
 	let openAtLogin = $state(false);
 
 	async function readOpenAtLogin() {
@@ -51,7 +50,6 @@
 	let scrollY = $state(0);
 
 	function onkeydown(event: KeyboardEvent) {
-		// The shortcut recorder and open menus handle Escape first and prevent default.
 		if (event.key === "Escape" && !event.defaultPrevented) void goto(resolve("/"));
 	}
 
