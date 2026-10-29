@@ -31,7 +31,8 @@ export const editors: { value: Editor; label: string }[] = [
 ];
 
 /**
- * User preferences. Both windows share this origin's localStorage, and
+ * Visual preferences. Hidden servers, protection and filters are rules the
+ * backend applies; see `$lib/rules.svelte`. Both windows share this origin's localStorage, and
  * PersistedState listens to storage events, so a change in one window
  * reaches the other.
  */
@@ -62,10 +63,6 @@ export const preferences = {
 	pinned: new PersistedState<string[]>("ports.pinned", []),
 	/** Names the user gave ports, by port number. */
 	names: new PersistedState<Record<string, string>>("ports.names", {}),
-	/** Ports (`port:5000`) and processes (`process:ControlCenter`) left out of the lists. */
-	hidden: new PersistedState<string[]>("ports.hidden", []),
-	/** The user's choice of which servers clean up skips, by `serverKey`, over the default (databases). */
-	protection: new PersistedState<Record<string, boolean>>("ports.protection", {}),
 };
 
 export const refreshIntervals: { value: number; label: string }[] = [

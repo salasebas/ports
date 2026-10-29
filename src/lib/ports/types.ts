@@ -129,6 +129,8 @@ export interface Server {
 	folder?: string;
 	/** Where the process runs, which may be below `folder` or outside any project. */
 	cwd?: string;
+	/** The folder the process runs in was deleted, such as a removed worktree. False when Ports can't tell. */
+	cwdDeleted: boolean;
 	/** The name the project's manifest gives it, which may differ from the folder's. */
 	projectName?: string;
 	branch?: string;
@@ -163,6 +165,8 @@ export interface Server {
 	lanHost?: string;
 	/** Protected servers are skipped by bulk clean up. */
 	protected: boolean;
+	/** Left out of both lists by the user's rules: hidden entries, the port range and the filters. */
+	hidden: boolean;
 	/** Ports can launch it again the same way; false for system services. */
 	restartable: boolean;
 	supervisor?: Supervisor;

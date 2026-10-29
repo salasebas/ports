@@ -1,6 +1,7 @@
 //! Servers listening on this machine: discovery, live sampling and control.
 
 mod alerts;
+pub mod autoclean;
 mod containers;
 mod control;
 mod health;
@@ -13,6 +14,7 @@ mod place;
 mod processes;
 mod project;
 pub mod pulls;
+pub mod rules;
 mod sampler;
 pub mod saved;
 mod session;
@@ -78,6 +80,15 @@ pub struct Monitor {
     alerts: Mutex<Alerts>,
     alert_settings: Mutex<AlertSettings>,
     stop_grace_secs: AtomicU64,
+    idle_after_ms: AtomicU64,
+    rules: Mutex<RulesState>,
+    auto: Mutex<autoclean::Runs>,
+}
+
+/// The rules every sample applies, and how many times they changed.
+struct RulesState {
+    revision: u64,
+    rules: rules::Rules,
 }
 
 /// What the latest health probes found, and when the next round is due.
@@ -95,7 +106,14 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Monitor {
-    pub fn new(home: PathBuf, alert_settings: AlertSettings, stop_grace_secs: u64) -> Self {
+    pub fn new(
+        home: PathBuf,
+        alert_settings: AlertSettings,
+        stop_grace_secs: u64,
+        idle_after_ms: u64,
+        rules: rules::Rules,
+        auto_log: PathBuf,
+    ) -> Self {
         let icons = Arc::new(Icons::default());
         Self {
             sampler: Mutex::new(Sampler::new(home.clone(), icons.clone())),
@@ -112,14 +130,37 @@ impl Monitor {
             alerts: Mutex::new(Alerts::default()),
             alert_settings: Mutex::new(alert_settings),
             stop_grace_secs: AtomicU64::new(clamp_grace(stop_grace_secs)),
+            idle_after_ms: AtomicU64::new(idle_after_ms),
+            rules: Mutex::new(RulesState { revision: 0, rules }),
+            auto: Mutex::new(autoclean::Runs::new(auto_log)),
         }
     }
 
     fn sample(&self) -> Result<Snapshot, String> {
-        let mut snapshot = lock(&self.sampler).sample()?;
+        let mut snapshot = {
+            let mut sampler = lock(&self.sampler);
+            sampler.idle_after_ms = self.idle_after_ms.load(Ordering::Relaxed);
+            sampler.sample()?
+        };
         lock(&self.pages).apply(&mut snapshot.servers);
         health::apply(&lock(&self.health).unresponsive, &mut snapshot.servers);
+        lock(&self.rules).rules.apply(&mut snapshot.servers);
         Ok(snapshot)
+    }
+
+    /// The rules and their revision.
+    pub fn rules(&self) -> (u64, rules::Rules) {
+        let state = lock(&self.rules);
+        (state.revision, state.rules.clone())
+    }
+
+    pub fn idle_after_ms(&self) -> u64 {
+        self.idle_after_ms.load(Ordering::Relaxed)
+    }
+
+    /// Takes effect with the next sample.
+    pub fn set_idle_after_ms(&self, ms: u64) {
+        self.idle_after_ms.store(ms, Ordering::Relaxed);
     }
 
     fn publish(&self, app: &AppHandle) -> Result<Snapshot, String> {
@@ -130,6 +171,7 @@ impl Monitor {
             eprintln!("could not send a snapshot: {error}");
         }
         self.alert(app, &snapshot);
+        self.clean_up_if_due(app, &snapshot);
         self.probe_if_due(app, &snapshot);
         self.check_pages_if_due(app, &snapshot);
         Ok(snapshot)
@@ -260,6 +302,11 @@ impl Monitor {
         self.wake.notify_one();
     }
 
+    /// Samples again now, whatever the refresh interval, so a changed setting shows at once.
+    pub fn wake_now(&self) {
+        self.wake();
+    }
+
     /// Samples now instead of at the end of the interval, so a window that
     /// appears shows fresh data; unless the user turned refreshing off.
     pub fn window_shown(&self) {
@@ -326,11 +373,55 @@ impl Monitor {
             lock(&self.latest).clone().ok_or(error)
         })
     }
+
+    /// Clean up, manual or automatic, stops a service only if a fresh sample
+    /// shows that every server the stop would end may go: none a supervisor
+    /// runs, the rules hide or the user protects, and each one `may_stop`
+    /// accepts. A sibling the user left out or hid keeps the whole tree running.
+    fn ensure_cleanable(
+        &self,
+        target: &Target,
+        may_stop: impl Fn(&sampler::Server) -> bool,
+    ) -> Result<(), String> {
+        let fresh = self.sample()?;
+        let selected = fresh
+            .servers
+            .iter()
+            .find(|server| {
+                server.target.as_ref().is_some_and(|current| {
+                    current.key() == target.key() && current.port() == target.port()
+                })
+            })
+            .ok_or("The server changed; refresh before cleaning up")?;
+        let mut affected = fresh.servers.iter().filter(|other| {
+            other
+                .target
+                .as_ref()
+                .is_some_and(|current| current.key() == target.key())
+                || other.resources.iter().any(|resource| {
+                    selected
+                        .resources
+                        .iter()
+                        .any(|ours| ours.process == resource.process)
+                })
+        });
+        // A supervisor keeps its services running on purpose; Homebrew's stop
+        // would also keep one from starting at login.
+        if affected.any(|server| {
+            server.supervisor.is_some() || server.hidden || server.protected || !may_stop(server)
+        }) {
+            return Err(
+                "The service is active or its affected ports changed; it was left running".into(),
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Bounds of the shutdown grace period, in seconds.
 pub const GRACE_SECS: RangeInclusive<u64> = 1..=60;
 pub const DEFAULT_GRACE_SECS: u64 = control::DEFAULT_GRACE.as_secs();
+pub const DEFAULT_IDLE_AFTER_MS: u64 = history::DEFAULT_IDLE_AFTER_MS;
 
 fn clamp_grace(secs: u64) -> u64 {
     secs.clamp(*GRACE_SECS.start(), *GRACE_SECS.end())
@@ -478,16 +569,20 @@ pub async fn preview_control(
 pub async fn stop_server(
     app: AppHandle,
     target: Target,
-    only_if_idle: Option<bool>,
+    clean_up: Option<bool>,
     allowed_ids: Option<Vec<String>>,
     force: Option<bool>,
     scope: Option<Scope>,
 ) -> Result<Snapshot, String> {
     blocking(move || {
         let monitor = app.state::<Monitor>();
-        // Sample before locating, so the stop ends what the idle check saw.
-        if only_if_idle.unwrap_or(false) {
-            ensure_idle(&monitor, &target, allowed_ids.as_deref())?;
+        // Sample before locating, so the stop ends what the check saw.
+        if clean_up.unwrap_or(false) {
+            let allowed = allowed_ids.unwrap_or_default();
+            monitor.ensure_cleanable(&target, |server| {
+                (server.status == history::Status::Idle || server.cwd_deleted)
+                    && allowed.contains(&server.id)
+            })?;
         }
         let shutdown = monitor.shutdown(force.unwrap_or(false));
         monitor.control(
@@ -501,49 +596,6 @@ pub async fn stop_server(
         )
     })
     .await
-}
-
-/// Clean up stops a service only if every port it would end is still idle
-/// and was offered to the user.
-fn ensure_idle(
-    monitor: &Monitor,
-    target: &Target,
-    allowed_ids: Option<&[String]>,
-) -> Result<(), String> {
-    let fresh = monitor.sample()?;
-    let selected = fresh
-        .servers
-        .iter()
-        .find(|server| {
-            server.target.as_ref().is_some_and(|current| {
-                current.key() == target.key() && current.port() == target.port()
-            })
-        })
-        .ok_or("The idle server changed; refresh before cleaning up")?;
-    let affected = fresh.servers.iter().filter(|other| {
-        other
-            .target
-            .as_ref()
-            .is_some_and(|current| current.key() == target.key())
-            || other.resources.iter().any(|resource| {
-                selected
-                    .resources
-                    .iter()
-                    .any(|ours| ours.process == resource.process)
-            })
-    });
-    // A supervisor keeps its services running on purpose; Homebrew's stop
-    // would also keep one from starting at login.
-    if affected.into_iter().any(|server| {
-        server.status != history::Status::Idle
-            || server.supervisor.is_some()
-            || !allowed_ids.is_some_and(|ids| ids.contains(&server.id))
-    }) {
-        return Err(
-            "The service is active or its affected ports changed; it was left running".into(),
-        );
-    }
-    Ok(())
 }
 
 #[tauri::command]

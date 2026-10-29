@@ -10,6 +10,7 @@ const value = (revision: number): Settings => ({
 	shortcut: `shortcut-${revision}`,
 	alerts: { enabled: true, thresholdBytes: null },
 	stopGraceSeconds: 3,
+	idleAfterMinutes: 5,
 });
 afterEach(() => {
 	clearMocks();

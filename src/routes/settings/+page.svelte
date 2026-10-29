@@ -4,7 +4,6 @@
 	import MonitorIcon from "@lucide/svelte/icons/monitor";
 	import MoonIcon from "@lucide/svelte/icons/moon";
 	import SunIcon from "@lucide/svelte/icons/sun";
-	import XIcon from "@lucide/svelte/icons/x";
 	import { isTauri } from "@tauri-apps/api/core";
 	import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 	import { setMode, userPrefersMode } from "mode-watcher";
@@ -12,18 +11,19 @@
 	import { toast } from "svelte-sonner";
 	import { goto } from "$app/navigation";
 	import { resolve } from "$app/paths";
-	import { Badge } from "$lib/components/ui/badge";
 	import { Button } from "$lib/components/ui/button";
 	import * as Card from "$lib/components/ui/card";
 	import * as Field from "$lib/components/ui/field";
 	import * as NativeSelect from "$lib/components/ui/native-select";
 	import { Switch } from "$lib/components/ui/switch";
 	import * as ToggleGroup from "$lib/components/ui/toggle-group";
+	import AutoCleanupSettings from "$lib/components/ports/auto-cleanup-settings.svelte";
+	import FilterRules from "$lib/components/ports/filter-rules.svelte";
 	import ShortcutRecorder from "$lib/components/ports/shortcut-recorder.svelte";
 	import { cn } from "$lib/utils";
-	import { hiddenLabel, setRefreshInterval, unhide } from "$lib/ports/ports-store.svelte";
+	import { setRefreshInterval } from "$lib/ports/ports-store.svelte";
 	import { editors, preferences, refreshIntervals } from "$lib/ports/preferences.svelte";
-	import { alertThresholds, settings, stopGraces, type AlertSettings } from "$lib/settings.svelte";
+	import { alertThresholds, idleThresholds, settings, stopGraces, type AlertSettings } from "$lib/settings.svelte";
 
 	type Mode = "light" | "dark" | "system";
 
@@ -70,6 +70,14 @@
 	async function setStopGrace(seconds: number) {
 		try {
 			await settings.setStopGrace(seconds);
+		} catch (error) {
+			toast.error(String(error));
+		}
+	}
+
+	async function setIdleAfter(minutes: number) {
+		try {
+			await settings.setIdleAfter(minutes);
 		} catch (error) {
 			toast.error(String(error));
 		}
@@ -212,6 +220,31 @@
 		{/snippet}
 		{@render section("Servers", servers)}
 
+		{#snippet cleanUp()}
+			<Field.Field orientation="horizontal">
+				<Field.Content>
+					<Field.Label for="{id}-idle">Idle after</Field.Label>
+					<Field.Description
+						>How long a server goes without connections or CPU before clean up offers it.</Field.Description
+					>
+				</Field.Content>
+				<NativeSelect.Root
+					id="{id}-idle"
+					size="sm"
+					class="w-36"
+					disabled={!desktop}
+					bind:value={() => String(settings.current.idleAfterMinutes), (value) => setIdleAfter(Number(value))}
+				>
+					{#each idleThresholds as threshold (threshold.value)}
+						<NativeSelect.Option value={threshold.value}>{threshold.label}</NativeSelect.Option>
+					{/each}
+				</NativeSelect.Root>
+			</Field.Field>
+			<Field.Separator />
+			<AutoCleanupSettings {id} disabled={!desktop} />
+		{/snippet}
+		{@render section("Clean up", cleanUp)}
+
 		{#snippet memory()}
 			<Field.Field orientation="horizontal">
 				<Field.Content>
@@ -248,36 +281,9 @@
 		{/snippet}
 		{@render section("Memory alerts", memory)}
 
-		{#snippet hidden()}
-			<Field.Field>
-				<Field.Content>
-					<Field.Title>Hidden servers</Field.Title>
-					<Field.Description>
-						{preferences.hidden.current.length
-							? "Left out of the window and the menu bar list. Remove one to show it again."
-							: "None yet. To hide one, open a server's details and choose Hide. It then leaves the window and the menu bar list."}
-					</Field.Description>
-				</Field.Content>
-				{#if preferences.hidden.current.length}
-					<div class="flex flex-wrap gap-1.5">
-						{#each preferences.hidden.current as entry (entry)}
-							<Badge variant="secondary" class="gap-0.5 pr-0.5">
-								{hiddenLabel(entry)}
-								<Button
-									variant="ghost"
-									size="icon-xs"
-									class="size-4 rounded-full"
-									aria-label="Show {hiddenLabel(entry)} again"
-									onclick={() => unhide(entry)}
-								>
-									<XIcon />
-								</Button>
-							</Badge>
-						{/each}
-					</div>
-				{/if}
-			</Field.Field>
+		{#snippet lists()}
+			<FilterRules {id} disabled={!desktop} />
 		{/snippet}
-		{@render section("Lists", hidden)}
+		{@render section("Lists", lists)}
 	</main>
 </div>

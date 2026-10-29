@@ -1,13 +1,16 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { homeDir } from "@tauri-apps/api/path";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { SvelteSet } from "svelte/reactivity";
 import { toast } from "svelte-sonner";
 import { canStop, serverUrl } from "./format";
 import { preferences, type SortKey } from "./preferences.svelte";
+import { rules, type RulesChange } from "$lib/rules.svelte";
 import { savedMatches, type SavedProject } from "./projects";
 import type { ControlPreview, ProcessIdentity, Server, Snapshot, SystemUsage } from "./types";
 import { allocateUsage, controlKey, sharesControl } from "./resources";
+import { hasPid, matchesSearch, portQuery } from "./search";
 
 /** Must match `SNAPSHOT_EVENT` in `src-tauri/src/ports/mod.rs`. */
 export const SNAPSHOT_EVENT = "ports://snapshot";
@@ -79,10 +82,13 @@ const target = (server: Server) => {
 	return server.target;
 };
 
-/** A project's ports share one key, so pinning or protecting one covers all of them. */
+/**
+ * A project's ports share one key, so pinning or protecting one covers all of
+ * them. Must match `rules::key` in `src-tauri/src/ports/rules.rs`.
+ */
 export const serverKey = (server: Server) => (server.folder ? `project:${server.folder}` : `port:${server.port}`);
 
-/** Entries of `preferences.hidden`: one port, or every port of a process. */
+/** Hidden entries of the rules: one port, or every port of a process. */
 export const hiddenPort = (port: number) => `port:${port}`;
 export const hiddenProcess = (process: string) => `process:${process}`;
 
@@ -95,27 +101,19 @@ const ascending: Record<SortKey, (a: Server, b: Server) => number> = {
 	uptime: (a, b) => b.startedAt - a.startedAt,
 };
 
-/** The server with the name and protection the user gave it, or the same object when there are none. */
+/** The server with the name the user gave it, or the same object when there is none. */
 function customize(server: Server): Server {
 	const name = preferences.names.current[server.port];
-	const isProtected = preferences.protection.current[serverKey(server)];
-	if (name === undefined && isProtected === undefined) return server;
-	return { ...server, name: name ?? server.name, protected: isProtected ?? server.protected };
-}
-
-export function unhide(entry: string) {
-	preferences.hidden.current = preferences.hidden.current.filter((e) => e !== entry);
+	return name === undefined ? server : { ...server, name };
 }
 
 /** `:5000` or `ControlCenter`, for the list of hidden entries. */
 export const hiddenLabel = (entry: string) => entry.replace(/^port:/, ":").replace(/^process:/, "");
 
-const idleCount = (n: number) => (n === 1 ? "1 idle server" : `${n} idle servers`);
+const serverCount = (n: number) => (n === 1 ? "1 server" : `${n} servers`);
 
-export function isHidden(server: Server) {
-	const hidden = preferences.hidden.current;
-	return hidden.includes(hiddenPort(server.port)) || hidden.includes(hiddenProcess(server.process));
-}
+/** Why clean up offers a server. */
+export const cleanUpReason = (server: Server) => (server.cwdDeleted ? "folder deleted" : "idle");
 
 /** UI state for the server list, fed by the snapshots the Rust backend publishes. */
 export class PortsStore {
@@ -131,8 +129,12 @@ export class PortsStore {
 	saved = $state.raw<SavedProject[]>([]);
 	/** Action waiting for the user to confirm it. */
 	pending = $state.raw<PendingAction | null>(null);
-	/** Idle servers clean up will stop once the user confirms. */
+	/** Servers clean up offers, while the user chooses which ones to stop. */
 	cleaning = $state.raw<Server[] | null>(null);
+	/** The ids of the offered servers the user chose to stop. Belongs to one clean up; never saved. */
+	cleanSelection = new SvelteSet<string>();
+	/** The home folder, so a search for a full path finds `~/…` folders. */
+	#home = $state<string | null>(null);
 	/** Server whose name the user is editing. */
 	renaming = $state.raw<Server | null>(null);
 	/** Work in progress, keyed by action and service identity. */
@@ -141,32 +143,34 @@ export class PortsStore {
 
 	#customized = $derived(this.servers.map(customize));
 
-	/** Servers of the kinds the user shows, without the ones they hid. */
+	/** Servers of the kinds the user shows, without the ones their rules hide. */
 	shown = $derived(
-		this.#customized.filter((server) => preferences.shownKinds.current.includes(server.kind) && !isHidden(server)),
+		this.#customized.filter((server) => preferences.shownKinds.current.includes(server.kind) && !server.hidden),
 	);
 
-	/** The shown servers matching the search: pinned ones first, then in the chosen order. */
+	/** The port a bare number searches for, or null. */
+	searchedPort = $derived(portQuery(this.query));
+
+	/**
+	 * Every server listening on the searched port, hidden ones included: the
+	 * question is who holds the port. Several when processes share it.
+	 */
+	portOwners = $derived.by(() => {
+		const port = this.searchedPort;
+		return port === null ? [] : this.#customized.filter((server) => server.port === port);
+	});
+
+	/**
+	 * The servers matching the search: pinned ones first, then in the chosen
+	 * order. A port number lists every owner of the port, and the shown
+	 * servers with that PID.
+	 */
 	filtered = $derived.by(() => {
-		const q = this.query.trim().toLowerCase();
-		const matching = q
-			? this.shown.filter((server) =>
-					[
-						server.port,
-						server.name,
-						server.process,
-						server.framework,
-						server.branch,
-						server.worktree,
-						server.repositoryName,
-						server.session?.label,
-						server.projectName,
-						server.web.state === "page" && server.web.title,
-					]
-						.filter(Boolean)
-						.some((field) => String(field).toLowerCase().includes(q)),
-				)
-			: this.shown;
+		const port = this.searchedPort;
+		const matching =
+			port !== null
+				? [...this.portOwners, ...this.shown.filter((server) => server.port !== port && hasPid(server, port))]
+				: this.shown.filter((server) => matchesSearch(server, this.query, this.#home));
 		const { key, descending } = preferences.sort.current;
 		const pinned = preferences.pinned.current;
 		const rank = (server: Server) => (pinned.includes(serverKey(server)) ? 0 : 1);
@@ -188,8 +192,12 @@ export class PortsStore {
 		this.saved.find((project) => project.matchedServerId === server.id) ??
 		this.saved.find((project) => project.folder === server.folder && project.expectedPort === server.port);
 
-	/** What clean up stops: shown idle servers Ports can stop, unless protected or kept running by a supervisor. */
-	idle = $derived(
+	/**
+	 * What clean up offers: shown servers Ports can stop that are idle or whose
+	 * folder was deleted, unless protected or kept running by a supervisor.
+	 * A stop ends the whole process tree, so every server sharing it must qualify.
+	 */
+	candidates = $derived(
 		this.shown.filter(
 			(server) =>
 				canStop(server) &&
@@ -197,10 +205,10 @@ export class PortsStore {
 					.filter((sibling) => sharesControl(server, sibling))
 					.every(
 						(sibling) =>
-							sibling.status === "idle" &&
+							(sibling.status === "idle" || sibling.cwdDeleted) &&
 							!sibling.protected &&
 							!sibling.supervisor &&
-							!isHidden(sibling) &&
+							!sibling.hidden &&
 							preferences.shownKinds.current.includes(sibling.kind),
 					),
 		),
@@ -241,6 +249,11 @@ export class PortsStore {
 				if (connected) toast.error(String(error));
 			});
 		void attempt(invoke("set_refresh_interval", { ms: preferences.refreshInterval.current }));
+		void homeDir()
+			.then((home) => {
+				if (connected) this.#home = home;
+			})
+			.catch(() => {});
 		return () => {
 			connected = false;
 			void unlisten.then((stop) => stop()).catch(() => {});
@@ -388,15 +401,26 @@ export class PortsStore {
 		preferences.names.current = trimmed && trimmed !== this.detectedName(port) ? { ...names, [port]: trimmed } : names;
 	};
 
-	setProtected = (server: Server, value: boolean) => {
-		preferences.protection.current = { ...preferences.protection.current, [serverKey(server)]: value };
+	/** Saves a rule change and shows the servers listed under the new rules. */
+	changeRules = async (change: RulesChange) => {
+		try {
+			this.apply(await rules.change(change));
+			return true;
+		} catch (error) {
+			toast.error(String(error));
+			return false;
+		}
 	};
 
-	hide = (entry: string) => {
-		if (!preferences.hidden.current.includes(entry))
-			preferences.hidden.current = [...preferences.hidden.current, entry];
-		if (this.selected && isHidden(this.selected)) this.selectedId = null;
+	setProtected = (server: Server, value: boolean) =>
+		this.changeRules({ kind: "protect", key: serverKey(server), value });
+
+	hide = async (entry: string) => {
+		await this.changeRules({ kind: "hide", entry });
+		if (this.selected?.hidden) this.selectedId = null;
 	};
+
+	unhide = (entry: string) => this.changeRules({ kind: "unhide", entry });
 
 	open = async (server: Server) => {
 		await attempt(openUrl(serverUrl(server)));
@@ -503,20 +527,23 @@ export class PortsStore {
 			const what = options.parent ? `${server.parent?.name ?? "the parent"} of ${server.name}` : server.name;
 			const verb = options.force ? ["Force killing", "Force killed"] : ["Stopping", "Stopped"];
 			const id = toast.loading(`${verb[0]} ${what}…`, { id: `stop-${server.id}` });
-			const error = await this.#stop(server, false, options);
+			const error = await this.#stop(server, null, options);
 			if (error) toast.error(error, { id });
 			else toast.success(`${verb[1]} ${what}`, { id, description: `:${server.port}` });
 		});
 
-	/** Stops the server and takes it off the list; returns why it couldn't. */
-	async #stop(server: Server, onlyIfIdle = false, options: StopOptions = {}): Promise<string | null> {
+	/**
+	 * Stops the server and takes it off the list; returns why it couldn't.
+	 * For clean up, the backend checks again that every server the stop
+	 * ends is one of `allowedIds` and still qualifies.
+	 */
+	async #stop(server: Server, allowedIds: string[] | null = null, options: StopOptions = {}): Promise<string | null> {
 		const { force, parent, confirmed } = options;
 		try {
 			this.apply(
 				await invoke<Snapshot>("stop_server", {
 					target: target(server),
-					onlyIfIdle,
-					...(onlyIfIdle ? { allowedIds: this.idle.map((row) => row.id) } : {}),
+					...(allowedIds ? { cleanUp: true, allowedIds } : {}),
 					...(force ? { force } : {}),
 					...(parent || confirmed ? { scope: { parent, confirmed } } : {}),
 				}),
@@ -528,17 +555,33 @@ export class PortsStore {
 		return null;
 	}
 
-	/** Asks once before stopping every idle server; protected ones are never listed. */
+	/** Offers every candidate, all chosen; protected ones are never listed. */
 	cleanUp = () => {
-		if (this.idle.length) this.cleaning = this.idle;
+		if (!this.candidates.length) return;
+		this.cleaning = this.candidates;
+		this.cleanSelection.clear();
+		for (const server of this.candidates) this.cleanSelection.add(server.id);
 	};
 
+	/** Chooses or leaves out a server, with every server sharing its processes: one stop ends them all. */
+	chooseForCleanUp = (server: Server, chosen: boolean) => {
+		for (const other of this.cleaning ?? []) {
+			if (!sharesControl(server, other)) continue;
+			if (chosen) this.cleanSelection.add(other.id);
+			else this.cleanSelection.delete(other.id);
+		}
+	};
+
+	/** Stops the chosen servers that still qualify; one that changed since the dialog opened keeps running. */
 	confirmCleanUp = async () => {
-		const captured = this.cleaning ?? [];
+		const captured = (this.cleaning ?? []).filter((server) => this.cleanSelection.has(server.id));
 		this.cleaning = null;
+		this.cleanSelection.clear();
 		const eligible = captured
 			.flatMap((old) => {
-				const current = this.idle.find((server) => server.id === old.id && controlKey(server) === controlKey(old));
+				const current = this.candidates.find(
+					(server) => server.id === old.id && controlKey(server) === controlKey(old),
+				);
 				return current ? [current] : [];
 			})
 			.toSorted((a, b) => b.resources.length - a.resources.length);
@@ -547,21 +590,22 @@ export class PortsStore {
 			if (!servers.some((chosen) => sharesControl(chosen, server))) servers.push(server);
 		}
 		if (!servers.length) return;
+		const allowed = eligible.map((server) => server.id);
 		// Count rows, like the dialog: one stop can end several ports of a process.
 		const rows = (stopped: Server[]) => eligible.filter((row) => stopped.some((s) => sharesControl(s, row))).length;
-		const id = toast.loading("Stopping " + idleCount(eligible.length) + "…", { id: "clean-up" });
+		const id = toast.loading("Stopping " + serverCount(eligible.length) + "…", { id: "clean-up" });
 		const results = await Promise.all(
-			servers.map((server) => this.#run(server, "control", () => this.#stop(server, true))),
+			servers.map((server) => this.#run(server, "control", () => this.#stop(server, allowed))),
 		);
 		const attempted = servers.filter((_, i) => results[i] !== undefined);
 		const errors = results.filter((result): result is string => typeof result === "string");
 		const failed = servers.filter((_, i) => typeof results[i] === "string");
-		if (!attempted.length) toast.info("No idle servers were stopped", { id });
+		if (!attempted.length) toast.info("No servers were stopped", { id });
 		else if (errors.length)
-			toast.error("Couldn't stop " + rows(failed) + " of " + idleCount(rows(attempted)), {
+			toast.error("Couldn't stop " + rows(failed) + " of " + serverCount(rows(attempted)), {
 				id,
 				description: errors[0],
 			});
-		else toast.success("Stopped " + idleCount(rows(attempted)), { id });
+		else toast.success("Stopped " + serverCount(rows(attempted)), { id });
 	};
 }

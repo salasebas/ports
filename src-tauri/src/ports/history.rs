@@ -12,7 +12,9 @@ const LEAK_MIN_BUCKETS: usize = 54;
 const LEAK_MIN_GROWTH_BYTES: f64 = 50.0 * 1024.0 * 1024.0;
 const LEAK_MIN_GROWTH_RATIO: f64 = 0.1;
 
-pub const IDLE_AFTER_MS: u64 = 5 * 60_000;
+/// How long a server goes without connections or CPU before it counts as
+/// idle, unless the user chose another threshold in the settings.
+pub const DEFAULT_IDLE_AFTER_MS: u64 = 5 * 60_000;
 /// Percent of one core; dev servers idle well below this, file watchers included.
 pub const ACTIVE_CPU_PERCENT: f64 = 1.0;
 
@@ -106,10 +108,10 @@ pub fn is_leaking(memory: &[u64], span: usize) -> bool {
     growth >= LEAK_MIN_GROWTH_BYTES.max(means[0] * LEAK_MIN_GROWTH_RATIO) && rises >= SLICES - 2
 }
 
-pub fn status(leaking: bool, now_ms: u64, last_active_at: u64) -> Status {
+pub fn status(leaking: bool, now_ms: u64, last_active_at: u64, idle_after_ms: u64) -> Status {
     if leaking {
         Status::Attention
-    } else if now_ms.saturating_sub(last_active_at) >= IDLE_AFTER_MS {
+    } else if now_ms.saturating_sub(last_active_at) >= idle_after_ms {
         Status::Idle
     } else {
         Status::Running
@@ -176,9 +178,24 @@ mod tests {
     #[test]
     fn idles_after_five_quiet_minutes() {
         let now = 60 * 60_000;
-        assert_eq!(status(false, now, now - 30 * 60_000), Status::Idle);
-        assert_eq!(status(false, now, now - 60_000), Status::Running);
-        assert_eq!(status(true, now, now - 30 * 60_000), Status::Attention);
+        let idle_after = DEFAULT_IDLE_AFTER_MS;
+        assert_eq!(
+            status(false, now, now - 30 * 60_000, idle_after),
+            Status::Idle
+        );
+        assert_eq!(
+            status(false, now, now - 60_000, idle_after),
+            Status::Running
+        );
+        assert_eq!(
+            status(true, now, now - 30 * 60_000, idle_after),
+            Status::Attention
+        );
+        // A longer threshold keeps the same server running.
+        assert_eq!(
+            status(false, now, now - 30 * 60_000, 60 * 60_000),
+            Status::Running
+        );
     }
 
     #[test]

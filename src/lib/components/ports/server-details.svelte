@@ -118,7 +118,12 @@
 					: server.repositoryName,
 			],
 			["Folder", server.folder],
-			["Runs in", server.cwd !== server.folder && server.cwd !== "/" && server.cwd],
+			[
+				"Runs in",
+				server.cwdDeleted
+					? `${server.cwd ?? "Its folder"} (deleted)`
+					: server.cwd !== server.folder && server.cwd !== "/" && server.cwd,
+			],
 			["Listens on", server.addresses.join(", ")],
 			["Command", server.command],
 		].filter((fact): fact is [string, string] => Boolean(fact[1])),

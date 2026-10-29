@@ -59,6 +59,7 @@
 		serverProcessId,
 	} from "$lib/ports/format";
 	import { listRows, toggleCollapsed, type GroupRow } from "$lib/ports/grouping";
+	import { ListKeyboard } from "$lib/ports/list-keyboard.svelte";
 	import { PortsStore } from "$lib/ports/ports-store.svelte";
 	import { preferences, sortKeys, type SortKey } from "$lib/ports/preferences.svelte";
 	import type { Server, ServerStatus } from "$lib/ports/types";
@@ -89,6 +90,7 @@
 	function showDetails(server: Server) {
 		lastSelected = server;
 		lastKind = "server";
+		keyboard.choose(server.id);
 		store.select(server.id);
 	}
 
@@ -122,6 +124,20 @@
 	}
 
 	const rows = $derived(listRows(store.filtered, preferences.groupBy.current, preferences.collapsedGroups.current));
+
+	let search = $state<HTMLInputElement | null>(null);
+	const keyboard = new ListKeyboard({
+		store,
+		rows: () => rows.flatMap((row) => (row.kind === "server" ? [row.server] : [])),
+		search: () => search,
+		details: showDetails,
+	});
+
+	/** Focus goes back to the row whose details closed, or the one now in its place. */
+	function restoreFocus(event: Event) {
+		event.preventDefault();
+		keyboard.restore(lastKind === "server" ? (lastSelected?.id ?? null) : null);
+	}
 
 	function toggleGroup(key: string) {
 		preferences.collapsedGroups.current = toggleCollapsed(preferences.collapsedGroups.current, key);
@@ -336,7 +352,7 @@
 	</Table.Cell>
 {/snippet}
 
-<svelte:window bind:scrollY />
+<svelte:window bind:scrollY onkeydown={keyboard.onkeydown} />
 
 <div class="flex min-h-screen flex-col">
 	<header
@@ -350,7 +366,7 @@
 			<Badge variant="secondary">{store.shown.length}</Badge>
 		</div>
 		<div class="ml-auto flex items-center gap-2">
-			<ServerSearch bind:value={store.query} class="w-64" />
+			<ServerSearch bind:value={store.query} bind:ref={search} class="w-64" />
 			<ServerFilter {store} />
 			{@render sortMenu()}
 			<CleanUpButton {store} />
@@ -393,10 +409,14 @@
 								<tr
 									data-slot="table-row"
 									class={server
-										? "group/row grid cursor-default grid-cols-(--cols) items-center border-b transition-colors hover:bg-muted/60 data-[state=selected]:bg-muted"
+										? "group/row grid cursor-default grid-cols-(--cols) items-center border-b transition-colors outline-none hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:ring-inset data-[state=selected]:bg-muted"
 										: "grid grid-cols-(--cols) border-b bg-muted/30"}
 									data-state={server && store.selectedId === server.id ? "selected" : undefined}
+									data-row-id={server?.id}
+									tabindex={server ? (keyboard.activeId === server.id ? 0 : -1) : undefined}
+									aria-label={server ? `${server.name} on port ${server.port}` : undefined}
 									onclick={server ? () => showDetails(server) : undefined}
+									onfocus={server ? () => keyboard.choose(server.id) : undefined}
 									animate:flip={{ duration: 220 * motion, easing: cubicOut }}
 									in:fade={{ duration: 180 * motion, delay: 60 * motion }}
 									out:fade={{ duration: 120 * motion }}
@@ -436,7 +456,11 @@
 		}
 	}
 >
-	<Drawer.Content class="w-[26rem] sm:max-w-[26rem]" onInteractOutside={keepOpenForToasts}>
+	<Drawer.Content
+		class="w-[26rem] sm:max-w-[26rem]"
+		onInteractOutside={keepOpenForToasts}
+		onCloseAutoFocus={restoreFocus}
+	>
 		<Drawer.Title class="sr-only">Server details</Drawer.Title>
 		<Drawer.Close>
 			{#snippet child({ props })}

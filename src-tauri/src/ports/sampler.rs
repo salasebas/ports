@@ -67,6 +67,9 @@ pub struct Server {
     /// Where the process runs, which may be below `folder` or outside any project.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// The folder the process runs in no longer exists, such as a removed
+    /// worktree. False when Ports can't tell, e.g. without permission to look.
+    pub cwd_deleted: bool,
     /// The name the project's manifest gives it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_name: Option<String>,
@@ -117,6 +120,8 @@ pub struct Server {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lan_host: Option<String>,
     pub protected: bool,
+    /// Left out of both lists by the user's rules: hidden entries, the port range and the name and command filters.
+    pub hidden: bool,
     pub restartable: bool,
     /// What starts it again when it exits, such as Homebrew or PM2.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -182,6 +187,8 @@ pub struct Sampler {
     tracked: HashMap<String, Tracked>,
     projects: ProjectFiles,
     revision: u64,
+    /// How long a server goes quiet before it counts as idle.
+    pub idle_after_ms: u64,
 }
 
 /// Project files read again only when they change: icons, shared with the
@@ -228,6 +235,7 @@ impl Sampler {
                 lockfiles: project::Lockfiles::default(),
             },
             revision: 0,
+            idle_after_ms: history::DEFAULT_IDLE_AFTER_MS,
         }
     }
 
@@ -368,7 +376,10 @@ impl Sampler {
                     session,
                 },
                 tracked,
-                now,
+                Clock {
+                    now,
+                    idle_after_ms: self.idle_after_ms,
+                },
             ) {
                 servers.push(server);
             }
@@ -434,6 +445,12 @@ impl Sampler {
     }
 }
 
+/// When a sample runs, and how long a server goes quiet before it counts as idle.
+struct Clock {
+    now: u64,
+    idle_after_ms: u64,
+}
+
 struct Service {
     supervisor: Option<Supervisor>,
     parent: Option<ParentProcess>,
@@ -465,7 +482,7 @@ fn describe(
     sockets: &Sockets,
     service: Service,
     tracked: &mut Tracked,
-    now: u64,
+    Clock { now, idle_after_ms }: Clock,
 ) -> Option<Server> {
     let Service {
         supervisor,
@@ -491,13 +508,14 @@ fn describe(
     tracked.history.record(now, memory_bytes, cpu_percent);
     let memory_history = tracked.history.memory();
     let leaking = history::is_leaking(&memory_history, tracked.history.span());
-    let status = history::status(leaking, now, tracked.last_active_at);
+    let status = history::status(leaking, now, tracked.last_active_at, idle_after_ms);
 
     let cwd = listener
         .cwd()
         .or_else(|| root.cwd())
-        .filter(|_| !listener.exe().is_some_and(project::is_app_bundle))
-        .map(project::canonical);
+        .filter(|_| !listener.exe().is_some_and(project::is_app_bundle));
+    let cwd_deleted = cwd.is_some_and(project::is_deleted);
+    let cwd = cwd.map(|cwd| project::canonical(&project::without_deleted_mark(cwd)));
     let project = cwd
         .as_deref()
         .and_then(|cwd| project::project_folder(cwd, home));
@@ -561,6 +579,7 @@ fn describe(
         session,
         folder: folder.map(|f| project::display_path(f, home)),
         cwd: cwd.as_deref().map(|cwd| project::display_path(cwd, home)),
+        cwd_deleted,
         project_name: folder.and_then(project::manifest_name),
         framework,
         framework_version: framework.zip(folder).and_then(|(framework, folder)| {
@@ -570,6 +589,7 @@ fn describe(
         web: Web::Unknown,
         icon: folder.and_then(|folder| projects.key(folder)),
         protected: matches!(kind, Kind::Database),
+        hidden: false,
         // A supervisor restarts what it runs; Ports only through one it supports.
         restartable: supervisor
             .as_ref()
@@ -624,6 +644,7 @@ fn unowned(port: u16, owner: String, first_seen: u64) -> Server {
         container: None,
         folder: None,
         cwd: None,
+        cwd_deleted: false,
         project_name: None,
         branch: None,
         worktree: None,
@@ -638,6 +659,7 @@ fn unowned(port: u16, owner: String, first_seen: u64) -> Server {
         web: Web::Unknown,
         icon: None,
         protected: matches!(kind, Kind::Database),
+        hidden: false,
         restartable: false,
         supervisor: None,
         parent: None,
@@ -692,6 +714,7 @@ fn contained(port: u16, container: &Container) -> Server {
         command: container.image.clone(),
         folder: None,
         cwd: None,
+        cwd_deleted: false,
         project_name: None,
         branch: None,
         worktree: None,
@@ -706,6 +729,7 @@ fn contained(port: u16, container: &Container) -> Server {
         web: Web::Unknown,
         icon: None,
         protected: framework.is_some_and(project::is_database),
+        hidden: false,
         restartable: true,
         supervisor: None,
         parent: None,

@@ -12,6 +12,8 @@ function server(overrides: Partial<Server> & Pick<Server, "port" | "name">): Ser
 		addresses: ["127.0.0.1"],
 		exposed: false,
 		protected: false,
+		hidden: false,
+		cwdDeleted: false,
 		restartable: true,
 		attribution: { confidence: "unknown", evidence: [] },
 		web: { state: "unknown" },

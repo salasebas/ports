@@ -88,10 +88,18 @@ pub fn run() {
             app.manage(ports::saved::Projects::open(app.handle()));
             app.manage(ports::pulls::PullCache::default());
 
+            let log_dir = app
+                .path()
+                .app_log_dir()
+                .or_else(|_| app.path().app_data_dir())?;
+            std::fs::create_dir_all(&log_dir)?;
             app.manage(ports::Monitor::new(
                 app.path().home_dir()?,
                 settings::alerts(app.handle()),
                 settings::stop_grace_seconds(app.handle()),
+                settings::idle_after_ms(app.handle()),
+                ports::rules::load(app.handle()),
+                log_dir.join("auto-cleanup.log"),
             ));
             ports::start(app.handle())?;
             ports::open_alerts_on_click(app.handle(), show_main);
@@ -166,9 +174,13 @@ pub fn run() {
             ports::saved::project_log,
             ports::pulls::pull_request,
             ports::reveal_session,
+            ports::rules::get_rules,
+            ports::rules::update_rules,
+            ports::autoclean::auto_cleanup_log,
             settings::get_settings,
             settings::set_alerts,
             settings::set_stop_grace,
+            settings::set_idle_after,
             settings::set_shortcut,
         ])
         .build(tauri::generate_context!())

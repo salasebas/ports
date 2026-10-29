@@ -324,6 +324,27 @@ pub fn project_folder(cwd: &Path, home: &Path) -> Option<Project> {
         })
 }
 
+/// Linux names a working directory that was removed `<path> (deleted)`.
+const DELETED_MARK: &str = " (deleted)";
+
+/// Whether a process's working directory was removed, such as a worktree
+/// deleted while its server kept running. Only a missing folder counts: a
+/// folder Ports may not read is not reported as deleted.
+pub fn is_deleted(cwd: &Path) -> bool {
+    if cwd.to_string_lossy().ends_with(DELETED_MARK) {
+        return true;
+    }
+    matches!(fs::symlink_metadata(cwd), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+}
+
+/// The path without Linux's `(deleted)` mark.
+pub fn without_deleted_mark(cwd: &Path) -> PathBuf {
+    match cwd.to_string_lossy().strip_suffix(DELETED_MARK) {
+        Some(path) => PathBuf::from(path),
+        None => cwd.to_path_buf(),
+    }
+}
+
 /// The path with symlinked aliases resolved, so each folder has one name. A
 /// deleted folder can't be resolved and stays as it is: its parents may
 /// still hold the project.
@@ -1297,5 +1318,36 @@ mod tests {
             display_command(&cmd("/usr/bin/redis-server 127.0.0.1:6379")),
             "redis-server 127.0.0.1:6379"
         );
+    }
+
+    #[test]
+    fn tells_a_deleted_working_folder_from_one_it_cannot_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("worktree");
+        fs::create_dir(&worktree).unwrap();
+        assert!(!is_deleted(&worktree));
+        fs::remove_dir(&worktree).unwrap();
+        assert!(is_deleted(&worktree));
+        assert!(is_deleted(Path::new("/proc/1/cwd/gone (deleted)")));
+        assert_eq!(
+            without_deleted_mark(Path::new("/srv/app (deleted)")),
+            PathBuf::from("/srv/app")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn does_not_call_an_unreadable_folder_deleted() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        let inside = locked.join("project");
+        fs::create_dir_all(&inside).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        // Root reads anything, so the case only exists for other users.
+        let readable = fs::symlink_metadata(&inside).is_ok();
+        let deleted = is_deleted(&inside);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(readable || !deleted);
     }
 }

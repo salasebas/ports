@@ -6,9 +6,9 @@
 
 	let { store }: { store: PortsStore } = $props();
 
-	const count = $derived(store.idle.length);
+	const count = $derived(store.candidates.length);
 	const label = $derived(
-		count === 0 ? "No idle servers to clean up" : `Clean up ${count === 1 ? "1 idle server" : `${count} idle servers`}`,
+		count === 0 ? "Nothing to clean up" : `Clean up: choose from ${count === 1 ? "1 server" : `${count} servers`}`,
 	);
 </script>
 

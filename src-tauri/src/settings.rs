@@ -14,6 +14,9 @@ const STORE: &str = "settings.json";
 pub const SHORTCUT: &str = "shortcut";
 const ALERTS: &str = "alerts";
 const STOP_GRACE: &str = "stopGraceSeconds";
+const IDLE_AFTER: &str = "idleAfterMinutes";
+/// The idle thresholds the settings offer, in minutes. Must match `src/lib/settings.svelte.ts`.
+const IDLE_AFTER_MINUTES: [u64; 6] = [5, 10, 15, 30, 60, 120];
 /// Carries `Settings` to every window when one changes. Must match `src/lib/settings.svelte.ts`.
 const SETTINGS_EVENT: &str = "ports://settings";
 
@@ -27,6 +30,8 @@ pub struct Settings {
     alerts: AlertSettings,
     /// How long Stop waits for a server to exit before it kills it.
     stop_grace_seconds: u64,
+    /// How long a server goes without connections or CPU before it counts as idle.
+    idle_after_minutes: u64,
 }
 
 /// The stored value of `key`, or `None` when it was never set or can't be read.
@@ -85,6 +90,15 @@ pub fn stop_grace_seconds(app: &AppHandle) -> u64 {
     read(app, STOP_GRACE).unwrap_or(crate::ports::DEFAULT_GRACE_SECS)
 }
 
+/// The saved idle threshold, in milliseconds.
+pub fn idle_after_ms(app: &AppHandle) -> u64 {
+    read::<u64, _>(app, IDLE_AFTER)
+        .filter(|minutes| IDLE_AFTER_MINUTES.contains(minutes))
+        .map_or(crate::ports::DEFAULT_IDLE_AFTER_MS, |minutes| {
+            minutes * 60_000
+        })
+}
+
 fn current(app: &AppHandle, revision: u64) -> Settings {
     #[cfg(desktop)]
     let shortcut = crate::shortcut::current(app);
@@ -95,6 +109,7 @@ fn current(app: &AppHandle, revision: u64) -> Settings {
         shortcut,
         alerts: app.state::<Monitor>().alert_settings(),
         stop_grace_seconds: app.state::<Monitor>().stop_grace_secs(),
+        idle_after_minutes: app.state::<Monitor>().idle_after_ms() / 60_000,
     }
 }
 
@@ -144,6 +159,24 @@ pub fn set_stop_grace(app: AppHandle, seconds: u64) -> Result<Settings, String> 
     );
     write(&app, STOP_GRACE, seconds)?;
     monitor.set_stop_grace_secs(seconds);
+    *revision += 1;
+    Ok(broadcast(&app, *revision))
+}
+
+/// Shared by both windows and clean up; the next sample uses it.
+#[tauri::command]
+pub fn set_idle_after(app: AppHandle, minutes: u64) -> Result<Settings, String> {
+    if !IDLE_AFTER_MINUTES.contains(&minutes) {
+        return Err(format!(
+            "{minutes} minutes is not an idle time Ports offers"
+        ));
+    }
+    let state = app.state::<Changes>();
+    let mut revision = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    write(&app, IDLE_AFTER, minutes)?;
+    let monitor = app.state::<Monitor>();
+    monitor.set_idle_after_ms(minutes * 60_000);
+    monitor.wake_now();
     *revision += 1;
     Ok(broadcast(&app, *revision))
 }

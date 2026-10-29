@@ -10,6 +10,7 @@
 	import { Toaster } from "$lib/components/ui/sonner";
 	import * as Tooltip from "$lib/components/ui/tooltip";
 	import { isMac } from "$lib/platform";
+	import { rules } from "$lib/rules.svelte";
 	import { openSettings, settings } from "$lib/settings.svelte";
 
 	let { children } = $props();
@@ -21,6 +22,7 @@
 
 	onMount(() => {
 		settings.load();
+		rules.load();
 		// Settings and details are pages of the main window, whichever page it shows.
 		if (!isTauri() || getCurrentWindow().label !== "main") return;
 		const listening = [

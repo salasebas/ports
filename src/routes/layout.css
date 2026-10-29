@@ -105,6 +105,14 @@
 	--port-6: #de9255;
 }
 
+/* Focus rings follow the system accent color where the web view knows it. */
+@supports (color: AccentColor) {
+	:root,
+	.dark {
+		--ring: AccentColor;
+	}
+}
+
 @media (prefers-reduced-transparency: reduce) {
 	:root,
 	.dark {
