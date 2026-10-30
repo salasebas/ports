@@ -21,7 +21,7 @@
 	import ShortcutRecorder from "$lib/components/ports/shortcut-recorder.svelte";
 	import { cn } from "$lib/utils";
 	import { setRefreshInterval } from "$lib/ports/ports-store.svelte";
-	import { editors, preferences, refreshIntervals } from "$lib/ports/preferences.svelte";
+	import { editors, groupHeaderSizes, preferences, refreshIntervals } from "$lib/ports/preferences.svelte";
 	import { alertThresholds, idleThresholds, settings, stopGraces, type AlertSettings } from "$lib/settings.svelte";
 
 	type Mode = "light" | "dark" | "system";
@@ -276,6 +276,15 @@
 		{@render section("Memory alerts", memory)}
 
 		{#snippet lists()}
+			<Field.Field orientation="horizontal">
+				<Field.Label for="{id}-group-headers">Group headers</Field.Label>
+				<NativeSelect.Root id="{id}-group-headers" size="sm" class="w-36" bind:value={preferences.groupHeaders.current}>
+					{#each groupHeaderSizes as size (size.value)}
+						<NativeSelect.Option value={size.value}>{size.label}</NativeSelect.Option>
+					{/each}
+				</NativeSelect.Root>
+			</Field.Field>
+			<Field.Separator />
 			<FilterRules {id} disabled={!desktop} />
 		{/snippet}
 		{@render section("Lists", lists)}

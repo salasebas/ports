@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { groupByFromStorage, listRows, toggleCollapsed, type GroupRow, type ListRow } from "./grouping";
+import { groupByFromStorage, groupKeys, listRows, toggleCollapsed, type GroupRow, type ListRow } from "./grouping";
 import type { Server } from "./types";
 
 function server(overrides: Partial<Server> & Pick<Server, "port" | "name">): Server {
@@ -152,4 +152,28 @@ describe("groupByFromStorage", () => {
 		expect(groupByFromStorage(null, "false")).toBe("flat");
 		expect(groupByFromStorage(JSON.stringify("repository"), "true")).toBe("repository");
 	});
+});
+
+it("collects every group key, worktrees included, so collapse all reaches nested groups", () => {
+	const checkout = server({
+		port: 3000,
+		name: "web",
+		folder: "~/repo",
+		repositoryId: "~/repo/.git",
+		worktreePath: "~/repo",
+	});
+	const linked = server({
+		port: 3001,
+		name: "web",
+		folder: "~/hotfix",
+		repositoryId: "~/repo/.git",
+		worktreePath: "~/hotfix",
+		worktree: "hotfix",
+	});
+	expect(groupKeys([checkout, linked], "repository")).toEqual([
+		"repo:~/repo/.git",
+		"worktree:~/repo/.git:~/repo",
+		"worktree:~/repo/.git:~/hotfix",
+	]);
+	expect(groupKeys([checkout, linked], "flat")).toEqual([]);
 });

@@ -21,6 +21,13 @@ export const sortKeys: { value: SortKey; label: string; descending: boolean }[] 
 	{ value: "uptime", label: "Uptime", descending: true },
 ];
 
+export type GroupHeaders = "compact" | "tall";
+
+export const groupHeaderSizes: { value: GroupHeaders; label: string }[] = [
+	{ value: "compact", label: "Compact" },
+	{ value: "tall", label: "Same as rows" },
+];
+
 export type Editor = "cursor" | "vscode" | "zed";
 
 export const editors: { value: Editor; label: string }[] = [
@@ -41,6 +48,7 @@ export const preferences = {
 		groupByFromStorage(null, typeof localStorage === "undefined" ? null : localStorage.getItem("ports.groupByProject")),
 	),
 	collapsedGroups: new PersistedState<string[]>("ports.collapsedGroups", []),
+	groupHeaders: new PersistedState<GroupHeaders>("ports.groupHeaders", "compact"),
 	pinned: new PersistedState<string[]>("ports.pinned", []),
 	names: new PersistedState<Record<string, string>>("ports.names", {}),
 };

@@ -12,6 +12,8 @@
 	import ArrowUpIcon from "@lucide/svelte/icons/arrow-up";
 	import ArrowUpRightIcon from "@lucide/svelte/icons/arrow-up-right";
 	import ChevronDownIcon from "@lucide/svelte/icons/chevron-down";
+	import ChevronsDownUpIcon from "@lucide/svelte/icons/chevrons-down-up";
+	import ChevronsUpDownIcon from "@lucide/svelte/icons/chevrons-up-down";
 	import ChevronRightIcon from "@lucide/svelte/icons/chevron-right";
 	import ClockIcon from "@lucide/svelte/icons/clock";
 	import CpuIcon from "@lucide/svelte/icons/cpu";
@@ -58,7 +60,7 @@
 		serverActivity,
 		serverProcessId,
 	} from "$lib/ports/format";
-	import { listRows, toggleCollapsed, type GroupRow } from "$lib/ports/grouping";
+	import { groupKeys, listRows, toggleCollapsed, type GroupRow } from "$lib/ports/grouping";
 	import { ListKeyboard } from "$lib/ports/list-keyboard.svelte";
 	import { PortsStore } from "$lib/ports/ports-store.svelte";
 	import { preferences, sortKeys, type SortKey } from "$lib/ports/preferences.svelte";
@@ -135,6 +137,14 @@
 
 	function toggleGroup(key: string) {
 		preferences.collapsedGroups.current = toggleCollapsed(preferences.collapsedGroups.current, key);
+	}
+
+	const groups = $derived(groupKeys(store.filtered, preferences.groupBy.current));
+	const allCollapsed = $derived(groups.every((key) => preferences.collapsedGroups.current.includes(key)));
+
+	function toggleAllGroups() {
+		const others = preferences.collapsedGroups.current.filter((key) => !groups.includes(key));
+		preferences.collapsedGroups.current = allCollapsed ? others : [...others, ...groups];
 	}
 </script>
 
@@ -233,24 +243,36 @@
 {#snippet groupCell(row: GroupRow)}
 	{@const collapsed = preferences.collapsedGroups.current.includes(row.key)}
 	{@const Chevron = collapsed ? ChevronRightIcon : ChevronDownIcon}
-	<td class="col-span-full flex min-w-0 items-center px-5 py-1 text-xs text-muted-foreground">
+	{@const place = [row.detail, row.path].filter(Boolean).join(" · ")}
+	{@const tall = preferences.groupHeaders.current === "tall"}
+	<td class={cn("col-span-full flex min-w-0 items-center px-5 text-xs text-muted-foreground", tall ? "py-3" : "py-1")}>
 		<button
 			type="button"
-			class="flex min-w-0 flex-1 items-center gap-2 rounded-md py-1 text-start {row.depth === 1 ? 'ps-6' : ''}"
+			class={cn(
+				"flex min-w-0 flex-1 items-center rounded-md text-start",
+				tall ? "gap-3" : "gap-2 py-1",
+				row.depth === 1 && "ps-6",
+			)}
 			aria-expanded={!collapsed}
 			onclick={(event: MouseEvent) => {
 				event.stopPropagation();
 				toggleGroup(row.key);
 			}}
 		>
-			<Chevron class="size-3.5 shrink-0 opacity-70" />
-			<FolderIcon class="size-3.5 shrink-0 opacity-70" />
-			<span class="shrink-0 font-medium text-foreground">{row.name}</span>
-			{#if row.detail}
-				<span class="shrink-0">{row.detail}</span>
-			{/if}
-			{#if row.path}
-				<span class="truncate">{row.path}</span>
+			<Chevron class={cn("shrink-0 opacity-70", tall ? "size-4" : "size-3.5")} />
+			<FolderIcon class={cn("shrink-0 opacity-70", tall ? "size-4" : "size-3.5")} />
+			{#if tall}
+				<span class="flex min-h-9.5 min-w-0 flex-col justify-center gap-0.5">
+					<span class="truncate text-sm font-medium text-foreground">{row.name}</span>
+					{#if place}
+						<span class="truncate">{place}</span>
+					{/if}
+				</span>
+			{:else}
+				<span class="shrink-0 font-medium text-foreground">{row.name}</span>
+				{#if place}
+					<span class="truncate">{place}</span>
+				{/if}
 			{/if}
 			<span class="ms-auto shrink-0 font-mono tabular-nums">
 				{row.count} · {formatBytesText(row.memoryBytes)} · {Math.round(row.cpuPercent)}%
@@ -363,6 +385,13 @@
 				<ServerSearch bind:value={store.query} bind:ref={search} class="w-64" />
 				<ServerFilter {store} />
 				{@render sortMenu()}
+				{#if groups.length}
+					{@render action(
+						allCollapsed ? "Expand all groups" : "Collapse all groups",
+						allCollapsed ? ChevronsUpDownIcon : ChevronsDownUpIcon,
+						toggleAllGroups,
+					)}
+				{/if}
 				<CleanUpButton {store} />
 				{@render action("Refresh", RefreshCwIcon, store.refresh)}
 				<SettingsButton />

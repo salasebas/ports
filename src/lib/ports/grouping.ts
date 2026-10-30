@@ -60,6 +60,10 @@ export function toggleCollapsed(current: readonly string[], key: string): string
 	return current.includes(key) ? current.filter((item) => item !== key) : [...current, key];
 }
 
+export function groupKeys(servers: Server[], mode: GroupBy): string[] {
+	return listRows(servers, mode, []).flatMap((row) => (row.kind === "server" ? [] : [row.key]));
+}
+
 export function listRows(servers: Server[], mode: GroupBy, collapsed: readonly string[]): ListRow[] {
 	if (mode === "flat") return servers.map((server) => ({ kind: "server", key: server.id, server }));
 	if (mode === "project") return projectRows(servers, collapsed);
