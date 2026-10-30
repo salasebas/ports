@@ -111,7 +111,7 @@ describe("repository grouping", () => {
 		const rows = listRows([web, postgres, redis], "repository", []);
 		expect(named(rows, "worktree").map((row) => row.name)).toEqual(["repo"]);
 		expect(rows.slice(-3)).toMatchObject([
-			{ kind: "repository", name: "Outside a repository", count: 2 },
+			{ kind: "repository", name: "Other", count: 2 },
 			{ kind: "server", key: postgres.id },
 			{ kind: "server", key: redis.id },
 		]);
@@ -135,7 +135,7 @@ describe("repository grouping", () => {
 		const b1 = server({ port: 3000, name: "b", folder: "~/b" });
 		const a2 = server({ port: 4000, name: "a", folder: "~/a" });
 		const rows = listRows([loose, a1, b1, a2], "project", []);
-		expect(named(rows, "project").map((row) => row.name)).toEqual(["a", "b", "Outside a project"]);
+		expect(named(rows, "project").map((row) => row.name)).toEqual(["a", "b", "Other"]);
 		expect(rows.flatMap((row) => (row.kind === "server" ? [row.server.port] : []))).toEqual([2000, 4000, 3000, 1000]);
 	});
 
