@@ -75,8 +75,7 @@ function projectRows(servers: Server[], collapsed: readonly string[]): ListRow[]
 	for (const server of servers) {
 		const key = `project:${server.folder ?? ""}`;
 		const group =
-			groups.get(key) ??
-			bucket(key, server.folder?.split("/").filter(Boolean).at(-1) ?? "Other", server.folder);
+			groups.get(key) ?? bucket(key, server.folder?.split("/").filter(Boolean).at(-1) ?? "Other", server.folder);
 		group.servers.push(server);
 		groups.set(key, group);
 	}
@@ -89,8 +88,7 @@ function repositoryRows(servers: Server[], collapsed: readonly string[]): ListRo
 	for (const server of servers) {
 		const repoId = server.repositoryId ?? "";
 		const repoKey = `repo:${repoId}`;
-		const repo =
-			repos.get(repoKey) ?? bucket(repoKey, server.repositoryName ?? "Other", server.repository);
+		const repo = repos.get(repoKey) ?? bucket(repoKey, server.repositoryName ?? "Other", server.repository);
 		repo.servers.push(server);
 		repos.set(repoKey, repo);
 		if (!repoId) continue;

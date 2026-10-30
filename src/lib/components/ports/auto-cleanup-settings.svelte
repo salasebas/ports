@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from "svelte";
+	import { toast } from "svelte-sonner";
 	import * as Field from "$lib/components/ui/field";
 	import * as NativeSelect from "$lib/components/ui/native-select";
 	import { Switch } from "$lib/components/ui/switch";
@@ -35,9 +36,10 @@
 		return elapsed === "now" ? "just now" : `${elapsed} ago`;
 	}
 
-	async function save(next: AutoCleanup) {
+	async function save(next: AutoCleanup, confirmation: string) {
 		try {
 			await rules.change({ kind: "autoCleanup", ...next });
+			toast.success(confirmation);
 			error = null;
 		} catch (reason) {
 			error = String(reason);
@@ -45,9 +47,12 @@
 	}
 
 	function setScope(value: string) {
-		if (value === "off") return save({ policy: null, paused: false });
+		if (value === "off") return save({ policy: null, paused: false }, "Automatic clean up off");
 		const idleMinutes = auto.policy?.idleMinutes ?? defaultIdleMinutes;
-		return save({ policy: { scope: value as AutoCleanupScope, idleMinutes }, paused: false });
+		return save(
+			{ policy: { scope: value as AutoCleanupScope, idleMinutes }, paused: false },
+			auto.policy ? "Automatic clean up updated" : "Automatic clean up on",
+		);
 	}
 
 	async function readLog() {
@@ -98,7 +103,8 @@
 			{disabled}
 			bind:value={
 				() => String(policy.idleMinutes),
-				(value) => save({ policy: { ...policy, idleMinutes: Number(value) }, paused: auto.paused })
+				(value) =>
+					save({ policy: { ...policy, idleMinutes: Number(value) }, paused: auto.paused }, "Automatic clean up updated")
 			}
 		>
 			{#each autoIdleChoices as choice (choice.value)}
@@ -112,7 +118,14 @@
 			<Field.Label for="{id}-auto-pause">Pause</Field.Label>
 			<Field.Description>Stops nothing until you resume.</Field.Description>
 		</Field.Content>
-		<Switch id="{id}-auto-pause" {disabled} bind:checked={() => auto.paused, (paused) => save({ policy, paused })} />
+		<Switch
+			id="{id}-auto-pause"
+			{disabled}
+			bind:checked={
+				() => auto.paused,
+				(paused) => save({ policy, paused }, paused ? "Automatic clean up paused" : "Automatic clean up resumed")
+			}
+		/>
 	</Field.Field>
 {/if}
 {#if error}

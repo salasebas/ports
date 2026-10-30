@@ -1,6 +1,7 @@
 import { emit } from "@tauri-apps/api/event";
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { toast } from "svelte-sonner";
 import { listRows } from "./grouping";
 import { mockSnapshot } from "./mock";
 import { hiddenPort, hiddenProcess, PortsStore, serverKey, SNAPSHOT_EVENT } from "./ports-store.svelte";
@@ -155,6 +156,7 @@ beforeEach(() => {
 afterEach(() => {
 	clearMocks();
 	vi.unstubAllGlobals();
+	vi.restoreAllMocks();
 });
 
 describe("live updates", () => {
@@ -302,6 +304,32 @@ describe("search", () => {
 		expect(store.searchedPort).toBe(4000);
 		expect(store.portOwners).toEqual([]);
 		expect(store.filtered).toEqual([]);
+	});
+});
+
+describe("confirmations", () => {
+	const project = { id: "p1", folder: "~/web" } as SavedProject;
+
+	it("confirms a saved project's command and port only when the backend accepts them", async () => {
+		const confirmed = vi.spyOn(toast, "success");
+		const store = storeWith(web);
+		await store.setSavedCommand(project, "bun dev");
+		expect(confirmed).toHaveBeenLastCalledWith("Command saved");
+		await store.setSavedBinding(project, 3000, "127.0.0.1");
+		expect(confirmed).toHaveBeenLastCalledWith("Port saved");
+		confirmed.mockClear();
+		backend((cmd) => {
+			if (cmd === "set_project_command") throw "That command can't be saved.";
+		});
+		await store.setSavedCommand(project, "");
+		expect(confirmed).not.toHaveBeenCalled();
+	});
+
+	it("confirms a refresh, which may change nothing on screen", async () => {
+		const confirmed = vi.spyOn(toast, "success");
+		backend((cmd) => (cmd === "refresh" ? snapshot([web]) : undefined));
+		await storeWith(web).refresh();
+		expect(confirmed).toHaveBeenLastCalledWith("Refreshed", { id: "refresh" });
 	});
 });
 
@@ -584,12 +612,27 @@ describe("renaming and hiding", () => {
 	});
 
 	it("keeps the list as it was when the backend refuses a rule", async () => {
+		const confirmed = vi.spyOn(toast, "success");
 		const store = storeWith(web);
 		backend((cmd) => {
 			if (cmd === "update_rules") throw "Could not save the rules";
 		});
 		await store.hide(hiddenPort(web.port));
 		expect(store.filtered).toEqual([web]);
+		expect(confirmed).not.toHaveBeenCalled();
+	});
+
+	it("confirms a rename, a reset and a hide, but not a rename that changes nothing", async () => {
+		const confirmed = vi.spyOn(toast, "success");
+		const store = storeWith(web);
+		store.rename(web.port, "Storefront");
+		expect(confirmed).toHaveBeenLastCalledWith("Renamed to Storefront");
+		store.rename(web.port, "Storefront");
+		expect(confirmed).toHaveBeenCalledTimes(1);
+		store.rename(web.port, "");
+		expect(confirmed).toHaveBeenLastCalledWith("Name reset");
+		await store.hide(hiddenPort(web.port));
+		expect(confirmed).toHaveBeenLastCalledWith("Hidden :5173");
 	});
 });
 

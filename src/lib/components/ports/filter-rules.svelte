@@ -1,5 +1,6 @@
 <script lang="ts">
 	import XIcon from "@lucide/svelte/icons/x";
+	import { toast } from "svelte-sonner";
 	import { Badge } from "$lib/components/ui/badge";
 	import { Button } from "$lib/components/ui/button";
 	import * as Field from "$lib/components/ui/field";
@@ -26,9 +27,10 @@
 
 	const validPort = (port: number) => Number.isInteger(port) && port >= 1 && port <= 65_535;
 
-	async function save(change: RulesChange, report: (error: string | null) => void) {
+	async function save(change: RulesChange, confirmation: string, report: (error: string | null) => void) {
 		try {
 			await rules.change(change);
+			toast.success(confirmation);
 			report(null);
 			return true;
 		} catch (error) {
@@ -40,7 +42,7 @@
 	function saveRange(event: SubmitEvent) {
 		event.preventDefault();
 		if (!start.trim() && !end.trim()) {
-			void save({ kind: "portRange", range: null }, (error) => (rangeError = error));
+			void save({ kind: "portRange", range: null }, "Showing every port", (error) => (rangeError = error));
 			return;
 		}
 		const range = { start: Number(start), end: Number(end) };
@@ -48,7 +50,7 @@
 			rangeError = "Use whole port numbers from 1 to 65535";
 			return;
 		}
-		void save({ kind: "portRange", range }, (error) => (rangeError = error));
+		void save({ kind: "portRange", range }, "Port range saved", (error) => (rangeError = error));
 	}
 
 	const withRules = (next: Record<List, Rule[]>): RulesChange => ({ kind: "filters", ...next });
@@ -57,13 +59,13 @@
 		event.preventDefault();
 		const next = { include: current.include, exclude: current.exclude };
 		next[list] = [...next[list], { field, pattern: pattern.trim() }];
-		if (await save(withRules(next), (error) => (ruleError = error))) pattern = "";
+		if (await save(withRules(next), "Rule added", (error) => (ruleError = error))) pattern = "";
 	}
 
 	function removeRule(from: List, index: number) {
 		const next = { include: current.include, exclude: current.exclude };
 		next[from] = next[from].filter((_, i) => i !== index);
-		void save(withRules(next), (error) => (ruleError = error));
+		void save(withRules(next), "Rule removed", (error) => (ruleError = error));
 	}
 
 	const ruleLists = $derived([
@@ -163,7 +165,8 @@
 						class="size-4 rounded-full"
 						aria-label="Show {hiddenLabel(entry)} again"
 						{disabled}
-						onclick={() => save({ kind: "unhide", entry }, (error) => (hiddenError = error))}
+						onclick={() =>
+							save({ kind: "unhide", entry }, `Showing ${hiddenLabel(entry)} again`, (error) => (hiddenError = error))}
 					>
 						<XIcon />
 					</Button>

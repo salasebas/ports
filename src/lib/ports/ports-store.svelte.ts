@@ -279,6 +279,7 @@ export class PortsStore {
 	setSavedCommand = async (project: SavedProject, command: string) => {
 		const ok = await attempt(invoke("set_project_command", { request: { id: project.id, command } }));
 		await this.refreshSaved();
+		if (ok) toast.success("Command saved");
 		return ok;
 	};
 
@@ -287,6 +288,7 @@ export class PortsStore {
 			invoke("set_project_binding", { request: { id: project.id, expectedPort, expectedAddress } }),
 		);
 		await this.refreshSaved();
+		if (ok) toast.success("Port saved");
 		return ok;
 	};
 
@@ -302,6 +304,7 @@ export class PortsStore {
 	refresh = async () => {
 		try {
 			this.apply(await invoke<Snapshot>("refresh"));
+			toast.success("Refreshed", { id: "refresh" });
 		} catch (error) {
 			toast.error(String(error));
 		}
@@ -336,15 +339,18 @@ export class PortsStore {
 	detectedName = (port: number) => this.servers.find((server) => server.port === port)?.name ?? "";
 
 	rename = (port: number, name: string) => {
-		const names = { ...preferences.names.current };
-		delete names[port];
+		const { [port]: previous, ...others } = preferences.names.current;
 		const trimmed = name.trim();
-		preferences.names.current = trimmed && trimmed !== this.detectedName(port) ? { ...names, [port]: trimmed } : names;
+		const custom = trimmed && trimmed !== this.detectedName(port) ? trimmed : undefined;
+		if (custom === previous) return;
+		preferences.names.current = custom ? { ...others, [port]: custom } : others;
+		toast.success(custom ? `Renamed to ${custom}` : "Name reset");
 	};
 
-	changeRules = async (change: RulesChange) => {
+	changeRules = async (change: RulesChange, confirmation?: string) => {
 		try {
 			this.apply(await rules.change(change));
+			if (confirmation) toast.success(confirmation);
 			return true;
 		} catch (error) {
 			toast.error(String(error));
@@ -356,7 +362,7 @@ export class PortsStore {
 		this.changeRules({ kind: "protect", key: serverKey(server), value });
 
 	hide = async (entry: string) => {
-		await this.changeRules({ kind: "hide", entry });
+		await this.changeRules({ kind: "hide", entry }, `Hidden ${hiddenLabel(entry)}`);
 		if (this.selected?.hidden) this.selectedId = null;
 	};
 
