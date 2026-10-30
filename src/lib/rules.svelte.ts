@@ -44,6 +44,7 @@ export interface RulesView {
 }
 
 export type RulesChange =
+	| { kind: "resetLists" }
 	| { kind: "hide"; entry: string }
 	| { kind: "unhide"; entry: string }
 	| { kind: "protect"; key: string; value: boolean }

@@ -22,6 +22,7 @@ pub struct Container {
     pub started_at: u64,
     pub socket: PathBuf,
     pub bindings: BTreeSet<SocketAddr>,
+    pub project_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,6 +49,8 @@ struct Listed {
     created: u64,
     #[serde(default)]
     ports: Vec<Published>,
+    #[serde(default)]
+    labels: HashMap<String, String>,
 }
 
 #[derive(Deserialize)]
@@ -240,6 +243,11 @@ fn by_container(listed: Vec<Listed>, socket: &Path) -> Vec<Container> {
                 started_at: listed.created * 1000,
                 socket: socket.to_path_buf(),
                 bindings,
+                project_dir: listed
+                    .labels
+                    .get("com.docker.compose.project.working_dir")
+                    .map(PathBuf::from)
+                    .filter(|path| path.is_absolute()),
             })
         })
         .collect()
@@ -383,6 +391,7 @@ mod tests {
     fn maps_each_published_tcp_port_to_its_container() {
         let body = r#"[
             {"Id":"4a1b2c3d4e5f6a7b8c9d","Names":["/shop-db"],"Image":"postgres:16-alpine","Created":1761530000,
+             "Labels":{"com.docker.compose.project.working_dir":"/work/shop"},
              "Ports":[{"IP":"0.0.0.0","PrivatePort":5432,"PublicPort":5433,"Type":"tcp"},
                       {"IP":"::","PrivatePort":5432,"PublicPort":5433,"Type":"tcp"}]},
             {"Id":"9f8e7d6c5b4a39281706","Names":["/dns"],"Image":"coredns/coredns","Created":1761530001,
@@ -404,6 +413,7 @@ mod tests {
         );
         assert_eq!(db.name, "shop-db");
         assert_eq!(db.image, "postgres:16-alpine");
+        assert_eq!(db.project_dir.as_deref(), Some(Path::new("/work/shop")));
     }
 
     #[test]

@@ -24,6 +24,28 @@ pub struct Settings {
     idle_after_minutes: u64,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsDefaults {
+    shortcut: Option<String>,
+    alerts: AlertSettings,
+    stop_grace_seconds: u64,
+    idle_after_minutes: u64,
+}
+
+#[tauri::command]
+pub fn get_settings_defaults() -> SettingsDefaults {
+    SettingsDefaults {
+        #[cfg(desktop)]
+        shortcut: Some(crate::shortcut::DEFAULT.to_string()),
+        #[cfg(not(desktop))]
+        shortcut: None,
+        alerts: AlertSettings::default(),
+        stop_grace_seconds: crate::ports::DEFAULT_GRACE_SECS,
+        idle_after_minutes: crate::ports::DEFAULT_IDLE_AFTER_MS / 60_000,
+    }
+}
+
 pub fn read<T: DeserializeOwned, R: Runtime>(app: &AppHandle<R>, key: &str) -> Option<T> {
     let value = app.store(STORE).ok()?.get(key)?;
     serde_json::from_value(value).ok()

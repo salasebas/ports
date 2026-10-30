@@ -104,6 +104,7 @@ pub enum Scope {
     deny_unknown_fields
 )]
 pub enum Change {
+    ResetLists,
     Hide {
         entry: String,
     },
@@ -204,6 +205,12 @@ impl Rules {
 
     pub fn change(&mut self, change: Change) -> Result<(), String> {
         match change {
+            Change::ResetLists => {
+                self.port_range = None;
+                self.include.clear();
+                self.exclude.clear();
+                self.hidden.clear();
+            }
             Change::Hide { entry } => {
                 check_entry(&entry)?;
                 if !self.hidden.contains(&entry) {
@@ -338,6 +345,36 @@ mod tests {
             field,
             pattern: pattern.into(),
         }
+    }
+
+    #[test]
+    fn resetting_lists_clears_filters_and_hidden_servers_but_keeps_protection_and_cleanup() {
+        let mut rules = Rules {
+            port_range: Some(PortRange {
+                start: 3000,
+                end: 4000,
+            }),
+            include: vec![rule(Field::Process, "node")],
+            exclude: vec![rule(Field::Process, "vite")],
+            hidden: vec!["port:3000".into()],
+            protection: BTreeMap::from([("port:3000".into(), true)]),
+            auto_cleanup: AutoCleanup {
+                policy: Some(Policy {
+                    scope: Scope::Deleted,
+                    idle_minutes: 60,
+                }),
+                paused: true,
+            },
+            ..Rules::default()
+        };
+        let original = rules.clone();
+        rules.change(Change::ResetLists).unwrap();
+        assert!(rules.port_range.is_none());
+        assert!(rules.include.is_empty());
+        assert!(rules.exclude.is_empty());
+        assert!(rules.hidden.is_empty());
+        assert_eq!(rules.protection, original.protection);
+        assert_eq!(rules.auto_cleanup, original.auto_cleanup);
     }
 
     #[test]

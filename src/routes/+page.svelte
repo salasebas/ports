@@ -28,6 +28,7 @@
 	import WifiIcon from "@lucide/svelte/icons/wifi";
 	import XIcon from "@lucide/svelte/icons/x";
 	import { Badge } from "$lib/components/ui/badge";
+	import AppShell from "$lib/components/app-shell.svelte";
 	import { Button } from "$lib/components/ui/button";
 	import * as Card from "$lib/components/ui/card";
 	import * as Drawer from "$lib/components/ui/drawer";
@@ -62,6 +63,7 @@
 	} from "$lib/ports/format";
 	import { groupKeys, listRows, toggleCollapsed, type GroupRow } from "$lib/ports/grouping";
 	import { ListKeyboard } from "$lib/ports/list-keyboard.svelte";
+	import { fadeRowOut } from "$lib/ports/table-motion";
 	import { PortsStore } from "$lib/ports/ports-store.svelte";
 	import { preferences, sortKeys, type SortKey } from "$lib/ports/preferences.svelte";
 	import type { Server, ServerStatus } from "$lib/ports/types";
@@ -70,11 +72,8 @@
 
 	const store = new PortsStore();
 	onMount(store.connect);
-
-	let scrollY = $state(0);
-	let tableHeight = $state(0);
-
 	const motion = $derived(prefersReducedMotion.current ? 0 : 1);
+	let tableHeight = $state(0);
 
 	const statusDot: Record<ServerStatus, string> = {
 		running: "bg-success",
@@ -245,16 +244,16 @@
 	{@const Chevron = collapsed ? ChevronRightIcon : ChevronDownIcon}
 	{@const place = [row.detail, row.path].filter(Boolean).join(" · ")}
 	{@const tall = preferences.groupHeaders.current === "tall"}
-	<td class={cn("col-span-full flex min-w-0 items-center px-5 text-xs text-muted-foreground", tall ? "py-3" : "py-1")}>
+	<Table.Cell colspan={7} class={cn("px-5 text-xs text-muted-foreground", tall ? "py-3" : "py-1")}>
 		<button
 			type="button"
 			class={cn(
-				"flex min-w-0 flex-1 items-center rounded-md text-start",
+				"flex w-full min-w-0 items-center rounded-md text-start",
 				tall ? "gap-3" : "gap-2 py-1",
 				row.depth === 1 && "ps-6",
 			)}
 			aria-expanded={!collapsed}
-			onclick={(event: MouseEvent) => {
+			onclick={(event) => {
 				event.stopPropagation();
 				toggleGroup(row.key);
 			}}
@@ -278,7 +277,7 @@
 				{row.count} · {formatBytesText(row.memoryBytes)} · {Math.round(row.cpuPercent)}%
 			</span>
 		</button>
-	</td>
+	</Table.Cell>
 {/snippet}
 
 {#snippet serverCells(server: Server)}
@@ -367,15 +366,10 @@
 	</Table.Cell>
 {/snippet}
 
-<svelte:window bind:scrollY onkeydown={keyboard.onkeydown} />
+<svelte:window onkeydown={keyboard.onkeydown} />
 
-<div class="flex min-h-screen flex-col">
-	<header
-		class={cn(
-			"sticky top-0 z-10 border-b bg-background/80 backdrop-blur-xl backdrop-saturate-150 transition-colors duration-200",
-			scrollY > 0 ? "border-border" : "border-transparent",
-		)}
-	>
+<AppShell>
+	{#snippet header()}
 		<div class="mx-auto flex w-full max-w-5xl flex-wrap items-center gap-3 px-6 py-3">
 			<div class="flex items-center gap-2">
 				<h1 class="text-lg font-semibold tracking-tight">Ports</h1>
@@ -397,9 +391,9 @@
 				<SettingsButton />
 			</div>
 		</div>
-	</header>
+	{/snippet}
 
-	<main class="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-6 p-6">
+	<div class="mx-auto flex min-h-full w-full max-w-5xl flex-col gap-6 p-6">
 		<Card.Root>
 			<Card.Content>
 				<UsageSummary {store} />
@@ -408,31 +402,35 @@
 
 		{#if store.servers.length}
 			<div
-				class="overflow-hidden rounded-2xl border bg-card transition-[height] duration-200 ease-out motion-reduce:transition-none"
+				data-table-frame
+				class="relative overflow-clip rounded-2xl border bg-card motion-safe:transition-[height] motion-safe:duration-220 motion-safe:ease-out"
 				style:height={tableHeight ? `${tableHeight + 2}px` : undefined}
 			>
-				<div bind:clientHeight={tableHeight} class="[&>[data-slot=table-container]]:overflow-visible">
-					<Table.Root class="grid [--cols:6rem_minmax(0,1fr)_8rem_7rem_5.5rem_10rem_5.5rem]">
-						<Table.Header class="grid bg-muted/60">
-							<Table.Row class="grid grid-cols-(--cols) items-center hover:bg-transparent">
-								{@render head("Port", HashIcon, "pl-5", "port")}
+				<div bind:offsetHeight={tableHeight}>
+					<Table.Root class="min-w-[56rem] table-fixed">
+						<Table.Header class="bg-muted/60">
+							<Table.Row class="hover:bg-transparent">
+								{@render head("Port", HashIcon, "w-24 ps-5", "port")}
 								{@render head("Server", ServerColumnIcon, "", "name")}
-								{@render head("Framework", LayersIcon)}
-								{@render head("Uptime", ClockIcon, "text-right", "uptime")}
-								{@render head("CPU", CpuIcon, "text-right", "cpu")}
-								{@render head("Memory", MemoryStickIcon, "text-right", "memory")}
-								<Table.Head class="pr-5"><span class="sr-only">Actions</span></Table.Head>
+								{@render head("Framework", LayersIcon, "w-32")}
+								{@render head("Uptime", ClockIcon, "w-28 text-right", "uptime")}
+								{@render head("CPU", CpuIcon, "w-22 text-right", "cpu")}
+								{@render head("Memory", MemoryStickIcon, "w-40 text-right", "memory")}
+								<Table.Head class="h-10 w-22 pe-5"><span class="sr-only">Actions</span></Table.Head>
 							</Table.Row>
 						</Table.Header>
-						<Table.Body class="grid">
+						<Table.Body>
 							{#each rows as row (row.key)}
 								{@const server = row.kind === "server" ? row.server : undefined}
-								<!-- A plain <tr> because animate: and transitions need an element, not a component. -->
+								<!-- Svelte requires animate: on a native element directly inside the keyed each block. -->
 								<tr
 									data-slot="table-row"
-									class={server
-										? "group/row grid cursor-default grid-cols-(--cols) items-center border-b transition-colors outline-none hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:ring-inset data-[state=selected]:bg-muted"
-										: "grid grid-cols-(--cols) border-b bg-muted/30"}
+									class={cn(
+										"border-b transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted",
+										server
+											? "group/row cursor-default focus-visible:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:ring-inset"
+											: "bg-muted/30",
+									)}
 									data-state={server && store.selectedId === server.id ? "selected" : undefined}
 									data-row-id={server?.id}
 									tabindex={server ? (keyboard.activeId === server.id ? 0 : -1) : undefined}
@@ -441,7 +439,7 @@
 									onfocus={server ? () => keyboard.choose(server.id) : undefined}
 									animate:flip={{ duration: 220 * motion, easing: cubicOut }}
 									in:fade={{ duration: 180 * motion, delay: 60 * motion }}
-									out:fade={{ duration: 120 * motion }}
+									out:fadeRowOut={{ duration: 120 * motion }}
 								>
 									{#if server}
 										{@render serverCells(server)}
@@ -453,7 +451,7 @@
 						</Table.Body>
 					</Table.Root>
 					{#if !store.filtered.length}
-						<div in:fade={{ duration: 180 * motion, delay: 120 * motion }}>
+						<div in:fade={{ duration: 180 * motion }}>
 							<NoResults {store} class="py-10" />
 						</div>
 					{/if}
@@ -463,8 +461,8 @@
 			<NoResults {store} class="flex-1" />
 		{/if}
 		<SavedSection {store} onOpen={showProject} />
-	</main>
-</div>
+	</div>
+</AppShell>
 
 <Drawer.Root
 	direction="right"

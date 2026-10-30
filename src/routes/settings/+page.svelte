@@ -11,6 +11,8 @@
 	import { goto } from "$app/navigation";
 	import { resolve } from "$app/paths";
 	import { Button } from "$lib/components/ui/button";
+	import AppShell from "$lib/components/app-shell.svelte";
+	import * as AlertDialog from "$lib/components/ui/alert-dialog";
 	import * as Card from "$lib/components/ui/card";
 	import * as Field from "$lib/components/ui/field";
 	import * as NativeSelect from "$lib/components/ui/native-select";
@@ -19,10 +21,10 @@
 	import AutoCleanupSettings from "$lib/components/ports/auto-cleanup-settings.svelte";
 	import FilterRules from "$lib/components/ports/filter-rules.svelte";
 	import ShortcutRecorder from "$lib/components/ports/shortcut-recorder.svelte";
-	import { cn } from "$lib/utils";
 	import { setRefreshInterval } from "$lib/ports/ports-store.svelte";
 	import { editors, groupHeaderSizes, preferences, refreshIntervals } from "$lib/ports/preferences.svelte";
 	import { alertThresholds, idleThresholds, settings, stopGraces, type AlertSettings } from "$lib/settings.svelte";
+	import { resetSections, resetSettings, type SettingsSection, type ResetScope } from "$lib/reset-settings";
 
 	type Mode = "light" | "dark" | "system";
 
@@ -46,13 +48,48 @@
 
 	onMount(() => void readOpenAtLogin());
 
-	let scrollY = $state(0);
-
 	function onkeydown(event: KeyboardEvent) {
 		if (event.key === "Escape" && !event.defaultPrevented) void goto(resolve("/"));
 	}
 
 	let shortcutError = $state<string | null>(null);
+	let resetting = $state<ResetScope | null>(null);
+	let resetOpen = $state(false);
+	let resetScope = $state<ResetScope>("all");
+	const resetTitle = $derived(
+		resetScope === "all" ? "Reset all settings?" : `Reset ${resetSections[resetScope]} settings?`,
+	);
+	const resetDescriptions: Record<ResetScope, string> = {
+		general: "Restores system appearance and the default shortcut, and turns off Open at login.",
+		servers:
+			"Restores the default editor, refresh interval, confirmation prompts, and time before force killing a server.",
+		cleanUp: "Turns off automatic clean up and restores the default idle threshold. No servers will be stopped.",
+		memoryAlerts: "Restores the default leak notifications and high memory threshold.",
+		lists:
+			"Restores list layout, sorting, grouping and visibility, clears filters, and shows hidden servers. Pins and protection stay.",
+		all: "Restores app preferences and filters, shows hidden servers, and turns off automatic clean up. Saved projects, server names, pins and protection stay.",
+	};
+
+	function confirmReset(scope: ResetScope) {
+		resetScope = scope;
+		resetOpen = true;
+	}
+
+	async function restoreDefaults(scope: ResetScope) {
+		if (resetting) return;
+		resetting = scope;
+		try {
+			await resetSettings(scope);
+			await readOpenAtLogin();
+			shortcutError = null;
+			resetOpen = false;
+			toast.success(scope === "all" ? "All settings restored" : `${resetSections[scope]} settings restored`);
+		} catch (error) {
+			toast.error(`Could not finish resetting settings: ${String(error)}`);
+		} finally {
+			resetting = null;
+		}
+	}
 
 	const alerts = $derived(settings.current.alerts);
 
@@ -87,7 +124,7 @@
 	];
 </script>
 
-{#snippet section(title: string, fields: Snippet)}
+{#snippet section(title: string, fields: Snippet, scope: SettingsSection)}
 	<!-- A legend isn't a flex item of its fieldset, so its margin spaces it, not the gap. -->
 	<Field.Set>
 		<Field.Legend variant="label" class="mb-3 px-1 text-muted-foreground">{title}</Field.Legend>
@@ -97,26 +134,32 @@
 					{@render fields()}
 				</Field.Group>
 			</Card.Content>
+			<Card.Footer class="justify-end border-t">
+				<Button
+					variant="ghost"
+					size="sm"
+					disabled={!desktop || resetting !== null}
+					aria-label="Reset {title} to defaults"
+					onclick={() => confirmReset(scope)}
+				>
+					Reset to defaults
+				</Button>
+			</Card.Footer>
 		</Card.Root>
 	</Field.Set>
 {/snippet}
 
-<svelte:window onfocus={readOpenAtLogin} {onkeydown} bind:scrollY />
+<svelte:window onfocus={readOpenAtLogin} {onkeydown} />
 
-<div class="flex min-h-screen flex-col">
-	<header
-		class={cn(
-			"sticky top-0 z-10 border-b bg-background/80 backdrop-blur-xl backdrop-saturate-150 transition-colors duration-200",
-			scrollY > 0 ? "border-border" : "border-transparent",
-		)}
-	>
+<AppShell>
+	{#snippet header()}
 		<div class="mx-auto flex min-h-15 w-full max-w-5xl items-center gap-3 px-6 py-3">
 			<h1 class="text-lg font-semibold tracking-tight">Settings</h1>
 			<Button href={resolve("/")} variant="secondary" size="sm" class="ml-auto">Done</Button>
 		</div>
-	</header>
+	{/snippet}
 
-	<main class="mx-auto flex w-full max-w-2xl flex-col gap-6 px-6 py-6">
+	<div class="mx-auto flex w-full max-w-2xl flex-col gap-6 p-6">
 		{#snippet general()}
 			<Field.Field>
 				<Field.Title id="{id}-appearance">Appearance</Field.Title>
@@ -158,7 +201,7 @@
 				<Field.Error>{shortcutError}</Field.Error>
 			{/if}
 		{/snippet}
-		{@render section("General", general)}
+		{@render section("General", general, "general")}
 
 		{#snippet servers()}
 			<Field.Field orientation="horizontal">
@@ -214,7 +257,7 @@
 				</NativeSelect.Root>
 			</Field.Field>
 		{/snippet}
-		{@render section("Servers", servers)}
+		{@render section("Servers", servers, "servers")}
 
 		{#snippet cleanUp()}
 			<Field.Field orientation="horizontal">
@@ -237,7 +280,7 @@
 			<Field.Separator />
 			<AutoCleanupSettings {id} disabled={!desktop} />
 		{/snippet}
-		{@render section("Clean up", cleanUp)}
+		{@render section("Clean up", cleanUp, "cleanUp")}
 
 		{#snippet memory()}
 			<Field.Field orientation="horizontal">
@@ -273,7 +316,7 @@
 				</NativeSelect.Root>
 			</Field.Field>
 		{/snippet}
-		{@render section("Memory alerts", memory)}
+		{@render section("Memory alerts", memory, "memoryAlerts")}
 
 		{#snippet lists()}
 			<Field.Field orientation="horizontal">
@@ -287,6 +330,32 @@
 			<Field.Separator />
 			<FilterRules {id} disabled={!desktop} />
 		{/snippet}
-		{@render section("Lists", lists)}
-	</main>
-</div>
+		{@render section("Lists", lists, "lists")}
+		<div class="flex justify-end">
+			<Button variant="outline" disabled={!desktop || resetting !== null} onclick={() => confirmReset("all")}
+				>Reset all settings…</Button
+			>
+		</div>
+	</div>
+</AppShell>
+
+<AlertDialog.Root bind:open={resetOpen}>
+	<AlertDialog.Content
+		onEscapeKeydown={(event) => {
+			if (resetting) event.preventDefault();
+		}}
+	>
+		<AlertDialog.Header>
+			<AlertDialog.Title>{resetTitle}</AlertDialog.Title>
+			<AlertDialog.Description>
+				{resetDescriptions[resetScope]}
+			</AlertDialog.Description>
+		</AlertDialog.Header>
+		<AlertDialog.Footer>
+			<AlertDialog.Cancel disabled={resetting !== null}>Cancel</AlertDialog.Cancel>
+			<Button disabled={resetting !== null} aria-busy={resetting !== null} onclick={() => restoreDefaults(resetScope)}>
+				{resetScope === "all" ? "Reset all settings" : "Reset to defaults"}
+			</Button>
+		</AlertDialog.Footer>
+	</AlertDialog.Content>
+</AlertDialog.Root>

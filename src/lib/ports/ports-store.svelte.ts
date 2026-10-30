@@ -25,9 +25,10 @@ async function attempt(action: Promise<unknown>): Promise<boolean> {
 	}
 }
 
-export function setRefreshInterval(ms: number) {
-	preferences.refreshInterval.current = ms;
-	return attempt(invoke("set_refresh_interval", { ms }));
+export async function setRefreshInterval(ms: number) {
+	const updated = await attempt(invoke("set_refresh_interval", { ms }));
+	if (updated) preferences.refreshInterval.current = ms;
+	return updated;
 }
 
 export type ServerAction = "stop" | "restart" | "forceKill" | "stopParent" | "stopAll";

@@ -97,7 +97,8 @@ pub fn refresh(system: &mut System, pids: &[u32]) {
         false,
         ProcessRefreshKind::nothing()
             .with_exe(UpdateKind::Always)
-            .with_environ(UpdateKind::Always),
+            .with_environ(UpdateKind::Always)
+            .without_tasks(),
     );
 }
 
@@ -314,6 +315,16 @@ fn project_canonical(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn refreshing_session_environment_does_not_enumerate_threads() {
+        let pid = Pid::from_u32(std::process::id());
+        let mut system = System::new();
+        refresh(&mut system, &[pid.as_u32()]);
+        assert!(system.process(pid).unwrap().tasks().is_none());
+        assert!(observe(&system, pid.as_u32()).is_some());
+    }
 
     fn obs(executable: &str, env: &[(&str, &str)]) -> Observation {
         Observation {

@@ -197,6 +197,7 @@
  */
 [data-sonner-toaster] [data-sonner-toast] {
 	pointer-events: auto;
+	cursor: pointer;
 }
 [data-sonner-toaster] [data-sonner-toast][data-visible="false"] {
 	pointer-events: none;

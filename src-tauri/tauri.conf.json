@@ -23,6 +23,7 @@
       },
       {
         "label": "tray",
+        "create": false,
         "title": "Ports",
         "url": "/tray",
         "width": 380,
