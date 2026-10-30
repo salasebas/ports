@@ -39,10 +39,6 @@ const keyLabels: Record<string, string> = {
 	Slash: "/",
 };
 
-/**
- * The keys of a shortcut as `src-tauri/src/shortcut.rs` returns it, in the
- * platform's order: `alt+super+KeyP` is ⌥ ⌘ P on macOS.
- */
 export function shortcutKeys(shortcut: string): string[] {
 	const parts = shortcut.split("+");
 	const code = parts.pop() ?? "";
@@ -54,10 +50,6 @@ export function shortcutKeys(shortcut: string): string[] {
 	];
 }
 
-/**
- * The shortcut for a key press, by physical key so it matches what the
- * backend registers; null while only modifiers are down.
- */
 export function shortcutFor(event: KeyboardEvent): string | null {
 	if (/^(Shift|Control|Alt|Meta|OS)(Left|Right)?$/.test(event.code)) return null;
 	const modifiers = [

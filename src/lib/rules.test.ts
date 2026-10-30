@@ -21,7 +21,6 @@ const view: RulesView = {
 	},
 };
 
-// Hidden servers and protection moved from each window's storage to rules.json, which the backend reads.
 it("moves hidden servers and protection from the window's storage to the backend once", async () => {
 	vi.stubGlobal("isTauri", true);
 	localStorage.setItem("ports.hidden", JSON.stringify(["port:5000"]));

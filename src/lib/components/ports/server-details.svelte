@@ -68,7 +68,6 @@
 	const lan = $derived(lanUrl(server));
 	const idle = $derived(server.status === "idle");
 	const alerts = $derived(settings.current.alerts);
-	/** What the memory alerts watch for on this server; desktop apps get none. */
 	const alertNote = $derived.by(() => {
 		if (server.kind !== "dev" && server.kind !== "database") return null;
 		const above = alerts.thresholdBytes === null ? null : `above ${formatBytesText(alerts.thresholdBytes)}`;
@@ -76,19 +75,16 @@
 		if (alerts.enabled) return "Alerts if it keeps growing";
 		return above && `Alerts ${above}`;
 	});
-	// Pins and protection cover every port of a project.
 	const scope = $derived(server.folder ? "every port of this project" : `:${server.port} only`);
 
 	const supervisorNames = { homebrew: "Homebrew", pm2: "PM2", supervisord: "supervisord" };
 	const supervisor = $derived(server.supervisor);
-	/** A supervisor that would start it again after a signal, so Force Kill isn't offered. */
-	const managed = $derived(supervisor?.supported === true);
+	const managed = $derived(supervisor?.controllable === true);
 	const others = $derived(server.target?.kind === "process" ? store.sameProgram(server).length - 1 : 0);
 	const hasMore = $derived(!managed || Boolean(server.parent) || others > 0);
 	const indents = ["ps-0", "ps-3", "ps-6", "ps-9", "ps-12"];
 
 	const tree = $derived(processTree(server));
-	/** The other servers each process also belongs to, so a shared one reads as shared. */
 	const sharedWith = $derived.by(() => {
 		const shared = new Map<string, string[]>();
 		for (const other of store.servers) {
@@ -131,7 +127,6 @@
 
 	const saved = $derived(store.projectFor(server));
 	let pull = $state<PullLookup | { state: "loading" } | null>(null);
-	// Each snapshot is a new `server` object; the lookup reruns only when these change.
 	const folder = $derived(server.folder);
 	const branch = $derived(server.branch);
 	const port = $derived(server.port);
@@ -156,7 +151,6 @@
 	});
 
 	const confidence = $derived(server.attribution.confidence);
-	/** What the evidence adds up to, so a guess never reads as proof. */
 	const verdict = $derived.by(() => {
 		if (confidence === "likely")
 			return `Only ${server.attribution.evidence.some((e) => e.source === "wellKnownPort") ? "the port number" : "the project's dependencies"} suggest ${server.framework}; its command doesn't confirm it.`;
@@ -323,7 +317,7 @@
 					</DropdownMenu.Root>
 				{/if}
 			</div>
-			{#if supervisor && !supervisor.supported}
+			{#if supervisor && !supervisor.controllable}
 				<p class="text-xs text-muted-foreground">
 					{supervisorNames[supervisor.kind]} may start it again after Stop; Ports can't control it yet.
 				</p>
@@ -447,7 +441,6 @@
 		</section>
 	{/if}
 
-	<!-- Only a verified page goes to another device; a database on 0.0.0.0 has no page to open. -->
 	{#if page && lan}
 		<Separator />
 		<section class="flex items-center gap-4" aria-label="Open on another device">

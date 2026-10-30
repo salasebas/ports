@@ -1,10 +1,3 @@
-//! Which Git checkout a project folder belongs to.
-//!
-//! A linked worktree and the main checkout share one repository id (the common
-//! git directory) and keep distinct worktree paths, so their servers are never
-//! merged. A submodule or a nested repository has its own git directory and is
-//! its own repository. The nearest `.git` wins.
-
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -12,20 +5,16 @@ use serde::Serialize;
 
 use super::project;
 
-/// A checkout's branch, worktree and repository. Paths are canonical.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Checkout {
     pub branch: Option<String>,
-    /// Set only when this checkout is a linked worktree.
     pub worktree: Option<String>,
     pub worktree_path: PathBuf,
     pub repository_path: PathBuf,
     pub repository_name: String,
-    /// The common git directory. Shared by every worktree of one repository.
     pub repository_id: PathBuf,
 }
 
-/// What the windows show. Paths inside home use the `~/` form, matching `folder`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Place {
@@ -52,8 +41,6 @@ impl Checkout {
     }
 }
 
-/// The checkout that owns `folder`, walking up to the nearest `.git`.
-/// `folder` and `home` follow the same rules as `project::git_branch`.
 pub fn checkout(folder: &Path, home: &Path) -> Option<Checkout> {
     let (worktree_path, git_dir) = git_paths(folder, home)?;
     let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
@@ -83,7 +70,6 @@ pub fn checkout(folder: &Path, home: &Path) -> Option<Checkout> {
     })
 }
 
-/// The checked-out branch, or the short commit when HEAD is detached.
 pub fn branch_of(head: &str) -> Option<String> {
     match head.strip_prefix("ref: ") {
         Some(reference) => Some(
@@ -114,7 +100,6 @@ fn git_paths(folder: &Path, home: &Path) -> Option<(PathBuf, PathBuf)> {
     Some((worktree_path, git_dir))
 }
 
-/// `repo/.git/worktrees/<name>` → `<name>`.
 fn linked_worktree_name(git_dir: &Path) -> Option<String> {
     let parent = git_dir.parent()?;
     if parent.file_name()? != "worktrees" {
@@ -130,7 +115,6 @@ fn is_submodule(git_dir: &Path) -> bool {
             .any(|component| component.as_os_str() == "modules")
 }
 
-/// The directory every worktree of a repository shares.
 fn common_git_dir(git_dir: &Path) -> PathBuf {
     let pointer = git_dir.join("commondir");
     if let Ok(raw) = fs::read_to_string(&pointer) {

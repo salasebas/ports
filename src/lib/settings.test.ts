@@ -17,7 +17,6 @@ afterEach(() => {
 	vi.unstubAllGlobals();
 });
 
-// Initial reads and IPC replies are allowed to arrive after newer window events.
 it("subscribes before reading and keeps the newer settings event", async () => {
 	vi.stubGlobal("isTauri", true);
 	const initial = Promise.withResolvers<Settings>();

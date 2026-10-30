@@ -2,6 +2,7 @@
 	import { Button } from "$lib/components/ui/button";
 	import * as Dialog from "$lib/components/ui/dialog";
 	import { Input } from "$lib/components/ui/input";
+	import { LastShown } from "$lib/hooks/last-shown.svelte";
 	import type { PortsStore } from "$lib/ports/ports-store.svelte";
 	import { preferences } from "$lib/ports/preferences.svelte";
 
@@ -9,16 +10,14 @@
 
 	const id = $props.id();
 
-	// Keeps the text in place while the dialog animates out.
-	let last: PortsStore["renaming"] = null;
-	const server = $derived.by(() => (last = store.renaming ?? last));
+	const renaming = new LastShown(() => store.renaming);
+	const server = $derived(renaming.current);
 	const detected = $derived(server ? store.detectedName(server.port) : "");
-	// Follows `store.renaming`, not `server`, so reopening the dialog drops cancelled text.
-	let name = $derived(store.renaming ? (preferences.names.current[store.renaming.port] ?? "") : "");
+	let draft = $derived(store.renaming ? (preferences.names.current[store.renaming.port] ?? "") : "");
 
 	function save(event: SubmitEvent) {
 		event.preventDefault();
-		if (server) store.rename(server.port, name);
+		if (server) store.rename(server.port, draft);
 		store.renaming = null;
 	}
 </script>
@@ -38,7 +37,7 @@
 					<Dialog.Title>Rename :{server.port}</Dialog.Title>
 					<Dialog.Description>Both lists show this name. Leave it blank for “{detected}”.</Dialog.Description>
 				</Dialog.Header>
-				<Input id="{id}-name" aria-label="Name" placeholder={detected} bind:value={name} />
+				<Input id="{id}-name" aria-label="Name" placeholder={detected} bind:value={draft} />
 				<Dialog.Footer>
 					<Button type="button" variant="secondary" onclick={() => (store.renaming = null)}>Cancel</Button>
 					<Button type="submit">Save</Button>

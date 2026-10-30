@@ -80,7 +80,6 @@
 		attention: "bg-warning",
 	};
 
-	// Keeps the drawer populated while it animates out after a stop.
 	let lastSelected = $state.raw<Server | null>(null);
 	let lastProject = $state.raw<SavedProject | null>(null);
 	let lastKind = $state<"server" | "project">("server");
@@ -94,7 +93,6 @@
 		store.select(server.id);
 	}
 
-	/** A toast sits above the drawer: swiping or closing it must not close the drawer. */
 	function keepOpenForToasts(event: Event) {
 		if (event.target instanceof Element && event.target.closest("[data-sonner-toaster]")) event.preventDefault();
 	}
@@ -105,8 +103,6 @@
 		store.selectProject(project.id);
 	}
 
-	// `/?details=5173` opens a server's details, e.g. after a click on its memory
-	// alert; it waits for the first snapshot, then drops the parameter.
 	$effect(() => {
 		const id = page.url.searchParams.get("details");
 		const server = store.servers.find((s) => s.id === id);
@@ -115,7 +111,6 @@
 		void goto(resolve("/"), { replaceState: true, noScroll: true, keepFocus: true });
 	});
 
-	/** A new column sorts in its natural direction; the current one flips. */
 	function sortBy(key: SortKey) {
 		const sort = preferences.sort.current;
 		const descending =
@@ -133,7 +128,6 @@
 		details: showDetails,
 	});
 
-	/** Focus goes back to the row whose details closed, or the one now in its place. */
 	function restoreFocus(event: Event) {
 		event.preventDefault();
 		keyboard.restore(lastKind === "server" ? (lastSelected?.id ?? null) : null);
@@ -305,7 +299,6 @@
 			</div>
 		</div>
 	</Table.Cell>
-	<!-- Grid cells keep their content width by default; long process names truncate instead. -->
 	<Table.Cell class="min-w-0">
 		{@const runs = confirmedFramework(server) ?? server.process}
 		<div class="flex min-w-0 flex-col gap-0.5" title={runs}>
@@ -383,13 +376,11 @@
 		</Card.Root>
 
 		{#if store.servers.length}
-			<!-- Height follows the content with a transition so rows sliding into place are not clipped. -->
 			<div
 				class="overflow-hidden rounded-2xl border bg-card transition-[height] duration-200 ease-out motion-reduce:transition-none"
 				style:height={tableHeight ? `${tableHeight + 2}px` : undefined}
 			>
 				<div bind:clientHeight={tableHeight} class="[&>[data-slot=table-container]]:overflow-visible">
-					<!-- Rows are grids on shared tracks so a row leaving the flow mid-animation keeps its columns. -->
 					<Table.Root class="grid [--cols:6rem_minmax(0,1fr)_8rem_7rem_5.5rem_10rem_5.5rem]">
 						<Table.Header class="grid bg-muted/60">
 							<Table.Row class="grid grid-cols-(--cols) items-center hover:bg-transparent">

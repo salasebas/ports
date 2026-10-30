@@ -1,10 +1,3 @@
-//! The open pull request for a worktree branch, and a remote preview URL.
-//!
-//! GitHub is the first host, through the `gh` command the user already logged
-//! in. The result is cached in memory for a few minutes and is never written
-//! to disk. A failure (no `gh`, no login, offline, a fork Ports can't match,
-//! several open pull requests) is a result the window can show, not a guess.
-
 use std::collections::HashMap;
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
@@ -19,7 +12,6 @@ use super::place;
 use super::project;
 
 const TTL: Duration = Duration::from_secs(5 * 60);
-/// A failure is kept briefly, so opening servers while offline does not run `gh` each time.
 const FAILURE_TTL: Duration = Duration::from_secs(30);
 const GH_LIMIT: &str = "100";
 
@@ -43,7 +35,6 @@ pub struct Pull {
 #[serde(rename_all = "camelCase")]
 pub struct Preview {
     pub provider: String,
-    /// Always a remote URL. Never the server's local address.
     pub url: String,
     pub label: String,
 }
@@ -78,8 +69,6 @@ pub enum Lookup {
 }
 
 impl Lookup {
-    /// How long the answer stays true. A folder that is not a GitHub checkout is
-    /// answered without `gh`, so it is not kept.
     fn ttl(&self) -> Option<Duration> {
         match self {
             Self::Found { .. } | Self::None { .. } | Self::Ambiguous { .. } => Some(TTL),
@@ -109,7 +98,6 @@ pub struct ListedPull {
 
 #[derive(Debug)]
 pub struct GhOutput {
-    /// `None` when the command did not finish (timeout) or could not reach GitHub.
     pub status: Option<i32>,
     pub stdout: String,
     pub stderr: String,
@@ -196,7 +184,6 @@ pub fn github_remotes(config: &str) -> Vec<Remote> {
     remotes
 }
 
-/// `upstream` when the checkout has one, otherwise `origin`.
 pub fn lookup_remote(remotes: &[Remote]) -> Option<&Remote> {
     remotes
         .iter()
@@ -337,7 +324,6 @@ fn head_belongs(head_owner: Option<&str>, origin_owner: Option<&str>, repo_owner
 }
 
 pub fn preview_from(checks: &[CheckLink], local_port: Option<u16>) -> Option<Preview> {
-    // Only a deploy provider's check is a preview; any other https check is a CI page.
     checks
         .iter()
         .filter(|check| is_remote_preview(&check.url, local_port))
@@ -350,7 +336,6 @@ pub fn preview_from(checks: &[CheckLink], local_port: Option<u16>) -> Option<Pre
         })
 }
 
-/// The deploy providers whose checks are previews, Vercel first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Provider {
     Vercel,
@@ -378,7 +363,6 @@ fn provider(url: &str, name: Option<&str>) -> Option<Provider> {
     }
 }
 
-/// A preview is a remote https URL. Local hosts and this server's own port are not previews.
 pub fn is_remote_preview(url: &str, local_port: Option<u16>) -> bool {
     let Some(rest) = url.strip_prefix("https://") else {
         return false;
@@ -539,7 +523,6 @@ fn folder_path(app: &AppHandle, folder: &str) -> Result<std::path::PathBuf, Stri
     Ok(project::canonical(&path))
 }
 
-/// Runs `gh` for up to 8 seconds, so it stays off the main thread.
 #[tauri::command]
 pub async fn pull_request(
     app: AppHandle,
@@ -711,7 +694,6 @@ mod tests {
         let preview = preview_from(&checks, Some(5173)).unwrap();
         assert_eq!(preview.provider, "Netlify");
         assert!(preview.label.contains("preview"));
-        // A CI status links to its logs, not to a deployment.
         let ci = [CheckLink {
             name: Some("ci/circleci: build".into()),
             url: "https://app.circleci.com/pipelines/github/acme/shop/1".into(),

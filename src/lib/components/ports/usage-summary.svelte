@@ -8,7 +8,6 @@
 
 	let { store, class: className }: { store: PortsStore; class?: string } = $props();
 
-	/** The biggest servers get their own color and legend entry; the rest share one. */
 	const NAMED = 3;
 
 	const metrics: { value: Metric; label: string }[] = [
@@ -16,12 +15,10 @@
 		{ value: "cpu", label: "CPU" },
 	];
 
-	/** What the summary shows for the chosen metric. Shares are fractions of the whole machine. */
 	const view = $derived.by(() => {
 		const { system } = store;
 		const { usage } = store;
 		const cpu = preferences.metric.current === "cpu";
-		// Empty until the first snapshot arrives.
 		const ofMemory = (bytes: number) => (system.totalBytes ? bytes / system.totalBytes : 0);
 		const amount = (fraction: number) =>
 			cpu ? formatPercent(fraction * 100) : formatBytesText(fraction * system.totalBytes);

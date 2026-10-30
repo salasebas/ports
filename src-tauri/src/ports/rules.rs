@@ -1,14 +1,3 @@
-//! The user's rules over which servers Ports lists, which ones clean up skips
-//! and what automatic clean up may stop, kept in `rules.json`. The backend
-//! applies them to every snapshot, so both windows list the same servers and
-//! clean up, manual or automatic, never reaches one the rules leave out.
-//!
-//! Matching: a rule matches when its text appears in the server's process name
-//! or command, ignoring case. A server is hidden when a hidden entry or an
-//! exclude rule matches it, when its port is outside the port range, or when
-//! include rules exist and none matches it. Hidden servers are still scanned:
-//! the rules change what is listed, not what Ports looks at.
-
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -21,26 +10,18 @@ use super::{Monitor, blocking, lock};
 const STORE: &str = "rules.json";
 const KEY: &str = "rules";
 const VERSION: u32 = 1;
-/// Carries `RulesView` to every window when the rules change. Must match `src/lib/rules.svelte.ts`.
 const RULES_EVENT: &str = "ports://rules";
 const PATTERN_LIMIT: usize = 200;
-/// Bounds of the idle time automatic clean up waits for, in minutes.
 const AUTO_IDLE_MINUTES: std::ops::RangeInclusive<u64> = 15..=24 * 60;
 
-/// Mirrors `Rules` in `src/lib/rules.svelte.ts`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Rules {
     version: u32,
-    /// Only ports within it are listed; `None` lists every port.
     pub port_range: Option<PortRange>,
-    /// When any exist, only servers matching one are listed.
     pub include: Vec<Rule>,
-    /// Servers matching one are never listed, even when an include rule matches.
     pub exclude: Vec<Rule>,
-    /// One port (`port:5000`) or every port of a process (`process:ControlCenter`).
     pub hidden: Vec<String>,
-    /// The user's choice of which servers clean up skips, by `key`, over the default (databases).
     pub protection: BTreeMap<String, bool>,
     pub auto_cleanup: AutoCleanup,
 }
@@ -68,9 +49,7 @@ pub struct PortRange {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Field {
-    /// The executable that listens, e.g. `node` or `ControlCenter`.
     Process,
-    /// What was launched, e.g. `npm run dev`.
     Command,
 }
 
@@ -90,17 +69,14 @@ impl Rule {
     }
 }
 
-/// Stops forgotten dev servers without asking. Off until the user picks a policy.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AutoCleanup {
     pub policy: Option<Policy>,
-    /// Keeps the policy but stops nothing until resumed.
     pub paused: bool,
 }
 
 impl AutoCleanup {
-    /// The policy to run now: none while it's off or paused.
     pub fn active(&self) -> Option<Policy> {
         self.policy.filter(|_| !self.paused)
     }
@@ -110,21 +86,16 @@ impl AutoCleanup {
 #[serde(rename_all = "camelCase")]
 pub struct Policy {
     pub scope: Scope,
-    /// How long a server must go without connections or CPU.
     pub idle_minutes: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Scope {
-    /// Only idle servers whose working folder was deleted, such as a removed worktree.
     Deleted,
-    /// Every idle dev server.
     Idle,
 }
 
-/// One change a window asks for. Each is checked on its own, so a mistake
-/// in one never discards the rules already saved.
 #[derive(Debug, Deserialize)]
 #[serde(
     tag = "kind",
@@ -154,15 +125,12 @@ pub enum Change {
         policy: Option<Policy>,
         paused: bool,
     },
-    /// Hidden entries and protection a window kept in its own storage before
-    /// they moved here. Adds what is missing and keeps what is already set.
     Import {
         hidden: Vec<String>,
         protection: BTreeMap<String, bool>,
     },
 }
 
-/// The key pins and protection use: a project's ports share one, so protecting one covers all of them.
 pub fn key(server: &Server) -> String {
     match &server.folder {
         Some(folder) => format!("project:{folder}"),
@@ -211,7 +179,6 @@ fn check_rule(rule: &Rule) -> Result<Rule, String> {
 }
 
 impl Rules {
-    /// Whether the rules leave the server out of the lists.
     pub fn hides(&self, server: &Server) -> bool {
         let entry = |entry: &String| match entry.split_once(':') {
             Some(("port", port)) => port.parse() == Ok(server.port),
@@ -226,7 +193,6 @@ impl Rules {
             || (!self.include.is_empty() && !self.include.iter().any(|rule| rule.matches(server)))
     }
 
-    /// Marks hidden servers and applies the user's protection.
     pub fn apply(&self, servers: &mut [Server]) {
         for server in servers {
             server.hidden = self.hides(server);
@@ -287,7 +253,6 @@ impl Rules {
     }
 }
 
-/// The rules in `rules.json`, or the defaults when there are none or they can't be read.
 pub fn load(app: &AppHandle) -> Rules {
     app.store(STORE)
         .ok()
@@ -315,14 +280,12 @@ fn save(app: &AppHandle, rules: &Rules) -> Result<(), String> {
     Ok(())
 }
 
-/// Mirrors `RulesView` in `src/lib/rules.svelte.ts`.
 #[derive(Debug, Clone, Serialize)]
 pub struct RulesView {
     revision: u64,
     rules: Rules,
 }
 
-/// The rules after a change, and the servers listed under them.
 #[derive(Debug, Serialize)]
 pub struct RulesUpdate {
     rules: RulesView,
@@ -394,7 +357,6 @@ mod tests {
         assert!(rules.hides(&server(10000, 0)));
     }
 
-    // AirPlay's ControlCenter holds 5000 and 7000; hiding the process hides both.
     #[test]
     fn hides_a_port_or_every_port_of_a_process() {
         let mut rules = Rules::default();

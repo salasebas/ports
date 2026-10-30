@@ -1,5 +1,3 @@
-//! Servers listening on this machine: discovery, live sampling and control.
-
 mod alerts;
 pub mod autoclean;
 mod containers;
@@ -45,26 +43,18 @@ use icons::Icons;
 use pages::Pages;
 use sampler::{Sampler, Snapshot, now_ms};
 
-/// Carries a `Snapshot` to every window. Must match `src/lib/ports/ports-store.svelte.ts`.
 const SNAPSHOT_EVENT: &str = "ports://snapshot";
-/// Asks the main window to show a server's details, with its port. Must match `src/routes/+page.svelte`.
 pub const DETAILS_EVENT: &str = "ports://details";
 const DEFAULT_INTERVAL_MS: u64 = 2_000;
-/// Samples only on request: the refresh button, a stop or a restart.
 const NEVER: u64 = 0;
 const INTERVALS_MS: RangeInclusive<u64> = 500..=60_000;
-/// While every window is hidden, sampling slows down instead of stopping, so
-/// idle times and memory leaks stay accurate for the next time Ports opens.
 const HIDDEN_INTERVAL_MS: u64 = 30_000;
 
-/// A control target resolved once: the process tree it ends, or a container.
 enum Located {
     Process(Box<control::Service>),
     Container(ContainerTarget),
 }
 
-/// Samples the servers on an interval and keeps the latest snapshot, so
-/// every window shows the same data and history outlives a closed popover.
 pub struct Monitor {
     home: PathBuf,
     sampler: Mutex<Sampler>,
@@ -85,13 +75,11 @@ pub struct Monitor {
     auto: Mutex<autoclean::Runs>,
 }
 
-/// The rules every sample applies, and how many times they changed.
 struct RulesState {
     revision: u64,
     rules: rules::Rules,
 }
 
-/// What the latest health probes found, and when the next round is due.
 #[derive(Default)]
 struct Health {
     unresponsive: HashSet<health::Key>,
@@ -148,7 +136,6 @@ impl Monitor {
         Ok(snapshot)
     }
 
-    /// The rules and their revision.
     pub fn rules(&self) -> (u64, rules::Rules) {
         let state = lock(&self.rules);
         (state.revision, state.rules.clone())
@@ -158,7 +145,6 @@ impl Monitor {
         self.idle_after_ms.load(Ordering::Relaxed)
     }
 
-    /// Takes effect with the next sample.
     pub fn set_idle_after_ms(&self, ms: u64) {
         self.idle_after_ms.store(ms, Ordering::Relaxed);
     }
@@ -195,14 +181,12 @@ impl Monitor {
         secs
     }
 
-    /// The servers from the last sample, if one has finished.
     pub(crate) fn latest_servers(&self) -> Option<Vec<sampler::Server>> {
         lock(&self.latest)
             .as_ref()
             .map(|snapshot| snapshot.servers.clone())
     }
 
-    /// Samples once when Ports has not published anything yet, then returns the servers.
     pub(crate) fn servers(&self, app: &AppHandle) -> Vec<sampler::Server> {
         if self.latest_servers().is_none() {
             let _ = self.publish(app);
@@ -226,7 +210,6 @@ impl Monitor {
             let shown = app
                 .notification()
                 .builder()
-                // A click reports the id, which leads back to the server.
                 .id(hash.finish() as i32)
                 .extra("serverId", &alert.server_id)
                 .title(alert.title)
@@ -238,8 +221,6 @@ impl Monitor {
         }
     }
 
-    /// Starts a round of health probes in the background once the last one
-    /// is old enough, and samples again when a server stops or resumes answering.
     fn probe_if_due(&self, app: &AppHandle, snapshot: &Snapshot) {
         let now = now_ms();
         {
@@ -262,9 +243,8 @@ impl Monitor {
                     health.probing = false;
                     std::mem::replace(&mut health.unresponsive, unresponsive) != health.unresponsive
                 };
-                // Also with refreshing off: the round belongs to the sample that started it.
                 if changed {
-                    monitor.wake();
+                    monitor.sample_now();
                 }
             });
         if let Err(error) = spawned {
@@ -273,8 +253,6 @@ impl Monitor {
         }
     }
 
-    /// Checks in the background which new servers serve a page, and samples
-    /// again when one's page, title or icon changed.
     fn check_pages_if_due(&self, app: &AppHandle, snapshot: &Snapshot) {
         let targets = snapshot.servers.iter().filter_map(pages::target).collect();
         let Some(due) = lock(&self.pages).due(targets, now_ms()) else {
@@ -286,9 +264,8 @@ impl Monitor {
             .spawn(move || {
                 let monitor = app.state::<Monitor>();
                 let results = pages::check_all(&due, &monitor.icons);
-                // Also with refreshing off: the round belongs to the sample that started it.
                 if lock(&monitor.pages).finish(results, now_ms()) {
-                    monitor.wake();
+                    monitor.sample_now();
                 }
             });
         if let Err(error) = spawned {
@@ -297,17 +274,14 @@ impl Monitor {
         }
     }
 
-    /// Samples again now, whatever the refresh interval.
-    pub(crate) fn wake(&self) {
+    pub(crate) fn sample_now(&self) {
         *lock(&self.woken) = true;
         self.wake.notify_one();
     }
 
-    /// Samples now instead of at the end of the interval, so a window that
-    /// appears shows fresh data; unless the user turned refreshing off.
     pub fn window_shown(&self) {
         if self.interval_ms.load(Ordering::Relaxed) != NEVER {
-            self.wake();
+            self.sample_now();
         }
     }
 
@@ -333,8 +307,6 @@ impl Monitor {
         *woken = false;
     }
 
-    /// Runs one control per affected process at a time; a second click while the
-    /// first one is still waiting for the server to exit is refused.
     fn control(
         &self,
         app: &AppHandle,
@@ -361,19 +333,15 @@ impl Monitor {
         let snapshot = self.publish(app);
         lock(&self.stopping).retain(|key| !keys.contains(key));
         result?;
-        // The control worked; a failed sample right after it must not report it as failed.
-        // The monitor samples again right away to publish the change.
-        snapshot.or_else(|error| {
-            eprintln!("Could not sample ports: {error}");
-            self.wake();
-            lock(&self.latest).clone().ok_or(error)
-        })
+        snapshot.or_else(|error| self.latest_after_failed_sample(error))
     }
 
-    /// Clean up, manual or automatic, stops a service only if a fresh sample
-    /// shows that every server the stop would end may go: none a supervisor
-    /// runs, the rules hide or the user protects, and each one `may_stop`
-    /// accepts. A sibling the user left out or hid keeps the whole tree running.
+    fn latest_after_failed_sample(&self, error: String) -> Result<Snapshot, String> {
+        eprintln!("Could not sample ports: {error}");
+        self.sample_now();
+        lock(&self.latest).clone().ok_or(error)
+    }
+
     fn ensure_cleanable(
         &self,
         target: &Target,
@@ -393,8 +361,6 @@ impl Monitor {
             .servers
             .iter()
             .filter(|other| shares_tree(target, &selected.resources, other));
-        // A supervisor keeps its services running on purpose; Homebrew's stop
-        // would also keep one from starting at login.
         if affected.any(|server| {
             server.supervisor.is_some() || server.hidden || server.protected || !may_stop(server)
         }) {
@@ -406,8 +372,6 @@ impl Monitor {
     }
 }
 
-/// Whether stopping `target`, whose tree holds `resources`, also ends `other`:
-/// the same root, or a process the two share.
 fn shares_tree(
     target: &Target,
     resources: &[sampler::ProcessUsage],
@@ -423,7 +387,6 @@ fn shares_tree(
             .any(|theirs| resources.iter().any(|ours| ours.process == theirs.process))
 }
 
-/// Bounds of the shutdown grace period, in seconds.
 pub const GRACE_SECS: RangeInclusive<u64> = 1..=60;
 pub const DEFAULT_GRACE_SECS: u64 = control::DEFAULT_GRACE.as_secs();
 pub const DEFAULT_IDLE_AFTER_MS: u64 = history::DEFAULT_IDLE_AFTER_MS;
@@ -432,15 +395,11 @@ fn clamp_grace(secs: u64) -> u64 {
     secs.clamp(*GRACE_SECS.start(), *GRACE_SECS.end())
 }
 
-/// Which processes a control reaches, as the windows ask for it.
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Scope {
-    /// Also the process that started the service, with everything it runs.
     #[serde(default)]
     parent: Option<ProcessIdentity>,
-    /// The processes of the preview the user confirmed; the control refuses
-    /// to reach any other.
     #[serde(default)]
     confirmed: Option<Vec<ProcessIdentity>>,
 }
@@ -457,9 +416,6 @@ fn locate(target: &Target, parent: Option<&ProcessIdentity>) -> Result<Located, 
     }
 }
 
-/// Samples in the background at the chosen interval while any window is
-/// visible, and every 30 seconds while all are hidden, to save battery.
-/// The first sample runs right away, whatever the interval.
 pub fn start(app: &AppHandle) -> std::io::Result<()> {
     let app = app.clone();
     thread::Builder::new()
@@ -488,7 +444,6 @@ async fn blocking<T: Send + 'static>(
         .map_err(|error| error.to_string())?
 }
 
-/// Answers the windows' `ports-icon://` requests with a project's or page's icon.
 pub fn serve_icon(app: &AppHandle, path: &str) -> Response<Vec<u8>> {
     app.state::<Monitor>().icons.respond(path)
 }
@@ -521,7 +476,6 @@ pub async fn refresh(app: AppHandle) -> Result<Snapshot, String> {
     blocking(move || app.state::<Monitor>().publish(&app)).await
 }
 
-/// Shows the server's details when the user clicks its memory alert.
 pub fn open_alerts_on_click(app: &AppHandle, show: impl Fn(&AppHandle) + Send + Sync + 'static) {
     let handle = app.clone();
     let registered = app.notification().on_action(move |performed| {
@@ -552,12 +506,10 @@ pub fn set_refresh_interval(monitor: State<'_, Monitor>, ms: u64) {
         ms => ms.clamp(*INTERVALS_MS.start(), *INTERVALS_MS.end()),
     };
     if monitor.interval_ms.swap(ms, Ordering::Relaxed) != ms {
-        monitor.wake();
+        monitor.sample_now();
     }
 }
 
-/// What a control would end, from the same lookup the control repeats
-/// before it acts: the processes, the ports they hold and their supervisor.
 #[tauri::command]
 pub async fn preview_control(
     target: Target,
@@ -581,7 +533,6 @@ pub async fn stop_server(
 ) -> Result<Snapshot, String> {
     blocking(move || {
         let monitor = app.state::<Monitor>();
-        // Sample before locating, so the stop ends what the check saw.
         if clean_up.unwrap_or(false) {
             let allowed = allowed_ids.unwrap_or_default();
             monitor.ensure_cleanable(&target, |server| {
@@ -622,4 +573,17 @@ pub async fn restart_server(
         })
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_windows_listen_to_the_snapshot_and_details_events() {
+        let store = include_str!("../../../src/lib/ports/ports-store.svelte.ts");
+        assert!(store.contains(&format!("= \"{SNAPSHOT_EVENT}\";")));
+        let layout = include_str!("../../../src/routes/+layout.svelte");
+        assert!(layout.contains(&format!("= \"{DETAILS_EVENT}\";")));
+    }
 }

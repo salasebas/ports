@@ -1,5 +1,3 @@
-//! System notifications for servers whose memory looks like a leak.
-
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
@@ -10,13 +8,10 @@ const REPEAT_AFTER_MS: u64 = 60 * 60_000;
 const MB: f64 = 1024.0 * 1024.0;
 const GB: f64 = 1024.0 * MB;
 
-/// Mirrors `AlertSettings` in `src/lib/settings.svelte.ts`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AlertSettings {
-    /// Alert when a server's memory keeps growing.
     pub enabled: bool,
-    /// Also alert when a server uses more than this; `None` turns it off.
     #[serde(default)]
     pub threshold_bytes: Option<u64>,
 }
@@ -38,17 +33,12 @@ pub struct Alert {
     pub body: String,
 }
 
-/// When each service identity was last alerted about.
 #[derive(Default)]
 pub struct Alerts {
     sent: HashMap<String, u64>,
 }
 
 impl Alerts {
-    /// Dev servers and databases whose memory keeps growing or, when the
-    /// user set a threshold, is above it; at most one alert per server an
-    /// hour, whatever the reason. Desktop apps that happen to listen on a
-    /// port, such as Docker Desktop, are left alone.
     pub fn due(&mut self, settings: AlertSettings, servers: &[Server], now: u64) -> Vec<Alert> {
         self.sent
             .retain(|_, at| now.saturating_sub(*at) < REPEAT_AFTER_MS);
@@ -184,7 +174,6 @@ pub(crate) mod tests {
                     .is_empty()
             );
         }
-        // An hour later it's worth saying again.
         assert_eq!(alerts.due(settings, &[leaking(3000)], 62 * MINUTE).len(), 1);
     }
 
@@ -203,7 +192,6 @@ pub(crate) mod tests {
         assert_eq!(sent, 1);
     }
 
-    // Some servers use a lot of memory on purpose, e.g. a database cache.
     #[test]
     fn ignores_high_memory_once_the_threshold_is_off() {
         let mut alerts = Alerts::default();

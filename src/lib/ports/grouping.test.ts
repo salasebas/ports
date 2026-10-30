@@ -117,7 +117,6 @@ describe("repository grouping", () => {
 		]);
 	});
 
-	// The list arrives pinned first; grouping may gather servers but never drop or reorder a pin.
 	it.each(["project", "repository"] as const)(
 		"keeps every server and the pinned one first when grouped by %s",
 		(mode) => {

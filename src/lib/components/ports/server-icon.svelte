@@ -9,7 +9,6 @@
 
 	let { server, class: className }: { server: Pick<Server, "icon" | "kind">; class?: string } = $props();
 
-	/** Stands in for a page or project without an icon, so each kind always looks the same. */
 	const fallbacks: Record<ServerKind, typeof AppWindowIcon> = {
 		dev: CodeXmlIcon,
 		database: DatabaseIcon,
@@ -18,17 +17,16 @@
 	};
 
 	const src = $derived(iconUrl(server.icon));
-	/** The key of an icon the window couldn't show; a new key gets a new try. */
-	let failed = $state<string | undefined>();
+	let brokenIcon = $state<string | undefined>();
 	const Fallback = $derived(fallbacks[server.kind]);
 </script>
 
-{#if src && failed !== server.icon}
+{#if src && brokenIcon !== server.icon}
 	<img
 		{src}
 		alt=""
 		class={cn("shrink-0 rounded-[3px] object-contain", className)}
-		onerror={() => (failed = server.icon)}
+		onerror={() => (brokenIcon = server.icon)}
 	/>
 {:else}
 	<Fallback class={cn("shrink-0 text-muted-foreground", className)} aria-hidden="true" />

@@ -10,7 +10,6 @@ afterEach(() => {
 	document.body.replaceChildren();
 });
 
-/** A list with a search field and one focusable row per server, driven by a `ListKeyboard`. */
 function list() {
 	const store = new PortsStore();
 	store.servers = mockSnapshot().servers.filter((server) => server.kind === "dev");
@@ -33,7 +32,6 @@ function list() {
 	return { store, request, stop };
 }
 
-// #18: ⌘⌫ must not stop a server the user never moved to.
 it("stops nothing while no row has focus", () => {
 	const { request, stop } = list();
 	document.body.focus();

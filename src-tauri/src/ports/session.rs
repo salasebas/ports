@@ -1,16 +1,9 @@
-//! Which terminal or coding agent started a server.
-//!
-//! Attribution uses the executable name of a process in the tree, or an
-//! allowlisted environment variable. A command argument is not evidence:
-//! `node server.js --claude` does not make a server Claude's.
-
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use sysinfo::{Pid, Process, ProcessRefreshKind, System, UpdateKind};
 
-/// One process Ports inspected. `env` holds only allowlisted variables.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Observation {
     pub executable: String,
@@ -59,7 +52,6 @@ const ENV_KEYS: [&str; 4] = [
 
 const IGNORE_EXECUTABLES: [&str; 5] = ["launchd", "init", "systemd", "kernel_task", "ports"];
 
-/// Reads the executable name and the allowlisted environment of `pid`.
 pub fn observe(system: &System, pid: u32) -> Option<Observation> {
     let process = system.process(Pid::from_u32(pid))?;
     let executable = executable_name(process);
@@ -95,7 +87,6 @@ fn allowlisted_env(process: &Process) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Refreshes executables and environments for the pids a sample will attribute.
 pub fn refresh(system: &mut System, pids: &[u32]) {
     if pids.is_empty() {
         return;
@@ -110,9 +101,6 @@ pub fn refresh(system: &mut System, pids: &[u32]) {
     );
 }
 
-/// The nearest supported agent or terminal in `chain` (nearest process first).
-/// `home` is only used to resolve a resume file. Returns nothing when no
-/// observation is evidence, which the window shows as an unknown session.
 pub fn attribute(chain: &[Observation], home: &Path) -> Option<Session> {
     let mut agent: Option<Agent> = None;
     let mut evidence = Vec::new();
@@ -152,8 +140,6 @@ pub fn attribute(chain: &[Observation], home: &Path) -> Option<Session> {
     }
 
     let agent = agent?;
-    // The same ancestor can be reached twice when env and exe agree; keep the
-    // first of each identical evidence line.
     evidence.dedup();
     let label = match agent {
         Agent::Cursor if cursor_agent => "Cursor agent",
@@ -171,7 +157,6 @@ pub fn attribute(chain: &[Observation], home: &Path) -> Option<Session> {
     })
 }
 
-/// A more specific agent replaces a terminal. A terminal never replaces an agent.
 fn push_agent(current: &mut Option<Agent>, found: Agent) {
     match (*current, found) {
         (None, found) => *current = Some(found),
@@ -305,8 +290,6 @@ fn find_named(root: &Path, file_name: &str) -> Option<PathBuf> {
     None
 }
 
-/// A resume path Ports is willing to reveal: a file that is still under the
-/// user's Claude or Codex directory.
 pub fn revealable(home: &Path, path: &Path) -> Result<PathBuf, String> {
     let path = if path.is_absolute() {
         project_canonical(path)
@@ -345,7 +328,6 @@ mod tests {
     #[test]
     fn attributes_claude_from_the_ancestor_executable_not_from_an_argument() {
         let home = Path::new("/tmp");
-        // The server command is not an observation. Only the executable name is.
         let session = attribute(&[obs("node", &[]), obs("claude", &[])], home).unwrap();
         assert_eq!(session.agent, Agent::Claude);
         assert_eq!(

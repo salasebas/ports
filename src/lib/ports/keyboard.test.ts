@@ -4,7 +4,6 @@ import { isEditable, listCommand, step, typedText } from "./keyboard";
 const key = (name: string, modifiers: Partial<KeyboardEventInit> = {}) =>
 	new KeyboardEvent("keydown", { key: name, ...modifiers });
 
-// #18: the documented key map, ⌘ on macOS and Ctrl on Linux.
 describe("list keys", () => {
 	it.each([
 		["ArrowDown", {}, "next"],
@@ -22,7 +21,6 @@ describe("list keys", () => {
 		expect(listCommand(key("o", { metaKey: true }), false)).toBeNull();
 	});
 
-	// ⇧⌘O or ⌥↓ belong to the system and to text editing.
 	it("leaves other modifier combinations alone", () => {
 		expect(listCommand(key("o", { metaKey: true, shiftKey: true }), true)).toBeNull();
 		expect(listCommand(key("ArrowDown", { altKey: true }), true)).toBeNull();

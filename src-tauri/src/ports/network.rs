@@ -1,14 +1,9 @@
-//! Whether other devices can reach a server, and the URL they open it at.
-
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 
-/// Interfaces of virtual machines and containers: on this machine, not on the network.
 const VIRTUAL: [&str; 7] = [
     "bridge", "docker", "br-", "veth", "vmnet", "vboxnet", "virbr",
 ];
 
-/// An IPv4 address on the local network, as another device on the same
-/// Wi-Fi or Ethernet reaches this machine; `None` while offline.
 pub fn lan_ip() -> Option<IpAddr> {
     let interfaces: Vec<Candidate> = if_addrs::get_if_addrs()
         .unwrap_or_default()
@@ -60,15 +55,10 @@ fn pick(route: Option<IpAddr>, interfaces: &[Candidate]) -> Option<IpAddr> {
         .or(route)
 }
 
-/// Bound to a wildcard (`0.0.0.0`, `::`) or to a network interface, so
-/// anyone on the same network can connect, not only this machine.
 pub fn is_exposed(addresses: &[IpAddr]) -> bool {
     addresses.iter().any(|ip| !ip.is_loopback())
 }
 
-/// The `host:port` another device reaches the server at, when it can. The
-/// windows add the scheme the page check found, so Open, Copy and the QR
-/// code agree. A `::` socket answers IPv4 too (Node's `listen(port)`) unless `v6only`.
 pub fn lan_host(
     port: u16,
     addresses: &[IpAddr],
@@ -91,7 +81,6 @@ pub fn lan_host(
     Some(SocketAddr::new(ip, port).to_string())
 }
 
-/// Where Ports connects to reach the server itself: loopback for a wildcard.
 pub fn local_address(port: u16, addresses: &[IpAddr]) -> SocketAddr {
     let ip = match addresses.first() {
         Some(IpAddr::V6(ip)) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
@@ -111,7 +100,6 @@ mod tests {
 
     const LAN: Option<IpAddr> = Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20)));
 
-    // `vite` listens on localhost only; `vite --host` on every interface.
     #[test]
     fn loopback_stays_on_this_machine() {
         let vite = ips(&["127.0.0.1", "::1"]);
@@ -138,7 +126,6 @@ mod tests {
             ),
             None
         );
-        // nginx's `listen [::]` is IPv6-only: the IPv4 LAN address can't reach it.
         assert_eq!(lan_host(5173, &ips(&["::"]), LAN, true), None);
         assert_eq!(
             lan_host(5173, &ips(&["0.0.0.0", "::"]), LAN, true).as_deref(),
@@ -176,13 +163,10 @@ mod tests {
         let wifi = candidate("192.168.1.20", true);
         let vpn = candidate("10.8.0.2", false);
         let docker = candidate("172.17.0.1", false);
-        // With a full-tunnel VPN the default route leaves from the tunnel.
         assert_eq!(pick(Some(vpn.ip), &[vpn, wifi, docker]), LAN);
-        // Without one it leaves from the Wi-Fi, which wins over Ethernet listed first.
         let ethernet = candidate("10.0.0.7", true);
         let wifi = candidate("192.168.1.20", true);
         assert_eq!(pick(LAN, &[ethernet, wifi]), LAN);
-        // A public address on the route is still better than nothing.
         let public = candidate("203.0.113.5", true);
         assert_eq!(pick(Some(public.ip), &[public]), Some(public_ip()));
         assert_eq!(pick(None, &[]), None);

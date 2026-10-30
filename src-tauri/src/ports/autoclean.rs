@@ -1,14 +1,3 @@
-//! Automatic clean up: stops forgotten dev servers under the policy the user
-//! chose in `rules.json`. It is off until the user picks a policy, and pausing
-//! or turning it off cancels the stops still waiting.
-//!
-//! It only considers dev servers whose own process Ports controls, never a
-//! container, a database, another user's process or one a supervisor runs.
-//! Each stop goes through the same fresh check as a manual clean up, so a
-//! server that turned active, was hidden, protected or replaced since the
-//! round started is left running. It notifies after each stop, with no
-//! warning beforehand, and records every attempt in a size-capped log.
-
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
@@ -24,17 +13,12 @@ use super::rules::{Policy, Scope};
 use super::sampler::{Kind, Server, Snapshot, now_ms};
 use super::{Located, Monitor, blocking, containers, lock, shares_tree};
 
-/// The log keeps the newest entries within this size.
 const LOG_LIMIT: u64 = 64 * 1024;
-/// How many entries the settings show.
 const SHOWN: usize = 50;
 
-/// The rounds of automatic clean up, and the servers it already tried.
 pub struct Runs {
     log: PathBuf,
     running: bool,
-    /// Servers it couldn't stop, with the activity it saw, so it tries again
-    /// only after one was active and went quiet once more.
     tried: HashMap<String, u64>,
 }
 
@@ -48,7 +32,6 @@ impl Runs {
     }
 }
 
-/// Whether the policy lets automatic clean up stop this server.
 pub fn eligible(server: &Server, policy: Policy, now: u64) -> bool {
     server.kind == Kind::Dev
         && matches!(server.target, Some(Target::Process(_)))
@@ -59,8 +42,6 @@ pub fn eligible(server: &Server, policy: Policy, now: u64) -> bool {
         && (policy.scope == Scope::Idle || server.cwd_deleted)
 }
 
-/// The servers to stop, once per process tree: each eligible one whose stop
-/// would end only eligible servers.
 fn candidates(servers: &[Server], policy: Policy, now: u64) -> Vec<Server> {
     let mut chosen: Vec<Server> = Vec::new();
     for server in servers.iter().filter(|s| eligible(s, policy, now)) {
@@ -84,12 +65,10 @@ fn candidates(servers: &[Server], policy: Policy, now: u64) -> Vec<Server> {
 #[serde(rename_all = "lowercase")]
 pub enum Outcome {
     Stopped,
-    /// The fresh check found it active, hidden, protected or replaced.
     Skipped,
     Failed,
 }
 
-/// One attempt. Mirrors `AutoCleanupEntry` in `src/lib/rules.svelte.ts`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Entry {
@@ -122,8 +101,6 @@ fn record(log: &PathBuf, entry: &Entry) {
     trim(log);
 }
 
-/// Cuts the log back to its newest whole lines within `LOG_LIMIT` once it
-/// grows past twice that, so trims stay rare.
 fn trim(log: &PathBuf) {
     let Ok(text) = fs::read(log) else {
         return;
@@ -139,7 +116,6 @@ fn trim(log: &PathBuf) {
     let _ = fs::write(log, &text[start..]);
 }
 
-/// The newest entries first.
 fn read(log: &PathBuf) -> Vec<Entry> {
     let text = fs::read_to_string(log).unwrap_or_default();
     let mut entries: Vec<Entry> = text
@@ -152,8 +128,6 @@ fn read(log: &PathBuf) -> Vec<Entry> {
 }
 
 impl Monitor {
-    /// Starts a round in the background when the policy is on and a server
-    /// qualifies; one round at a time.
     pub(super) fn clean_up_if_due(&self, app: &AppHandle, snapshot: &Snapshot) {
         let Some(policy) = lock(&self.rules).rules.auto_cleanup.active() else {
             return;
@@ -182,7 +156,6 @@ impl Monitor {
             .spawn(move || {
                 let monitor = app.state::<Monitor>();
                 for server in due {
-                    // Pausing or turning the policy off cancels what's left.
                     let Some(policy) = lock(&monitor.rules).rules.auto_cleanup.active() else {
                         break;
                     };
@@ -257,7 +230,6 @@ impl Monitor {
     }
 }
 
-/// What automatic clean up did, newest first.
 #[tauri::command]
 pub async fn auto_cleanup_log(app: AppHandle) -> Result<Vec<Entry>, String> {
     blocking(move || Ok(read(&lock(&app.state::<Monitor>().auto).log.clone()))).await
@@ -278,7 +250,6 @@ mod tests {
         serde_json::from_value(serde_json::json!({ "pid": pid, "start": "1" })).unwrap()
     }
 
-    /// A dev server Ports controls, quiet for `idle` milliseconds at `HOUR * 10`.
     fn quiet(port: u16, root: u32, idle: u64) -> Server {
         let mut server = server(port, 0);
         server.id = format!("process:{root}:{port}");
@@ -320,7 +291,7 @@ mod tests {
         brewed.supervisor = Some(Supervisor {
             kind: SupervisorKind::Homebrew,
             name: Some("redis".into()),
-            supported: true,
+            controllable: true,
         });
         let mut unowned = quiet(9000, 7, 2 * HOUR);
         unowned.target = None;
@@ -351,7 +322,6 @@ mod tests {
         assert_eq!(ports, [5174]);
     }
 
-    // Stopping the forgotten port would also end the active one it shares a process with.
     #[test]
     fn leaves_a_tree_running_when_one_of_its_ports_is_not_eligible() {
         let now = HOUR * 10;

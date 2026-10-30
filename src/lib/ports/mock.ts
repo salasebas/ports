@@ -6,7 +6,6 @@ const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const SAMPLES = 60;
 
-/** Deterministic wobble so the mock charts look alive without randomness. */
 function series(start: number, end: number, jitter: number, seed: number): number[] {
 	return Array.from({ length: SAMPLES }, (_, i) => {
 		const t = i / (SAMPLES - 1);

@@ -1,7 +1,3 @@
-//! Settings the backend needs before any window loads, kept in
-//! `settings.json` in the app's data folder. Preferences only the windows
-//! use stay in the webview's storage.
-
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
@@ -15,26 +11,19 @@ pub const SHORTCUT: &str = "shortcut";
 const ALERTS: &str = "alerts";
 const STOP_GRACE: &str = "stopGraceSeconds";
 const IDLE_AFTER: &str = "idleAfterMinutes";
-/// The idle thresholds the settings offer, in minutes. Must match `src/lib/settings.svelte.ts`.
 const IDLE_AFTER_MINUTES: [u64; 6] = [5, 10, 15, 30, 60, 120];
-/// Carries `Settings` to every window when one changes. Must match `src/lib/settings.svelte.ts`.
 const SETTINGS_EVENT: &str = "ports://settings";
 
-/// Mirrors `Settings` in `src/lib/settings.svelte.ts`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
     revision: u64,
-    /// The accelerator that shows the popover, e.g. `alt+super+KeyP`; `None` when there's none.
     shortcut: Option<String>,
     alerts: AlertSettings,
-    /// How long Stop waits for a server to exit before it kills it.
     stop_grace_seconds: u64,
-    /// How long a server goes without connections or CPU before it counts as idle.
     idle_after_minutes: u64,
 }
 
-/// The stored value of `key`, or `None` when it was never set or can't be read.
 pub fn read<T: DeserializeOwned, R: Runtime>(app: &AppHandle<R>, key: &str) -> Option<T> {
     let value = app.store(STORE).ok()?.get(key)?;
     serde_json::from_value(value).ok()
@@ -90,7 +79,6 @@ pub fn stop_grace_seconds(app: &AppHandle) -> u64 {
     read(app, STOP_GRACE).unwrap_or(crate::ports::DEFAULT_GRACE_SECS)
 }
 
-/// The saved idle threshold, in milliseconds.
 pub fn idle_after_ms(app: &AppHandle) -> u64 {
     read::<u64, _>(app, IDLE_AFTER)
         .filter(|minutes| IDLE_AFTER_MINUTES.contains(minutes))
@@ -113,7 +101,6 @@ fn current(app: &AppHandle, revision: u64) -> Settings {
     }
 }
 
-/// Tells every window, so a change in one reaches the other.
 fn broadcast(app: &AppHandle, revision: u64) -> Settings {
     let settings = current(app, revision);
     if let Err(error) = app.emit(SETTINGS_EVENT, &settings) {
@@ -147,7 +134,6 @@ pub fn set_alerts(app: AppHandle, alerts: AlertPatch) -> Result<Settings, String
     Ok(broadcast(&app, *revision))
 }
 
-/// Shared by both windows; the backend keeps it within `GRACE_SECS`.
 #[tauri::command]
 pub fn set_stop_grace(app: AppHandle, seconds: u64) -> Result<Settings, String> {
     let state = app.state::<Changes>();
@@ -163,7 +149,6 @@ pub fn set_stop_grace(app: AppHandle, seconds: u64) -> Result<Settings, String> 
     Ok(broadcast(&app, *revision))
 }
 
-/// Shared by both windows and clean up; the next sample uses it.
 #[tauri::command]
 pub fn set_idle_after(app: AppHandle, minutes: u64) -> Result<Settings, String> {
     if !IDLE_AFTER_MINUTES.contains(&minutes) {
@@ -176,8 +161,7 @@ pub fn set_idle_after(app: AppHandle, minutes: u64) -> Result<Settings, String> 
     write(&app, IDLE_AFTER, minutes)?;
     let monitor = app.state::<Monitor>();
     monitor.set_idle_after_ms(minutes * 60_000);
-    // Samples now, so the new threshold shows at once.
-    monitor.wake();
+    monitor.sample_now();
     *revision += 1;
     Ok(broadcast(&app, *revision))
 }
@@ -197,6 +181,12 @@ pub fn set_shortcut(app: AppHandle, shortcut: Option<String>) -> Result<Settings
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn the_windows_listen_to_the_settings_event() {
+        let windows = include_str!("../../src/lib/settings.svelte.ts");
+        assert!(windows.contains(&format!("= \"{SETTINGS_EVENT}\";")));
+    }
+
     #[test]
     fn returns_save_failure_and_restores_the_previous_cached_value() {
         let app = tauri::test::mock_builder()

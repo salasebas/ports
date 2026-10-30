@@ -1,6 +1,7 @@
 <script lang="ts">
 	import * as AlertDialog from "$lib/components/ui/alert-dialog";
 	import { Checkbox } from "$lib/components/ui/checkbox";
+	import { LastShown } from "$lib/hooks/last-shown.svelte";
 	import { serverActivity } from "$lib/ports/format";
 	import { cleanUpReason, type PortsStore } from "$lib/ports/ports-store.svelte";
 	import { settings } from "$lib/settings.svelte";
@@ -10,9 +11,8 @@
 
 	const id = $props.id();
 
-	// Keeps the list in place while the dialog animates out.
-	let last: PortsStore["cleaning"] = null;
-	const servers = $derived.by(() => (last = store.cleaning ?? last) ?? []);
+	const cleaning = new LastShown(() => store.cleaning);
+	const servers = $derived(cleaning.current ?? []);
 	const chosen = $derived(servers.filter((server) => store.cleanSelection.has(server.id)).length);
 	const idleAfter = $derived(settings.current.idleAfterMinutes);
 </script>

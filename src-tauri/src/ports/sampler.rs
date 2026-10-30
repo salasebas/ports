@@ -1,5 +1,3 @@
-//! Builds snapshots of the listening servers and the machine's memory and CPU.
-
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -29,7 +27,6 @@ pub enum Kind {
     Dev,
     Database,
     Container,
-    /// Desktop apps and system services.
     Other,
 }
 
@@ -39,7 +36,6 @@ pub struct ContainerRef {
     pub image: String,
 }
 
-/// Mirrors `Server` in `src/lib/ports/types.ts`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Server {
@@ -50,83 +46,58 @@ pub struct Server {
     #[serde(skip)]
     pub http: bool,
     pub port: u16,
-    /// Missing when the socket belongs to another user's process Ports can't see (Linux).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
-    /// Set for a port a container publishes; Ports stops it through Docker.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub container: Option<ContainerRef>,
     pub process: String,
     pub command: String,
     pub name: String,
-    /// The project's root folder.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub folder: Option<String>,
-    /// Where the process runs, which may be below `folder` or outside any project.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
-    /// The folder the process runs in no longer exists, such as a removed
-    /// worktree. False when Ports can't tell, e.g. without permission to look.
     pub cwd_deleted: bool,
-    /// The name the project's manifest gives it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
-    /// Linked worktree name, when this checkout is one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
-    /// This checkout's folder. Distinct for each worktree of a repository.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worktree_path: Option<String>,
-    /// The main checkout's folder. Shared by every worktree of the repository.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repository_name: Option<String>,
-    /// The common git directory, shared by every worktree of one repository.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repository_id: Option<String>,
-    /// Set only when process ancestry or an allowlisted variable names an agent or terminal.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<Session>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub framework: Option<&'static str>,
-    /// The installed version of `framework`, when the project pins one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub framework_version: Option<String>,
-    /// Why Ports names the project and framework.
     pub attribution: Attribution,
-    /// Whether it serves a web page, and over which scheme.
     pub web: Web,
-    /// Key of the page's or the project's icon, served under `ports-icon://`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
     pub kind: Kind,
     pub status: Status,
-    /// Memory kept growing over the last ten minutes. Part of `status`; kept
-    /// apart for the memory alerts.
     #[serde(skip)]
     pub leaking: bool,
-    /// False when the last health probe got no answer: the server holds its port but hangs.
     pub responding: bool,
-    /// Bound addresses, e.g. `127.0.0.1` for this machine only or `0.0.0.0` for every interface.
     pub addresses: Vec<IpAddr>,
-    /// Reachable from other devices on the network.
     pub exposed: bool,
-    /// The `host:port` another device on the network opens it at.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lan_host: Option<String>,
     pub protected: bool,
-    /// Left out of both lists by the user's rules: hidden entries, the port range and the name and command filters.
     pub hidden: bool,
     pub restartable: bool,
-    /// What starts it again when it exits, such as Homebrew or PM2.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supervisor: Option<Supervisor>,
-    /// What started it and may start it again, such as nodemon; Stop parent ends it too.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<ParentProcess>,
     pub started_at: u64,
@@ -137,7 +108,6 @@ pub struct Server {
     pub cpu_history: Vec<f64>,
 }
 
-/// One process of a server's tree. Mirrors `ProcessUsage` in `src/lib/ports/types.ts`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProcessUsage {
@@ -145,7 +115,6 @@ pub struct ProcessUsage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<u32>,
     pub name: String,
-    /// The ports it listens on itself, e.g. each worker of a prefork server.
     pub ports: Vec<u16>,
     pub memory_bytes: u64,
     pub cpu_percent: f64,
@@ -172,7 +141,6 @@ pub struct Snapshot {
     pub system: SystemUsage,
 }
 
-/// What Ports remembers about a server between samples.
 #[derive(Default)]
 struct Tracked {
     history: History,
@@ -181,18 +149,13 @@ struct Tracked {
 
 pub struct Sampler {
     system: System,
-    /// Canonical, like the working directories it is compared with.
     home: PathBuf,
-    /// Keyed by service and kernel start identity, so replacements start fresh.
     tracked: HashMap<String, Tracked>,
     projects: ProjectFiles,
     revision: u64,
-    /// How long a server goes quiet before it counts as idle.
     pub idle_after_ms: u64,
 }
 
-/// Project files read again only when they change: icons, shared with the
-/// windows through `Icons`, and lockfiles.
 struct ProjectFiles {
     icons: Arc<Icons>,
     files: icons::Files,
@@ -208,7 +171,6 @@ impl ProjectFiles {
         icon.map(|icon| icon.key.clone())
     }
 
-    /// Lets go of the files of projects that no longer run.
     fn finish(&mut self) {
         self.files.retain(&self.used);
         self.used.clear();
@@ -445,7 +407,6 @@ impl Sampler {
     }
 }
 
-/// When a sample runs, and how long a server goes quiet before it counts as idle.
 struct Clock {
     now: u64,
     idle_after_ms: u64,
@@ -523,8 +484,6 @@ fn describe(
     let place = folder
         .and_then(|folder| place::checkout(folder, home))
         .map(|checkout| checkout.place(home));
-    // The root (`php artisan serve`) names the framework; only the listener's
-    // own command proves it speaks HTTP, since a job can run TCP helpers too.
     let mut detection = project::framework(
         &project::command_words([listener.cmd(), root.cmd()]),
         folder,
@@ -590,10 +549,9 @@ fn describe(
         icon: folder.and_then(|folder| projects.key(folder)),
         protected: matches!(kind, Kind::Database),
         hidden: false,
-        // A supervisor restarts what it runs; Ports only through one it supports.
         restartable: supervisor
             .as_ref()
-            .map_or_else(|| can_relaunch(root, system), |s| s.supported),
+            .map_or_else(|| can_relaunch(root, system), |s| s.controllable),
         supervisor,
         parent,
         kind,
@@ -620,8 +578,6 @@ fn describe(
     })
 }
 
-/// A listening port whose process belongs to another user and can't be
-/// inspected: only the port, the owner and what usually listens there are known.
 fn unowned(port: u16, owner: String, first_seen: u64) -> Server {
     let name = project::well_known(port).map_or(owner.as_str(), |(name, _)| name);
     let detection = project::port_detection(port);
@@ -679,8 +635,6 @@ fn unowned(port: u16, owner: String, first_seen: u64) -> Server {
     }
 }
 
-/// A port a container publishes. The runtime's forwarder holds the socket, so
-/// the container's own memory and CPU aren't known here.
 fn contained(port: u16, container: &Container) -> Server {
     let image = containers::image_name(&container.image);
     let detection = project::image_detection(image);
@@ -749,10 +703,6 @@ fn contained(port: u16, container: &Container) -> Server {
     }
 }
 
-/// A launch can be reproduced when it belongs to this user, was started by
-/// something other than a service manager (which restarts its own services),
-/// and still shows its real command line: servers such as nginx, puma or
-/// Next.js rewrite theirs into a title like `nginx: master process`.
 pub fn can_relaunch(root: &Process, system: &System) -> bool {
     const SERVICE_MANAGERS: [&str; 3] = ["launchd", "systemd", "init"];
     let own_uid = unsafe { libc::getuid() };

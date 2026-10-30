@@ -36,14 +36,12 @@
 		details: (server: Server) => store.select(server.id),
 	});
 
-	/** Back to the list, with focus on the row whose details closed. */
 	function back() {
 		const id = store.selectedId;
 		store.select(null);
 		keyboard.restore(id);
 	}
 
-	/** Details push in from the right and return the same way. */
 	const slide = (direction: 1 | -1) => ({
 		x: prefersReducedMotion.current ? 0 : 24 * direction,
 		duration: 200,
@@ -51,7 +49,6 @@
 	});
 
 	function onkeydown(event: KeyboardEvent) {
-		// Overlays such as the stop dialog handle Escape first and prevent default.
 		if (event.key !== "Escape") return keyboard.onkeydown(event);
 		if (event.defaultPrevented) return;
 		if (store.selected) back();

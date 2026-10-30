@@ -9,10 +9,8 @@
 	let { store, class: className }: { store: PortsStore; class?: string } = $props();
 
 	const searching = $derived(store.query !== "");
-	/** A searched port nothing listens on. */
 	const free = $derived(store.searchedPort !== null && store.portOwners.length === 0 ? store.searchedPort : null);
 	const hidden = $derived(store.servers.length - store.shown.length);
-	/** Hidden by kind, which the filter menu can undo; the rules in Settings hide the rest. */
 	const hiddenByKind = $derived(store.servers.filter((server) => !server.hidden).length - store.shown.length);
 </script>
 

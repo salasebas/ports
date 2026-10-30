@@ -14,7 +14,6 @@
 	const fieldLabels: Record<RuleField, string> = { process: "process", command: "command" };
 	type List = "include" | "exclude";
 
-	// Follow the saved range until the user edits the fields.
 	let start = $derived(current.portRange ? String(current.portRange.start) : "");
 	let end = $derived(current.portRange ? String(current.portRange.end) : "");
 	let rangeError = $state<string | null>(null);
@@ -27,7 +26,6 @@
 
 	const validPort = (port: number) => Number.isInteger(port) && port >= 1 && port <= 65_535;
 
-	/** Saves one change; on failure the saved rules stay and the reason shows next to the field. */
 	async function save(change: RulesChange, report: (error: string | null) => void) {
 		try {
 			await rules.change(change);

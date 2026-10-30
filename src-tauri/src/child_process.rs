@@ -1,12 +1,9 @@
-//! Reap child processes without tying a window action to their lifetime.
-
 use std::process::Child;
 #[cfg(any(not(target_os = "macos"), test))]
 use std::process::Command;
 #[cfg(any(not(target_os = "macos"), test))]
 use std::time::Duration;
 
-/// Waits for the child on its own thread, so it never lingers as a zombie.
 pub fn reap(mut child: Child) {
     std::thread::spawn(move || {
         let _ = child.wait();

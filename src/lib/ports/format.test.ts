@@ -27,7 +27,6 @@ describe("formatBytesText", () => {
 	});
 });
 
-// Browsers treat localhost and 127.0.0.1 as different origins; only a NIC-only listener needs its address.
 describe("serverUrl", () => {
 	it.each([
 		[["192.168.1.20"], "http://192.168.1.20:3000"],
@@ -48,7 +47,6 @@ describe("serverUrl", () => {
 	});
 });
 
-// The QR code and its Copy button must open the same page as Open.
 describe("lanUrl", () => {
 	it.each<[Web, string]>([
 		[{ state: "page", scheme: "https" }, "https://192.168.1.20:5173"],

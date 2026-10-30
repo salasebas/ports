@@ -1,5 +1,3 @@
-//! The global shortcut that toggles the popover from any app.
-
 use std::sync::Mutex;
 
 use tauri::{AppHandle, Manager};
@@ -7,14 +5,12 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, Modifiers, Shortcut, Short
 
 use crate::settings;
 
-/// ⌥⌘P on macOS, Ctrl+Alt+P elsewhere.
 const DEFAULT: &str = if cfg!(target_os = "macos") {
     "Alt+Super+KeyP"
 } else {
     "Control+Alt+KeyP"
 };
 
-/// The shortcut registered now, if any.
 struct Registered(Mutex<Option<Shortcut>>);
 
 fn registered(app: &AppHandle) -> std::sync::MutexGuard<'_, Option<Shortcut>> {
@@ -25,7 +21,20 @@ fn registered(app: &AppHandle) -> std::sync::MutexGuard<'_, Option<Shortcut>> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Registers the saved shortcut, or the default one the first time.
+enum Saved {
+    Never,
+    Removed,
+    Chosen(String),
+}
+
+fn saved(app: &AppHandle) -> Saved {
+    match settings::read::<Option<String>, _>(app, settings::SHORTCUT) {
+        None => Saved::Never,
+        Some(None) => Saved::Removed,
+        Some(Some(text)) => Saved::Chosen(text),
+    }
+}
+
 pub fn init(app: &tauri::App, toggle: fn(&AppHandle)) -> tauri::Result<()> {
     app.handle().plugin(
         tauri_plugin_global_shortcut::Builder::new()
@@ -36,12 +45,12 @@ pub fn init(app: &tauri::App, toggle: fn(&AppHandle)) -> tauri::Result<()> {
             })
             .build(),
     )?;
-    // A saved `null` means the user removed the shortcut.
-    let saved: Option<Option<String>> = settings::read(app.handle(), settings::SHORTCUT);
-    let shortcut = saved
-        .unwrap_or_else(|| Some(DEFAULT.to_string()))
-        .and_then(|text| parse(&text).ok());
-    // Another app may own the combination; Ports still works from the tray.
+    let text = match saved(app.handle()) {
+        Saved::Never => Some(DEFAULT.to_string()),
+        Saved::Removed => None,
+        Saved::Chosen(text) => Some(text),
+    };
+    let shortcut = text.and_then(|text| parse(&text).ok());
     let shortcut = shortcut.filter(|shortcut| match app.global_shortcut().register(*shortcut) {
         Ok(()) => true,
         Err(error) => {
@@ -57,7 +66,6 @@ pub fn current(app: &AppHandle) -> Option<String> {
     registered(app).map(Shortcut::into_string)
 }
 
-/// A combination with Control, Option or Command, so it can't take over typing.
 fn parse(text: &str) -> Result<Shortcut, String> {
     let shortcut: Shortcut = text
         .parse()
@@ -71,8 +79,6 @@ fn parse(text: &str) -> Result<Shortcut, String> {
     Ok(shortcut)
 }
 
-/// Registers `text` before letting go of the current shortcut, so a
-/// shortcut another app holds leaves the current one working.
 pub fn replace(app: &AppHandle, text: Option<&str>) -> Result<(), String> {
     let next = text.map(parse).transpose()?;
     let mut current = registered(app);
@@ -111,7 +117,6 @@ pub fn replace(app: &AppHandle, text: Option<&str>) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    // What the settings recorder sends for a few combinations.
     #[test]
     fn reads_the_shortcuts_the_recorder_sends() {
         assert_eq!(

@@ -1,6 +1,3 @@
-//! Icons of projects and pages, served to the windows by content hash, so
-//! snapshots carry a short key instead of the image.
-
 use std::collections::HashMap;
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -10,9 +7,7 @@ use std::time::SystemTime;
 
 use tauri::http::{Response, StatusCode, header};
 
-/// The URI scheme the windows load icons from. Must match `src/lib/ports/format.ts`.
 pub const SCHEME: &str = "ports-icon";
-/// Favicons and project icons are small; anything bigger isn't one.
 pub const MAX_BYTES: u64 = 256 * 1024;
 
 #[derive(Debug)]
@@ -22,8 +17,6 @@ pub struct Icon {
     bytes: Vec<u8>,
 }
 
-/// Every icon something still holds: a page check or a project icon file.
-/// An icon nobody holds anymore is dropped.
 #[derive(Default)]
 pub struct Icons(Mutex<HashMap<String, Weak<Icon>>>);
 
@@ -51,10 +44,7 @@ impl Icons {
         super::lock(&self.0).get(key).and_then(Weak::upgrade)
     }
 
-    /// Answers `ports-icon://localhost/<key>`. The key changes with the
-    /// image, so the window may cache it for good.
     pub fn respond(&self, path: &str) -> Response<Vec<u8>> {
-        // An SVG runs no script inside `<img>`; the policy also covers opening it directly.
         let response = Response::builder()
             .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
             .header(
@@ -72,7 +62,6 @@ impl Icons {
     }
 }
 
-/// The image types a window shows, by file extension.
 fn mime(path: &Path) -> Option<&'static str> {
     let extension = path.extension()?.to_str()?.to_ascii_lowercase();
     Some(match extension.as_str() {
@@ -86,14 +75,12 @@ fn mime(path: &Path) -> Option<&'static str> {
     })
 }
 
-/// A project's icon file as last read, kept until the file changes.
 struct Read {
     modified: Option<SystemTime>,
     len: u64,
     icon: Option<Arc<Icon>>,
 }
 
-/// Project icon files, read again only when they change on disk.
 #[derive(Default)]
 pub struct Files {
     read: HashMap<PathBuf, Read>,
@@ -123,7 +110,6 @@ impl Files {
         icon
     }
 
-    /// Forgets the files no server uses anymore, which lets their icons go.
     pub fn retain(&mut self, used: &[PathBuf]) {
         self.read.retain(|path, _| used.contains(path));
     }
@@ -134,6 +120,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_windows_load_icons_from_this_scheme() {
+        let windows = include_str!("../../../src/lib/ports/format.ts");
+        assert!(windows.contains(&format!("= \"{SCHEME}\";")));
+    }
+
+    #[test]
     fn serves_an_icon_while_something_holds_it() {
         let icons = Icons::default();
         let icon = icons.insert("image/svg+xml", b"<svg/>".to_vec());
@@ -141,7 +133,6 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()[header::CONTENT_TYPE], "image/svg+xml");
         assert_eq!(response.body(), b"<svg/>");
-        // The same image gets the same key, so the window's cache keeps working.
         assert_eq!(
             icons.insert("image/svg+xml", b"<svg/>".to_vec()).key,
             icon.key
@@ -162,7 +153,6 @@ mod tests {
         assert_eq!(files.icon(&path, &icons).unwrap().key, first.key);
         fs::write(&path, "<svg>two</svg>").unwrap();
         assert_ne!(files.icon(&path, &icons).unwrap().key, first.key);
-        // Not an image a window shows.
         let text = dir.path().join("icon.txt");
         fs::write(&text, "icon").unwrap();
         assert!(files.icon(&text, &icons).is_none());
