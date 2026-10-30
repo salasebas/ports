@@ -297,6 +297,17 @@ describe("search", () => {
 		expect(store.portOwners).toHaveLength(2);
 	});
 
+	// Typing 5173 passes through 5, 51 and 517; a numbered branch is found by its number.
+	it.each([
+		["part of a port", "51", 5173],
+		["a number in a branch", "42", 3003],
+	])("falls back to %s when no port or PID is exactly the number", (_field, query, port) => {
+		const review = server({ port: 3003, pid: 160, name: "review", branch: "pr-42" });
+		const store = storeWith(web, api, review);
+		store.query = query;
+		expect(store.filtered.map((row) => row.port)).toEqual([port]);
+	});
+
 	it("says a searched port is free when nothing listens on it", () => {
 		const store = storeWith(web, api);
 		store.query = ":4000";

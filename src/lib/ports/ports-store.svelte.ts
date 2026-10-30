@@ -162,15 +162,19 @@ export class PortsStore {
 
 	/**
 	 * The servers matching the search: pinned ones first, then in the chosen
-	 * order. A port number lists every owner of the port, and the shown
-	 * servers with that PID.
+	 * order. A port number lists every owner of the port and the shown
+	 * servers with that PID; without any, the shown servers where the
+	 * number appears, such as a port it starts or a branch.
 	 */
 	filtered = $derived.by(() => {
 		const port = this.searchedPort;
-		const matching =
-			port !== null
-				? [...this.portOwners, ...this.shown.filter((server) => server.port !== port && hasPid(server, port))]
-				: this.shown.filter((server) => matchesSearch(server, this.query, this.#home));
+		const exact =
+			port === null
+				? []
+				: [...this.portOwners, ...this.shown.filter((server) => server.port !== port && hasPid(server, port))];
+		const matching = exact.length
+			? exact
+			: this.shown.filter((server) => matchesSearch(server, this.query, this.#home));
 		const { key, descending } = preferences.sort.current;
 		const pinned = preferences.pinned.current;
 		const rank = (server: Server) => (pinned.includes(serverKey(server)) ? 0 : 1);

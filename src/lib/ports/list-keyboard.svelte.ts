@@ -100,10 +100,13 @@ export class ListKeyboard {
 		const focused = document.activeElement;
 		const search = this.#options.search();
 		const onRow = focused instanceof HTMLElement && focused.matches("[data-row-id]");
+		// A row reached with Tab is the one the keys act on.
+		if (onRow && focused.dataset.rowId) this.choose(focused.dataset.rowId);
 		const inSearch = focused !== null && focused === search;
 		const editing = isEditable(focused);
 		const detailsOpen = store.selected !== null || store.selectedProject !== null;
-		const target = store.selected ?? this.active;
+		// The server whose details are open, or the row that has focus; never a row the user can't see is chosen.
+		const target = store.selected ?? (onRow ? this.active : null);
 		switch (listCommand(event)) {
 			case "open":
 				if (!target || (editing && !inSearch)) return;
