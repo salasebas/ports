@@ -68,9 +68,7 @@
 	<Field.Content>
 		<Field.Label for="{id}-auto-scope">Stop forgotten servers</Field.Label>
 		<Field.Description>
-			Stops dev servers left idle without asking: only those whose folder was deleted, such as a removed worktree, or
-			every idle one. It checks each again right before stopping it and notifies you after. Databases, containers,
-			hidden and protected servers, and ones a supervisor runs, keep running.
+			Stops idle dev servers for you and notifies you. Never databases, containers, hidden or protected ones.
 		</Field.Description>
 	</Field.Content>
 	<NativeSelect.Root
@@ -91,7 +89,7 @@
 	<Field.Field orientation="horizontal">
 		<Field.Content>
 			<Field.Label for="{id}-auto-idle">Idle for</Field.Label>
-			<Field.Description>How long a server goes without connections or CPU first.</Field.Description>
+			<Field.Description>Without connections or CPU.</Field.Description>
 		</Field.Content>
 		<NativeSelect.Root
 			id="{id}-auto-idle"
@@ -112,7 +110,7 @@
 	<Field.Field orientation="horizontal">
 		<Field.Content>
 			<Field.Label for="{id}-auto-pause">Pause</Field.Label>
-			<Field.Description>Stops nothing until you resume; a stop already waiting is cancelled.</Field.Description>
+			<Field.Description>Stops nothing until you resume.</Field.Description>
 		</Field.Content>
 		<Switch id="{id}-auto-pause" {disabled} bind:checked={() => auto.paused, (paused) => save({ policy, paused })} />
 	</Field.Field>

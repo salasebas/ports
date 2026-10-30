@@ -1,6 +1,5 @@
 <script lang="ts">
 	import type { Component, Snippet } from "svelte";
-	import ChevronLeftIcon from "@lucide/svelte/icons/chevron-left";
 	import MonitorIcon from "@lucide/svelte/icons/monitor";
 	import MoonIcon from "@lucide/svelte/icons/moon";
 	import SunIcon from "@lucide/svelte/icons/sun";
@@ -107,18 +106,17 @@
 <div class="flex min-h-screen flex-col">
 	<header
 		class={cn(
-			"sticky top-0 z-10 grid grid-cols-[1fr_auto_1fr] items-center border-b bg-background/80 px-4 py-3 backdrop-blur-xl backdrop-saturate-150 transition-colors duration-200",
+			"sticky top-0 z-10 border-b bg-background/80 backdrop-blur-xl backdrop-saturate-150 transition-colors duration-200",
 			scrollY > 0 ? "border-border" : "border-transparent",
 		)}
 	>
-		<Button href={resolve("/")} variant="ghost" size="sm" class="justify-self-start">
-			<ChevronLeftIcon data-icon="inline-start" />
-			Ports
-		</Button>
-		<h1 class="text-lg font-semibold tracking-tight">Settings</h1>
+		<div class="mx-auto flex min-h-15 w-full max-w-5xl items-center gap-3 px-6 py-3">
+			<h1 class="text-lg font-semibold tracking-tight">Settings</h1>
+			<Button href={resolve("/")} variant="secondary" size="sm" class="ml-auto">Done</Button>
+		</div>
 	</header>
 
-	<main class="mx-auto flex w-full max-w-lg flex-col gap-6 px-6 py-6">
+	<main class="mx-auto flex w-full max-w-2xl flex-col gap-6 px-6 py-6">
 		{#snippet general()}
 			<Field.Field>
 				<Field.Title id="{id}-appearance">Appearance</Field.Title>
@@ -222,9 +220,7 @@
 			<Field.Field orientation="horizontal">
 				<Field.Content>
 					<Field.Label for="{id}-idle">Idle after</Field.Label>
-					<Field.Description
-						>How long a server goes without connections or CPU before clean up offers it.</Field.Description
-					>
+					<Field.Description>Without connections or CPU.</Field.Description>
 				</Field.Content>
 				<NativeSelect.Root
 					id="{id}-idle"

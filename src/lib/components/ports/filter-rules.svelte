@@ -75,9 +75,7 @@
 <Field.Field data-invalid={rangeError ? true : undefined}>
 	<Field.Content>
 		<Field.Label for="{id}-range-start">Port range</Field.Label>
-		<Field.Description>
-			Lists only these ports, in the window and the menu bar. Leave both empty to list every port.
-		</Field.Description>
+		<Field.Description>Leave empty to list every port.</Field.Description>
 	</Field.Content>
 	<form class="flex items-center gap-2" onsubmit={saveRange}>
 		<Input
@@ -101,10 +99,7 @@
 <Field.Field data-invalid={ruleError ? true : undefined}>
 	<Field.Content>
 		<Field.Label for="{id}-pattern">Filters</Field.Label>
-		<Field.Description>
-			A rule matches when its text appears in the process name or the command, ignoring case. Hide rules win over show
-			rules; once a show rule exists, only the servers it matches are listed.
-		</Field.Description>
+		<Field.Description>Matches text in the process name or command. Hide wins over Show only.</Field.Description>
 	</Field.Content>
 	{#if ruleLists.length}
 		<div class="flex flex-wrap gap-1.5">
@@ -154,9 +149,7 @@
 	<Field.Content>
 		<Field.Title>Hidden servers</Field.Title>
 		<Field.Description>
-			{current.hidden.length
-				? "Left out of the window and the menu bar list. Remove one to show it again."
-				: "None yet. To hide one, open a server's details and choose Hide. It then leaves the window and the menu bar list."}
+			{current.hidden.length ? "Remove one to show it again." : "None. Hide one from its details."}
 		</Field.Description>
 	</Field.Content>
 	{#if current.hidden.length}

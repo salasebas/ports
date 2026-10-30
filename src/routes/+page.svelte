@@ -350,21 +350,23 @@
 <div class="flex min-h-screen flex-col">
 	<header
 		class={cn(
-			"sticky top-0 z-10 flex flex-wrap items-center gap-3 border-b bg-background/80 px-6 py-3 backdrop-blur-xl backdrop-saturate-150 transition-colors duration-200",
+			"sticky top-0 z-10 border-b bg-background/80 backdrop-blur-xl backdrop-saturate-150 transition-colors duration-200",
 			scrollY > 0 ? "border-border" : "border-transparent",
 		)}
 	>
-		<div class="flex items-center gap-2">
-			<h1 class="text-lg font-semibold tracking-tight">Ports</h1>
-			<Badge variant="secondary">{store.shown.length}</Badge>
-		</div>
-		<div class="ml-auto flex items-center gap-2">
-			<ServerSearch bind:value={store.query} bind:ref={search} class="w-64" />
-			<ServerFilter {store} />
-			{@render sortMenu()}
-			<CleanUpButton {store} />
-			{@render action("Refresh", RefreshCwIcon, store.refresh)}
-			<SettingsButton />
+		<div class="mx-auto flex w-full max-w-5xl flex-wrap items-center gap-3 px-6 py-3">
+			<div class="flex items-center gap-2">
+				<h1 class="text-lg font-semibold tracking-tight">Ports</h1>
+				<Badge variant="secondary">{store.shown.length}</Badge>
+			</div>
+			<div class="ml-auto flex items-center gap-2">
+				<ServerSearch bind:value={store.query} bind:ref={search} class="w-64" />
+				<ServerFilter {store} />
+				{@render sortMenu()}
+				<CleanUpButton {store} />
+				{@render action("Refresh", RefreshCwIcon, store.refresh)}
+				<SettingsButton />
+			</div>
 		</div>
 	</header>
 

@@ -29,8 +29,7 @@
 		<AlertDialog.Header>
 			<AlertDialog.Title>Clean up servers</AlertDialog.Title>
 			<AlertDialog.Description>
-				Choose what to stop. Servers count as idle after {idleAfter} minutes without connections or CPU; change it in Settings.
-				Protected servers keep running.
+				Idle means {idleAfter} minutes without connections or CPU.
 			</AlertDialog.Description>
 		</AlertDialog.Header>
 		<ul class="flex max-h-60 flex-col gap-1 overflow-y-auto text-sm">
