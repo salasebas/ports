@@ -21,13 +21,14 @@ export async function resetSettings(scope: ResetScope): Promise<void> {
 	const defaults = await invoke<Omit<Settings, "revision">>("get_settings_defaults");
 	const local = structuredClone(preferenceDefaults);
 	const sections: SettingsSection[] =
-		scope === "all" ? ["cleanUp", "general", "servers", "memoryAlerts", "lists"] : [scope];
+		scope === "all" ? ["cleanUp", "servers", "memoryAlerts", "lists", "general"] : [scope];
+	if (scope === "all") preferences.metric.current = local.metric;
 	for (const section of sections) {
 		switch (section) {
 			case "general":
-				await settings.setShortcut(defaults.shortcut);
 				await disable();
 				setMode("system");
+				await settings.setShortcut(defaults.shortcut);
 				break;
 			case "servers":
 				await settings.setStopGrace(defaults.stopGraceSeconds);
@@ -56,5 +57,4 @@ export async function resetSettings(scope: ResetScope): Promise<void> {
 			}
 		}
 	}
-	if (scope === "all") preferences.metric.current = local.metric;
 }

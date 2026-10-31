@@ -64,7 +64,8 @@ const target = (server: Server) => {
 	return server.target;
 };
 
-export const serverKey = (server: Server) => (server.folder ? `project:${server.folder}` : `port:${server.port}`);
+export const serverKey = (server: Server) =>
+	server.folder && server.kind !== "container" ? `project:${server.folder}` : `port:${server.port}`;
 
 export const hiddenPort = (port: number) => `port:${port}`;
 export const hiddenProcess = (process: string) => `process:${process}`;

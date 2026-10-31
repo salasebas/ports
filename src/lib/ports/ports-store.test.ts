@@ -788,3 +788,9 @@ it("moves an individually hidden server's resources into Other apps", async () =
 	store.system = { totalBytes: 1600, usedBytes: 1000, cpuPercent: 10 };
 	expect(store.usage).toEqual({ serversBytes: 0, serversCpuPercent: 0, otherAppsBytes: 1000, otherAppsCpuPercent: 10 });
 });
+
+it("keeps a Compose container's pin and protection on its own port", () => {
+	const folder = "~/shop";
+	expect(serverKey(server({ port: 3000, folder }))).toBe("project:~/shop");
+	expect(serverKey(server({ port: 5433, folder, kind: "container" }))).toBe("port:5433");
+});

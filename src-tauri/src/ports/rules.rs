@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_store::StoreExt;
 
-use super::sampler::{Server, Snapshot};
+use super::sampler::{Kind, Server, Snapshot};
 use super::{Monitor, blocking, lock};
 
 const STORE: &str = "rules.json";
@@ -134,8 +134,8 @@ pub enum Change {
 
 pub fn key(server: &Server) -> String {
     match &server.folder {
-        Some(folder) => format!("project:{folder}"),
-        None => format!("port:{}", server.port),
+        Some(folder) if server.kind != Kind::Container => format!("project:{folder}"),
+        _ => format!("port:{}", server.port),
     }
 }
 
@@ -510,6 +510,9 @@ mod tests {
         web.folder = Some("~/web".into());
         let mut web2 = web.clone();
         web2.port = 5174;
+        let mut container = web.clone();
+        container.port = 5433;
+        container.kind = Kind::Container;
         rules
             .change(Change::Protect {
                 key: key(&db),
@@ -522,12 +525,12 @@ mod tests {
                 value: true,
             })
             .unwrap();
-        let mut servers = [db, web, web2];
+        let mut servers = [db, web, web2, container];
         rules.apply(&mut servers);
         assert_eq!(
             servers.map(|server| server.protected),
-            [false, true, true],
-            "protection covers every port of a project"
+            [false, true, true, false],
+            "protection covers every port of a project, but a container stays on its own port"
         );
     }
 

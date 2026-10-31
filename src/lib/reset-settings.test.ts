@@ -1,4 +1,6 @@
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
+import { disable } from "@tauri-apps/plugin-autostart";
+import { setMode } from "mode-watcher";
 import { afterEach, expect, it, vi } from "vitest";
 import { preferences } from "./ports/preferences.svelte";
 import { resetSettings } from "./reset-settings";
@@ -59,4 +61,26 @@ it("does not lower the idle threshold if automatic clean up could not be disable
 	});
 	await expect(resetSettings("cleanUp")).rejects.toThrow("disk full");
 	expect(commands).not.toContain("set_idle_after");
+});
+
+it("resets everything else when the default shortcut is taken by another app", async () => {
+	const commands: string[] = [];
+	mockIPC((command) => {
+		commands.push(command);
+		if (command === "get_settings_defaults") return defaults;
+		if (command === "set_shortcut") throw new Error("another app may be using it");
+		return { ...defaults, revision: 102, rules: { revision: 102, rules: {} } };
+	});
+	preferences.metric.current = "cpu";
+	preferences.editor.current = "zed";
+	preferences.sort.current = { key: "uptime", descending: true };
+
+	await expect(resetSettings("all")).rejects.toThrow("another app may be using it");
+
+	expect(preferences.metric.current).toBe("memory");
+	expect(preferences.editor.current).toBe("cursor");
+	expect(preferences.sort.current).toEqual({ key: "port", descending: false });
+	expect(commands).toContain("set_alerts");
+	expect(vi.mocked(disable)).toHaveBeenCalled();
+	expect(vi.mocked(setMode)).toHaveBeenCalledWith("system");
 });

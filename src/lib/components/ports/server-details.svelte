@@ -39,7 +39,7 @@
 		verifiedPage,
 	} from "$lib/ports/format";
 	import { fileManagerName } from "$lib/platform";
-	import { hiddenPort, hiddenProcess, type PortsStore } from "$lib/ports/ports-store.svelte";
+	import { hiddenPort, hiddenProcess, serverKey, type PortsStore } from "$lib/ports/ports-store.svelte";
 	import { processKey, processTree } from "$lib/ports/resources";
 	import { editorLabel, preferences } from "$lib/ports/preferences.svelte";
 	import { invoke, isTauri } from "@tauri-apps/api/core";
@@ -75,7 +75,9 @@
 		if (alerts.enabled) return "Alerts if it keeps growing";
 		return above && `Alerts ${above}`;
 	});
-	const scope = $derived(server.folder ? "every port of this project" : `:${server.port} only`);
+	const scope = $derived(
+		serverKey(server).startsWith("project:") ? "every port of this project" : `:${server.port} only`,
+	);
 
 	const supervisorNames = { homebrew: "Homebrew", pm2: "PM2", supervisord: "supervisord" };
 	const supervisor = $derived(server.supervisor);
@@ -233,28 +235,30 @@
 					{fileManagerName}
 				</Button>
 			</div>
-			{#if saved}
-				<div class="grid grid-cols-2 gap-2">
+			{#if server.kind !== "container"}
+				{#if saved}
+					<div class="grid grid-cols-2 gap-2">
+						<Button variant="secondary" size="sm" onclick={() => store.saveProject(server)}>
+							<BookmarkIcon data-icon="inline-start" />
+							Update saved
+						</Button>
+						<Button variant="secondary" size="sm" onclick={() => store.forgetSaved(saved)}>
+							<BookmarkMinusIcon data-icon="inline-start" />
+							Unsave
+						</Button>
+					</div>
+				{:else}
 					<Button variant="secondary" size="sm" onclick={() => store.saveProject(server)}>
 						<BookmarkIcon data-icon="inline-start" />
-						Update saved
+						Save project
 					</Button>
-					<Button variant="secondary" size="sm" onclick={() => store.forgetSaved(saved)}>
-						<BookmarkMinusIcon data-icon="inline-start" />
-						Unsave
-					</Button>
-				</div>
-			{:else}
-				<Button variant="secondary" size="sm" onclick={() => store.saveProject(server)}>
-					<BookmarkIcon data-icon="inline-start" />
-					Save project
-				</Button>
-			{/if}
-			{#if saved}
-				<p class="text-xs text-muted-foreground">
-					Saved to start {saved.command} at {saved.expectedAddress}:{saved.expectedPort}. Restart above still signals
-					this process.
-				</p>
+				{/if}
+				{#if saved}
+					<p class="text-xs text-muted-foreground">
+						Saved to start {saved.command} at {saved.expectedAddress}:{saved.expectedPort}. Restart above still signals
+						this process.
+					</p>
+				{/if}
 			{/if}
 		{/if}
 		{#if canStop(server)}
