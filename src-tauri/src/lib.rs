@@ -279,6 +279,11 @@ mod tests {
 
     #[test]
     fn the_tray_webview_is_loaded_only_when_requested() {
+        let mut context = tauri::generate_context!(test = true);
+        // On macOS Tauri applies window effects to the native view, which the mock runtime lacks.
+        for window in &mut context.config_mut().app.windows {
+            window.window_effects = None;
+        }
         let app = tauri::test::mock_builder()
             .setup(|app| {
                 assert!(app.get_webview_window(MAIN_WINDOW).is_some());
@@ -290,7 +295,7 @@ mod tests {
                 assert_eq!(app.webview_windows().len(), 2);
                 Ok(())
             })
-            .build(tauri::generate_context!())
+            .build(context)
             .unwrap();
         app.run_return(|app, event| {
             if matches!(event, tauri::RunEvent::Ready) {
