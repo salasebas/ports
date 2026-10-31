@@ -3,6 +3,7 @@
 	import MonitorIcon from "@lucide/svelte/icons/monitor";
 	import MoonIcon from "@lucide/svelte/icons/moon";
 	import SunIcon from "@lucide/svelte/icons/sun";
+	import XIcon from "@lucide/svelte/icons/x";
 	import { isTauri } from "@tauri-apps/api/core";
 	import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 	import { setMode, userPrefersMode } from "mode-watcher";
@@ -15,11 +16,12 @@
 	import * as AlertDialog from "$lib/components/ui/alert-dialog";
 	import * as Card from "$lib/components/ui/card";
 	import * as Field from "$lib/components/ui/field";
-	import * as NativeSelect from "$lib/components/ui/native-select";
 	import { Switch } from "$lib/components/ui/switch";
 	import * as ToggleGroup from "$lib/components/ui/toggle-group";
+	import * as Tooltip from "$lib/components/ui/tooltip";
 	import AutoCleanupSettings from "$lib/components/ports/auto-cleanup-settings.svelte";
 	import FilterRules from "$lib/components/ports/filter-rules.svelte";
+	import PlatformSelect from "$lib/components/ports/platform-select.svelte";
 	import ShortcutRecorder from "$lib/components/ports/shortcut-recorder.svelte";
 	import { setRefreshInterval } from "$lib/ports/ports-store.svelte";
 	import { editors, groupHeaderSizes, preferences, refreshIntervals } from "$lib/ports/preferences.svelte";
@@ -60,7 +62,8 @@
 		resetScope === "all" ? "Reset all settings?" : `Reset ${resetSections[resetScope]} settings?`,
 	);
 	const resetDescriptions: Record<ResetScope, string> = {
-		general: "Restores system appearance and the default shortcut, and turns off Open at login.",
+		appearance: "Restores the system theme and keeps the header visible.",
+		general: "Restores the default shortcut and turns off Open at login.",
 		servers:
 			"Restores the default editor, refresh interval, confirmation prompts, and time before force killing a server.",
 		cleanUp: "Turns off automatic clean up and restores the default idle threshold. No servers will be stopped.",
@@ -155,20 +158,29 @@
 	{#snippet header()}
 		<div class="mx-auto flex min-h-15 w-full max-w-5xl items-center gap-3 px-6 py-3">
 			<h1 class="text-lg font-semibold tracking-tight">Settings</h1>
-			<Button href={resolve("/")} variant="secondary" size="sm" class="ml-auto">Done</Button>
+			<Tooltip.Root>
+				<Tooltip.Trigger>
+					{#snippet child({ props })}
+						<Button {...props} href={resolve("/")} variant="ghost" size="icon-sm" class="ml-auto" aria-label="Close">
+							<XIcon />
+						</Button>
+					{/snippet}
+				</Tooltip.Trigger>
+				<Tooltip.Content>Close Esc</Tooltip.Content>
+			</Tooltip.Root>
 		</div>
 	{/snippet}
 
 	<div class="mx-auto flex w-full max-w-2xl flex-col gap-6 p-6">
-		{#snippet general()}
+		{#snippet appearance()}
 			<Field.Field>
-				<Field.Title id="{id}-appearance">Appearance</Field.Title>
+				<Field.Title id="{id}-theme">Theme</Field.Title>
 				<ToggleGroup.Root
 					type="single"
 					variant="outline"
 					size="sm"
 					class="w-full"
-					aria-labelledby="{id}-appearance"
+					aria-labelledby="{id}-theme"
 					bind:value={
 						() => userPrefersMode.current,
 						(value) => {
@@ -185,6 +197,17 @@
 				</ToggleGroup.Root>
 			</Field.Field>
 			<Field.Separator />
+			<Field.Field orientation="horizontal">
+				<Field.Content>
+					<Field.Label for="{id}-keep-header">Keep header visible</Field.Label>
+					<Field.Description>Stays at the top of the window while you scroll.</Field.Description>
+				</Field.Content>
+				<Switch id="{id}-keep-header" bind:checked={preferences.keepHeaderVisible.current} />
+			</Field.Field>
+		{/snippet}
+		{@render section("Appearance", appearance, "appearance")}
+
+		{#snippet general()}
 			<Field.Field orientation="horizontal">
 				<Field.Label for="{id}-open-at-login">Open at login</Field.Label>
 				<Switch id="{id}-open-at-login" disabled={!desktop} bind:checked={() => openAtLogin, setOpenAtLogin} />
@@ -206,25 +229,17 @@
 		{#snippet servers()}
 			<Field.Field orientation="horizontal">
 				<Field.Label for="{id}-editor">Editor</Field.Label>
-				<NativeSelect.Root id="{id}-editor" size="sm" class="w-36" bind:value={preferences.editor.current}>
-					{#each editors as editor (editor.value)}
-						<NativeSelect.Option value={editor.value}>{editor.label}</NativeSelect.Option>
-					{/each}
-				</NativeSelect.Root>
+				<PlatformSelect id="{id}-editor" class="w-36" options={editors} bind:value={preferences.editor.current} />
 			</Field.Field>
 			<Field.Separator />
 			<Field.Field orientation="horizontal">
 				<Field.Label for="{id}-refresh">Refresh</Field.Label>
-				<NativeSelect.Root
+				<PlatformSelect
 					id="{id}-refresh"
-					size="sm"
 					class="w-36"
+					options={refreshIntervals.map(({ value, label }) => ({ value: String(value), label }))}
 					bind:value={() => String(preferences.refreshInterval.current), (value) => setRefreshInterval(Number(value))}
-				>
-					{#each refreshIntervals as interval (interval.value)}
-						<NativeSelect.Option value={String(interval.value)}>{interval.label}</NativeSelect.Option>
-					{/each}
-				</NativeSelect.Root>
+				/>
 			</Field.Field>
 			<Field.Separator />
 			<Field.Field orientation="horizontal">
@@ -244,17 +259,13 @@
 						>How long Stop gives a server to exit on its own. Force Kill doesn't wait.</Field.Description
 					>
 				</Field.Content>
-				<NativeSelect.Root
+				<PlatformSelect
 					id="{id}-grace"
-					size="sm"
 					class="w-36"
 					disabled={!desktop}
+					options={stopGraces}
 					bind:value={() => String(settings.current.stopGraceSeconds), (value) => setStopGrace(Number(value))}
-				>
-					{#each stopGraces as grace (grace.value)}
-						<NativeSelect.Option value={grace.value}>{grace.label}</NativeSelect.Option>
-					{/each}
-				</NativeSelect.Root>
+				/>
 			</Field.Field>
 		{/snippet}
 		{@render section("Servers", servers, "servers")}
@@ -265,17 +276,13 @@
 					<Field.Label for="{id}-idle">Idle after</Field.Label>
 					<Field.Description>Without connections or CPU.</Field.Description>
 				</Field.Content>
-				<NativeSelect.Root
+				<PlatformSelect
 					id="{id}-idle"
-					size="sm"
 					class="w-36"
 					disabled={!desktop}
+					options={idleThresholds}
 					bind:value={() => String(settings.current.idleAfterMinutes), (value) => setIdleAfter(Number(value))}
-				>
-					{#each idleThresholds as threshold (threshold.value)}
-						<NativeSelect.Option value={threshold.value}>{threshold.label}</NativeSelect.Option>
-					{/each}
-				</NativeSelect.Root>
+				/>
 			</Field.Field>
 			<Field.Separator />
 			<AutoCleanupSettings {id} disabled={!desktop} />
@@ -300,20 +307,16 @@
 					<Field.Label for="{id}-threshold">High memory</Field.Label>
 					<Field.Description>When a server uses more than this.</Field.Description>
 				</Field.Content>
-				<NativeSelect.Root
+				<PlatformSelect
 					id="{id}-threshold"
-					size="sm"
 					class="w-36"
 					disabled={!desktop}
+					options={alertThresholds}
 					bind:value={
 						() => (alerts.thresholdBytes === null ? "off" : String(alerts.thresholdBytes)),
 						(value) => setAlerts({ thresholdBytes: value === "off" ? null : Number(value) })
 					}
-				>
-					{#each alertThresholds as threshold (threshold.value)}
-						<NativeSelect.Option value={threshold.value}>{threshold.label}</NativeSelect.Option>
-					{/each}
-				</NativeSelect.Root>
+				/>
 			</Field.Field>
 		{/snippet}
 		{@render section("Memory alerts", memory, "memoryAlerts")}
@@ -321,11 +324,12 @@
 		{#snippet lists()}
 			<Field.Field orientation="horizontal">
 				<Field.Label for="{id}-group-headers">Group headers</Field.Label>
-				<NativeSelect.Root id="{id}-group-headers" size="sm" class="w-36" bind:value={preferences.groupHeaders.current}>
-					{#each groupHeaderSizes as size (size.value)}
-						<NativeSelect.Option value={size.value}>{size.label}</NativeSelect.Option>
-					{/each}
-				</NativeSelect.Root>
+				<PlatformSelect
+					id="{id}-group-headers"
+					class="w-36"
+					options={groupHeaderSizes}
+					bind:value={preferences.groupHeaders.current}
+				/>
 			</Field.Field>
 			<Field.Separator />
 			<FilterRules {id} disabled={!desktop} />

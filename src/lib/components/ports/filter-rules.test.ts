@@ -6,6 +6,8 @@ import { rules, type RulesChange } from "$lib/rules.svelte";
 import AutoCleanupSettings from "./auto-cleanup-settings.svelte";
 import FilterRules from "./filter-rules.svelte";
 
+vi.mock("$lib/platform", async (original) => ({ ...(await original<object>()), isMac: true }));
+
 let view: ReturnType<typeof mount> | undefined;
 let refused = false;
 

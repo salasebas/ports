@@ -5,7 +5,7 @@
 	import { Button } from "$lib/components/ui/button";
 	import * as Field from "$lib/components/ui/field";
 	import { Input } from "$lib/components/ui/input";
-	import * as NativeSelect from "$lib/components/ui/native-select";
+	import PlatformSelect from "./platform-select.svelte";
 	import { hiddenLabel } from "$lib/ports/ports-store.svelte";
 	import { rules, type Rule, type RuleField, type RulesChange } from "$lib/rules.svelte";
 
@@ -18,6 +18,15 @@
 	let start = $derived(current.portRange ? String(current.portRange.start) : "");
 	let end = $derived(current.portRange ? String(current.portRange.end) : "");
 	let rangeError = $state<string | null>(null);
+
+	const listOptions: { value: List; label: string }[] = [
+		{ value: "exclude", label: "Hide" },
+		{ value: "include", label: "Show only" },
+	];
+	const fieldOptions: { value: RuleField; label: string }[] = [
+		{ value: "process", label: "Process" },
+		{ value: "command", label: "Command" },
+	];
 
 	let list = $state<List>("exclude");
 	let field = $state<RuleField>("process");
@@ -125,14 +134,14 @@
 		</div>
 	{/if}
 	<form class="flex flex-wrap items-center gap-2" onsubmit={addRule}>
-		<NativeSelect.Root size="sm" class="w-28" aria-label="What the rule does" {disabled} bind:value={list}>
-			<NativeSelect.Option value="exclude">Hide</NativeSelect.Option>
-			<NativeSelect.Option value="include">Show only</NativeSelect.Option>
-		</NativeSelect.Root>
-		<NativeSelect.Root size="sm" class="w-28" aria-label="What the rule matches" {disabled} bind:value={field}>
-			<NativeSelect.Option value="process">Process</NativeSelect.Option>
-			<NativeSelect.Option value="command">Command</NativeSelect.Option>
-		</NativeSelect.Root>
+		<PlatformSelect class="w-28" aria-label="What the rule does" {disabled} options={listOptions} bind:value={list} />
+		<PlatformSelect
+			class="w-28"
+			aria-label="What the rule matches"
+			{disabled}
+			options={fieldOptions}
+			bind:value={field}
+		/>
 		<Input
 			id="{id}-pattern"
 			class="h-8 min-w-0 flex-1"

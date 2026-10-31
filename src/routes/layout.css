@@ -181,12 +181,10 @@
 	}
 	html {
 		@apply font-sans antialiased;
-		scrollbar-gutter: stable;
 	}
 	html:has([data-surface="tray"]),
 	html:has([data-surface="tray"]) body {
 		background: transparent;
-		scrollbar-gutter: auto;
 	}
 }
 

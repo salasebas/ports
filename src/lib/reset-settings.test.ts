@@ -74,12 +74,14 @@ it("resets everything else when the default shortcut is taken by another app", a
 	preferences.metric.current = "cpu";
 	preferences.editor.current = "zed";
 	preferences.sort.current = { key: "uptime", descending: true };
+	preferences.keepHeaderVisible.current = false;
 
 	await expect(resetSettings("all")).rejects.toThrow("another app may be using it");
 
 	expect(preferences.metric.current).toBe("memory");
 	expect(preferences.editor.current).toBe("cursor");
 	expect(preferences.sort.current).toEqual({ key: "port", descending: false });
+	expect(preferences.keepHeaderVisible.current).toBe(true);
 	expect(commands).toContain("set_alerts");
 	expect(vi.mocked(disable)).toHaveBeenCalled();
 	expect(vi.mocked(setMode)).toHaveBeenCalledWith("system");

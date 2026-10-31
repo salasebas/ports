@@ -1,30 +1,24 @@
 <script lang="ts">
 	import type { Snippet } from "svelte";
+	import { preferences } from "$lib/ports/preferences.svelte";
+	import { cn } from "$lib/utils";
 
 	let { header, children }: { header: Snippet; children: Snippet } = $props();
 	let headerHeight = $state(60);
+	const keepVisible = $derived(preferences.keepHeaderVisible.current);
 </script>
 
-<div class="relative isolate flex h-dvh flex-col overflow-clip">
+<div
+	class="isolate grid h-dvh [scrollbar-gutter:stable_both-edges] grid-cols-[minmax(0,1fr)] grid-rows-[auto_1fr] overflow-y-auto overscroll-contain"
+	style:scroll-padding-block-start={keepVisible ? `${headerHeight}px` : undefined}
+>
 	<header
 		bind:offsetHeight={headerHeight}
-		class="absolute inset-x-0 inset-bs-0 z-10 border-b bg-surface-translucent backdrop-blur-xl backdrop-saturate-150"
+		class={cn("z-10 border-b bg-background", keepVisible && "sticky inset-bs-0")}
 	>
 		{@render header()}
 	</header>
-	<main
-		class="min-h-0 flex-1 overflow-y-auto overscroll-contain"
-		style:padding-block-start={`${headerHeight}px`}
-		style:scroll-padding-block-start={`${headerHeight}px`}
-	>
+	<main>
 		{@render children()}
 	</main>
 </div>
-
-<style>
-	@media (prefers-reduced-transparency: reduce) {
-		header {
-			backdrop-filter: none;
-		}
-	}
-</style>

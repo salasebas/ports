@@ -7,6 +7,7 @@ import { rules } from "./rules.svelte";
 import { settings, type Settings } from "./settings.svelte";
 
 export const resetSections = {
+	appearance: "Appearance",
 	general: "General",
 	servers: "Servers",
 	cleanUp: "Clean up",
@@ -21,13 +22,16 @@ export async function resetSettings(scope: ResetScope): Promise<void> {
 	const defaults = await invoke<Omit<Settings, "revision">>("get_settings_defaults");
 	const local = structuredClone(preferenceDefaults);
 	const sections: SettingsSection[] =
-		scope === "all" ? ["cleanUp", "servers", "memoryAlerts", "lists", "general"] : [scope];
+		scope === "all" ? ["cleanUp", "appearance", "servers", "memoryAlerts", "lists", "general"] : [scope];
 	if (scope === "all") preferences.metric.current = local.metric;
 	for (const section of sections) {
 		switch (section) {
+			case "appearance":
+				setMode("system");
+				preferences.keepHeaderVisible.current = local.keepHeaderVisible;
+				break;
 			case "general":
 				await disable();
-				setMode("system");
 				await settings.setShortcut(defaults.shortcut);
 				break;
 			case "servers":

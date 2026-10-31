@@ -426,7 +426,7 @@
 								<tr
 									data-slot="table-row"
 									class={cn(
-										"border-b transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted",
+										"border-b hover:bg-muted/50 data-[state=selected]:bg-muted",
 										server
 											? "group/row cursor-default focus-visible:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:ring-inset"
 											: "bg-muted/30",

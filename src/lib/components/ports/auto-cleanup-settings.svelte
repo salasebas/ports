@@ -2,7 +2,7 @@
 	import { onMount } from "svelte";
 	import { toast } from "svelte-sonner";
 	import * as Field from "$lib/components/ui/field";
-	import * as NativeSelect from "$lib/components/ui/native-select";
+	import PlatformSelect from "./platform-select.svelte";
 	import { Switch } from "$lib/components/ui/switch";
 	import { formatDuration } from "$lib/ports/format";
 	import {
@@ -76,17 +76,13 @@
 			Stops idle dev servers for you and notifies you. Never databases, containers, hidden or protected ones.
 		</Field.Description>
 	</Field.Content>
-	<NativeSelect.Root
+	<PlatformSelect
 		id="{id}-auto-scope"
-		size="sm"
 		class="w-40"
 		{disabled}
+		options={scopes}
 		bind:value={() => auto.policy?.scope ?? "off", setScope}
-	>
-		{#each scopes as scope (scope.value)}
-			<NativeSelect.Option value={scope.value}>{scope.label}</NativeSelect.Option>
-		{/each}
-	</NativeSelect.Root>
+	/>
 </Field.Field>
 {#if auto.policy}
 	{@const policy = auto.policy}
@@ -96,21 +92,17 @@
 			<Field.Label for="{id}-auto-idle">Idle for</Field.Label>
 			<Field.Description>Without connections or CPU.</Field.Description>
 		</Field.Content>
-		<NativeSelect.Root
+		<PlatformSelect
 			id="{id}-auto-idle"
-			size="sm"
 			class="w-40"
 			{disabled}
+			options={autoIdleChoices}
 			bind:value={
 				() => String(policy.idleMinutes),
 				(value) =>
 					save({ policy: { ...policy, idleMinutes: Number(value) }, paused: auto.paused }, "Automatic clean up updated")
 			}
-		>
-			{#each autoIdleChoices as choice (choice.value)}
-				<NativeSelect.Option value={choice.value}>{choice.label}</NativeSelect.Option>
-			{/each}
-		</NativeSelect.Root>
+		/>
 	</Field.Field>
 	<Field.Separator />
 	<Field.Field orientation="horizontal">
