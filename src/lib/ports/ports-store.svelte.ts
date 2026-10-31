@@ -1,13 +1,16 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { homeDir } from "@tauri-apps/api/path";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { SvelteSet } from "svelte/reactivity";
 import { toast } from "svelte-sonner";
 import { canStop, serverUrl } from "./format";
 import { preferences, type SortKey } from "./preferences.svelte";
+import { rules, type RulesChange } from "$lib/rules.svelte";
 import { savedMatches, type SavedProject } from "./projects";
 import type { ControlPreview, ProcessIdentity, Server, Snapshot, SystemUsage } from "./types";
 import { allocateUsage, controlKey, sharesControl } from "./resources";
+import { hasPid, matchesSearch, portQuery } from "./search";
 
 export const SNAPSHOT_EVENT = "ports://snapshot";
 export const PROJECTS_EVENT = "ports://projects";
@@ -22,9 +25,10 @@ async function attempt(action: Promise<unknown>): Promise<boolean> {
 	}
 }
 
-export function setRefreshInterval(ms: number) {
-	preferences.refreshInterval.current = ms;
-	return attempt(invoke("set_refresh_interval", { ms }));
+export async function setRefreshInterval(ms: number) {
+	const updated = await attempt(invoke("set_refresh_interval", { ms }));
+	if (updated) preferences.refreshInterval.current = ms;
+	return updated;
 }
 
 export type ServerAction = "stop" | "restart" | "forceKill" | "stopParent" | "stopAll";
@@ -60,7 +64,8 @@ const target = (server: Server) => {
 	return server.target;
 };
 
-export const serverKey = (server: Server) => (server.folder ? `project:${server.folder}` : `port:${server.port}`);
+export const serverKey = (server: Server) =>
+	server.folder && server.kind !== "container" ? `project:${server.folder}` : `port:${server.port}`;
 
 export const hiddenPort = (port: number) => `port:${port}`;
 export const hiddenProcess = (process: string) => `process:${process}`;
@@ -75,23 +80,14 @@ const ascending: Record<SortKey, (a: Server, b: Server) => number> = {
 
 function customize(server: Server): Server {
 	const name = preferences.names.current[server.port];
-	const isProtected = preferences.protection.current[serverKey(server)];
-	if (name === undefined && isProtected === undefined) return server;
-	return { ...server, name: name ?? server.name, protected: isProtected ?? server.protected };
-}
-
-export function unhide(entry: string) {
-	preferences.hidden.current = preferences.hidden.current.filter((e) => e !== entry);
+	return name === undefined ? server : { ...server, name };
 }
 
 export const hiddenLabel = (entry: string) => entry.replace(/^port:/, ":").replace(/^process:/, "");
 
-const idleCount = (n: number) => (n === 1 ? "1 idle server" : `${n} idle servers`);
+const serverCount = (n: number) => (n === 1 ? "1 server" : `${n} servers`);
 
-export function isHidden(server: Server) {
-	const hidden = preferences.hidden.current;
-	return hidden.includes(hiddenPort(server.port)) || hidden.includes(hiddenProcess(server.process));
-}
+export const cleanUpReason = (server: Server) => (server.cwdDeleted ? "folder deleted" : "idle");
 
 export class PortsStore {
 	servers = $state.raw<Server[]>([]);
@@ -104,6 +100,8 @@ export class PortsStore {
 	saved = $state.raw<SavedProject[]>([]);
 	pending = $state.raw<PendingAction | null>(null);
 	cleaning = $state.raw<Server[] | null>(null);
+	cleanSelection = new SvelteSet<string>();
+	#home = $state<string | null>(null);
 	renaming = $state.raw<Server | null>(null);
 	#busy = new SvelteSet<string>();
 	#controlling = $state.raw<Server[]>([]);
@@ -111,29 +109,25 @@ export class PortsStore {
 	#customized = $derived(this.servers.map(customize));
 
 	shown = $derived(
-		this.#customized.filter((server) => preferences.shownKinds.current.includes(server.kind) && !isHidden(server)),
+		this.#customized.filter((server) => preferences.shownKinds.current.includes(server.kind) && !server.hidden),
 	);
 
+	searchedPort = $derived(portQuery(this.query));
+
+	portOwners = $derived.by(() => {
+		const port = this.searchedPort;
+		return port === null ? [] : this.#customized.filter((server) => server.port === port);
+	});
+
 	filtered = $derived.by(() => {
-		const q = this.query.trim().toLowerCase();
-		const matching = q
-			? this.shown.filter((server) =>
-					[
-						server.port,
-						server.name,
-						server.process,
-						server.framework,
-						server.branch,
-						server.worktree,
-						server.repositoryName,
-						server.session?.label,
-						server.projectName,
-						server.web.state === "page" && server.web.title,
-					]
-						.filter(Boolean)
-						.some((field) => String(field).toLowerCase().includes(q)),
-				)
-			: this.shown;
+		const port = this.searchedPort;
+		const exact =
+			port === null
+				? []
+				: [...this.portOwners, ...this.shown.filter((server) => server.port !== port && hasPid(server, port))];
+		const matching = exact.length
+			? exact
+			: this.shown.filter((server) => matchesSearch(server, this.query, this.#home));
 		const { key, descending } = preferences.sort.current;
 		const pinned = preferences.pinned.current;
 		const rank = (server: Server) => (pinned.includes(serverKey(server)) ? 0 : 1);
@@ -154,7 +148,7 @@ export class PortsStore {
 		this.saved.find((project) => project.matchedServerId === server.id) ??
 		this.saved.find((project) => project.folder === server.folder && project.expectedPort === server.port);
 
-	idle = $derived(
+	candidates = $derived(
 		this.shown.filter(
 			(server) =>
 				canStop(server) &&
@@ -162,10 +156,10 @@ export class PortsStore {
 					.filter((sibling) => sharesControl(server, sibling))
 					.every(
 						(sibling) =>
-							sibling.status === "idle" &&
+							(sibling.status === "idle" || sibling.cwdDeleted) &&
 							!sibling.protected &&
 							!sibling.supervisor &&
-							!isHidden(sibling) &&
+							!sibling.hidden &&
 							preferences.shownKinds.current.includes(sibling.kind),
 					),
 		),
@@ -202,6 +196,11 @@ export class PortsStore {
 				if (connected) toast.error(String(error));
 			});
 		void attempt(invoke("set_refresh_interval", { ms: preferences.refreshInterval.current }));
+		void homeDir()
+			.then((home) => {
+				if (connected) this.#home = home;
+			})
+			.catch(() => {});
 		return () => {
 			connected = false;
 			void unlisten.then((stop) => stop()).catch(() => {});
@@ -282,6 +281,7 @@ export class PortsStore {
 	setSavedCommand = async (project: SavedProject, command: string) => {
 		const ok = await attempt(invoke("set_project_command", { request: { id: project.id, command } }));
 		await this.refreshSaved();
+		if (ok) toast.success("Command saved");
 		return ok;
 	};
 
@@ -290,6 +290,7 @@ export class PortsStore {
 			invoke("set_project_binding", { request: { id: project.id, expectedPort, expectedAddress } }),
 		);
 		await this.refreshSaved();
+		if (ok) toast.success("Port saved");
 		return ok;
 	};
 
@@ -305,6 +306,7 @@ export class PortsStore {
 	refresh = async () => {
 		try {
 			this.apply(await invoke<Snapshot>("refresh"));
+			toast.success("Refreshed", { id: "refresh" });
 		} catch (error) {
 			toast.error(String(error));
 		}
@@ -339,20 +341,31 @@ export class PortsStore {
 	detectedName = (port: number) => this.servers.find((server) => server.port === port)?.name ?? "";
 
 	rename = (port: number, name: string) => {
-		const names = { ...preferences.names.current };
-		delete names[port];
+		const { [port]: previous, ...others } = preferences.names.current;
 		const trimmed = name.trim();
-		preferences.names.current = trimmed && trimmed !== this.detectedName(port) ? { ...names, [port]: trimmed } : names;
+		const custom = trimmed && trimmed !== this.detectedName(port) ? trimmed : undefined;
+		if (custom === previous) return;
+		preferences.names.current = custom ? { ...others, [port]: custom } : others;
+		toast.success(custom ? `Renamed to ${custom}` : "Name reset");
 	};
 
-	setProtected = (server: Server, value: boolean) => {
-		preferences.protection.current = { ...preferences.protection.current, [serverKey(server)]: value };
+	changeRules = async (change: RulesChange, confirmation?: string) => {
+		try {
+			this.apply(await rules.change(change));
+			if (confirmation) toast.success(confirmation);
+			return true;
+		} catch (error) {
+			toast.error(String(error));
+			return false;
+		}
 	};
 
-	hide = (entry: string) => {
-		if (!preferences.hidden.current.includes(entry))
-			preferences.hidden.current = [...preferences.hidden.current, entry];
-		if (this.selected && isHidden(this.selected)) this.selectedId = null;
+	setProtected = (server: Server, value: boolean) =>
+		this.changeRules({ kind: "protect", key: serverKey(server), value });
+
+	hide = async (entry: string) => {
+		await this.changeRules({ kind: "hide", entry }, `Hidden ${hiddenLabel(entry)}`);
+		if (this.selected?.hidden) this.selectedId = null;
 	};
 
 	open = async (server: Server) => {
@@ -460,19 +473,18 @@ export class PortsStore {
 			const what = options.parent ? `${server.parent?.name ?? "the parent"} of ${server.name}` : server.name;
 			const verb = options.force ? ["Force killing", "Force killed"] : ["Stopping", "Stopped"];
 			const id = toast.loading(`${verb[0]} ${what}…`, { id: `stop-${server.id}` });
-			const error = await this.#stop(server, false, options);
+			const error = await this.#stop(server, null, options);
 			if (error) toast.error(error, { id });
 			else toast.success(`${verb[1]} ${what}`, { id, description: `:${server.port}` });
 		});
 
-	async #stop(server: Server, onlyIfIdle = false, options: StopOptions = {}): Promise<string | null> {
+	async #stop(server: Server, allowedIds: string[] | null = null, options: StopOptions = {}): Promise<string | null> {
 		const { force, parent, confirmed } = options;
 		try {
 			this.apply(
 				await invoke<Snapshot>("stop_server", {
 					target: target(server),
-					onlyIfIdle,
-					...(onlyIfIdle ? { allowedIds: this.idle.map((row) => row.id) } : {}),
+					...(allowedIds ? { cleanUp: true, allowedIds } : {}),
 					...(force ? { force } : {}),
 					...(parent || confirmed ? { scope: { parent, confirmed } } : {}),
 				}),
@@ -485,15 +497,29 @@ export class PortsStore {
 	}
 
 	cleanUp = () => {
-		if (this.idle.length) this.cleaning = this.idle;
+		if (!this.candidates.length) return;
+		this.cleaning = this.candidates;
+		this.cleanSelection.clear();
+		for (const server of this.candidates) this.cleanSelection.add(server.id);
+	};
+
+	chooseForCleanUp = (server: Server, chosen: boolean) => {
+		for (const other of this.cleaning ?? []) {
+			if (!sharesControl(server, other)) continue;
+			if (chosen) this.cleanSelection.add(other.id);
+			else this.cleanSelection.delete(other.id);
+		}
 	};
 
 	confirmCleanUp = async () => {
-		const captured = this.cleaning ?? [];
+		const captured = (this.cleaning ?? []).filter((server) => this.cleanSelection.has(server.id));
 		this.cleaning = null;
+		this.cleanSelection.clear();
 		const eligible = captured
 			.flatMap((old) => {
-				const current = this.idle.find((server) => server.id === old.id && controlKey(server) === controlKey(old));
+				const current = this.candidates.find(
+					(server) => server.id === old.id && controlKey(server) === controlKey(old),
+				);
 				return current ? [current] : [];
 			})
 			.toSorted((a, b) => b.resources.length - a.resources.length);
@@ -502,20 +528,21 @@ export class PortsStore {
 			if (!servers.some((chosen) => sharesControl(chosen, server))) servers.push(server);
 		}
 		if (!servers.length) return;
+		const allowed = eligible.map((server) => server.id);
 		const rows = (stopped: Server[]) => eligible.filter((row) => stopped.some((s) => sharesControl(s, row))).length;
-		const id = toast.loading("Stopping " + idleCount(eligible.length) + "…", { id: "clean-up" });
+		const id = toast.loading("Stopping " + serverCount(eligible.length) + "…", { id: "clean-up" });
 		const results = await Promise.all(
-			servers.map((server) => this.#run(server, "control", () => this.#stop(server, true))),
+			servers.map((server) => this.#run(server, "control", () => this.#stop(server, allowed))),
 		);
 		const attempted = servers.filter((_, i) => results[i] !== undefined);
 		const errors = results.filter((result): result is string => typeof result === "string");
 		const failed = servers.filter((_, i) => typeof results[i] === "string");
-		if (!attempted.length) toast.info("No idle servers were stopped", { id });
+		if (!attempted.length) toast.info("No servers were stopped", { id });
 		else if (errors.length)
-			toast.error("Couldn't stop " + rows(failed) + " of " + idleCount(rows(attempted)), {
+			toast.error("Couldn't stop " + rows(failed) + " of " + serverCount(rows(attempted)), {
 				id,
 				description: errors[0],
 			});
-		else toast.success("Stopped " + idleCount(rows(attempted)), { id });
+		else toast.success("Stopped " + serverCount(rows(attempted)), { id });
 	};
 }

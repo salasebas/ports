@@ -1,10 +1,12 @@
 import { emit } from "@tauri-apps/api/event";
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { toast } from "svelte-sonner";
 import { listRows } from "./grouping";
 import { mockSnapshot } from "./mock";
-import { hiddenPort, hiddenProcess, PortsStore, SNAPSHOT_EVENT, unhide } from "./ports-store.svelte";
+import { hiddenPort, hiddenProcess, PortsStore, serverKey, SNAPSHOT_EVENT } from "./ports-store.svelte";
 import { preferences } from "./preferences.svelte";
+import type { RulesChange } from "$lib/rules.svelte";
 import type { SavedProject } from "./projects";
 import { processTree } from "./resources";
 import type { ControlPreview, Server, Snapshot, ServerTarget } from "./types";
@@ -22,6 +24,8 @@ function server(overrides: Partial<Server>): Server {
 		addresses: ["127.0.0.1"],
 		exposed: false,
 		protected: false,
+		hidden: false,
+		cwdDeleted: false,
 		restartable: true,
 		attribution: { confidence: "unknown", evidence: [] },
 		web: { state: "unknown" },
@@ -71,8 +75,22 @@ const editor = server({ port: 44438, pid: 400, name: "zed", process: "zed", kind
 let activeStore: PortsStore;
 let backendRows: Server[];
 let revision = 0;
+let backendRules: { hidden: string[]; protection: Record<string, boolean> };
 function snapshot(servers: Server[]): Snapshot {
-	return { ...mockSnapshot(), revision: ++revision, servers };
+	const ruled = servers.map((row) => ({
+		...row,
+		hidden:
+			backendRules.hidden.includes(hiddenPort(row.port)) || backendRules.hidden.includes(hiddenProcess(row.process)),
+		protected: backendRules.protection[serverKey(row)] ?? row.protected,
+	}));
+	return { ...mockSnapshot(), revision: ++revision, servers: ruled };
+}
+
+function changeRules(change: RulesChange) {
+	if (change.kind === "hide") backendRules.hidden.push(change.entry);
+	if (change.kind === "unhide") backendRules.hidden = backendRules.hidden.filter((entry) => entry !== change.entry);
+	if (change.kind === "protect") backendRules.protection[change.key] = change.value;
+	return { rules: { revision, rules: {} }, snapshot: snapshot(backendRows) };
 }
 
 function storeWith(...servers: Server[]) {
@@ -100,6 +118,7 @@ function backend(reply?: (cmd: string) => unknown) {
 		(cmd, args) => {
 			if (cmd !== "list_projects") calls.push([cmd, args]);
 			if (reply) return reply(cmd);
+			if (cmd === "update_rules") return changeRules((args as { change: RulesChange }).change);
 			if (cmd === "preview_control") return previewOf(args as { target: ServerTarget });
 			if (cmd === "restart_server") return snapshot(activeStore.servers);
 			if (cmd === "stop_server") {
@@ -130,14 +149,14 @@ beforeEach(() => {
 	preferences.collapsedGroups.current = [];
 	preferences.pinned.current = [];
 	preferences.names.current = {};
-	preferences.hidden.current = [];
-	preferences.protection.current = {};
+	backendRules = { hidden: [], protection: {} };
 	backend();
 });
 
 afterEach(() => {
 	clearMocks();
 	vi.unstubAllGlobals();
+	vi.restoreAllMocks();
 });
 
 describe("live updates", () => {
@@ -227,6 +246,91 @@ describe("search", () => {
 		store.query = "   ";
 		expect(store.filtered).toEqual([web, api]);
 	});
+
+	it.each([
+		["a PID", "200", 8080],
+		["a PID above the highest port", "70000", 3002],
+		["a command argument", "--port 3001", 3001],
+		["a project path", "~/work/web", 3001],
+		["a working folder", "apps/site", 3001],
+	])("finds a server by %s", (_field, query, port) => {
+		const mine = server({ port: 3000, pid: 150, name: "web", folder: "~/personal/web" });
+		const work = server({
+			port: 3001,
+			pid: 151,
+			name: "web",
+			command: "vite --port 3001",
+			folder: "~/work/web",
+			cwd: "~/work/web/apps/site",
+		});
+		const late = server({ port: 3002, pid: 70_000, name: "late" });
+		const store = storeWith(mine, work, api, late);
+		store.query = query;
+		expect(store.filtered.map((row) => row.port)).toEqual([port]);
+	});
+
+	it("matches a full path once the home folder is known", async () => {
+		backend((cmd) => (cmd === "plugin:path|resolve_directory" ? "/Users/me" : undefined));
+		const store = storeWith(server({ port: 3001, folder: "~/work/web" }), web);
+		const disconnect = store.connect();
+		store.query = "/Users/me/work/web";
+		await vi.waitFor(() => expect(store.filtered.map((row) => row.port)).toEqual([3001]));
+		disconnect();
+	});
+
+	it("lists every owner of a searched port, hidden ones included", async () => {
+		const ipv4 = server({ port: 3000, pid: 700, name: "next", addresses: ["127.0.0.1"] });
+		const ipv6 = server({ port: 3000, pid: 701, name: "rails", addresses: ["::1"] });
+		const store = storeWith(ipv4, ipv6, api);
+		await store.hide(hiddenPort(3000));
+		store.query = "3000";
+		expect(store.filtered.map((row) => row.pid)).toEqual([700, 701]);
+		expect(store.portOwners).toHaveLength(2);
+	});
+
+	it.each([
+		["part of a port", "51", 5173],
+		["a number in a branch", "42", 3003],
+	])("falls back to %s when no port or PID is exactly the number", (_field, query, port) => {
+		const review = server({ port: 3003, pid: 160, name: "review", branch: "pr-42" });
+		const store = storeWith(web, api, review);
+		store.query = query;
+		expect(store.filtered.map((row) => row.port)).toEqual([port]);
+	});
+
+	it("says a searched port is free when nothing listens on it", () => {
+		const store = storeWith(web, api);
+		store.query = ":4000";
+		expect(store.searchedPort).toBe(4000);
+		expect(store.portOwners).toEqual([]);
+		expect(store.filtered).toEqual([]);
+	});
+});
+
+describe("confirmations", () => {
+	const project = { id: "p1", folder: "~/web" } as SavedProject;
+
+	it("confirms a saved project's command and port only when the backend accepts them", async () => {
+		const confirmed = vi.spyOn(toast, "success");
+		const store = storeWith(web);
+		await store.setSavedCommand(project, "bun dev");
+		expect(confirmed).toHaveBeenLastCalledWith("Command saved");
+		await store.setSavedBinding(project, 3000, "127.0.0.1");
+		expect(confirmed).toHaveBeenLastCalledWith("Port saved");
+		confirmed.mockClear();
+		backend((cmd) => {
+			if (cmd === "set_project_command") throw "That command can't be saved.";
+		});
+		await store.setSavedCommand(project, "");
+		expect(confirmed).not.toHaveBeenCalled();
+	});
+
+	it("confirms a refresh, which may change nothing on screen", async () => {
+		const confirmed = vi.spyOn(toast, "success");
+		backend((cmd) => (cmd === "refresh" ? snapshot([web]) : undefined));
+		await storeWith(web).refresh();
+		expect(confirmed).toHaveBeenLastCalledWith("Refreshed", { id: "refresh" });
+	});
 });
 
 describe("kinds of server", () => {
@@ -310,7 +414,7 @@ describe("stopping a server", () => {
 		await store.confirm();
 		expect(calls.at(-1)).toEqual([
 			"stop_server",
-			{ target: web.target, onlyIfIdle: false, force: true, scope: { confirmed: [web.resources[0].process] } },
+			{ target: web.target, force: true, scope: { confirmed: [web.resources[0].process] } },
 		]);
 	});
 
@@ -336,7 +440,6 @@ describe("stopping a server", () => {
 			"stop_server",
 			{
 				target: watched.target,
-				onlyIfIdle: false,
 				scope: { parent: nodemon.process, confirmed: [nodemon.process] },
 			},
 		]);
@@ -361,7 +464,7 @@ describe("stopping a server", () => {
 		preferences.confirmActions.current = false;
 		const store = storeWith(web, api);
 		await store.request("stop", web);
-		expect(calls).toEqual([["stop_server", { target: web.target, onlyIfIdle: false }]]);
+		expect(calls).toEqual([["stop_server", { target: web.target }]]);
 		expect(store.pending).toBeNull();
 		expect(store.servers).toEqual([api]);
 	});
@@ -375,7 +478,7 @@ describe("stopping a server", () => {
 			container: { id: "4a1b", image: "postgres" },
 		});
 		await storeWith(container).stop(container);
-		expect(calls).toEqual([["stop_server", { target: container.target, onlyIfIdle: false }]]);
+		expect(calls).toEqual([["stop_server", { target: container.target }]]);
 	});
 
 	it("ignores another stop of a server that is still stopping", async () => {
@@ -454,7 +557,7 @@ describe("order", () => {
 		expect(store.filtered).toEqual([app, appApi, web]);
 	});
 
-	it("keeps a pin and a protection when the list is grouped by repository", () => {
+	it("keeps a pin and a protection when the list is grouped by repository", async () => {
 		const main = server({
 			port: 3000,
 			name: "web",
@@ -475,7 +578,7 @@ describe("order", () => {
 		});
 		const store = storeWith(main, hotfix);
 		store.togglePin(hotfix);
-		store.setProtected(main, true);
+		await store.setProtected(main, true);
 		const rows = listRows(store.filtered, "repository", []);
 		const listed = rows.flatMap((row) => (row.kind === "server" ? [row.server] : []));
 		expect(listed.map((item) => item.port)).toEqual([3001, 3000]);
@@ -496,16 +599,40 @@ describe("renaming and hiding", () => {
 		expect(preferences.names.current).toEqual({});
 	});
 
-	it("hides a port or every port of a process until unhidden", () => {
+	it("hides a port or every port of a process until unhidden", async () => {
 		const airplay = server({ port: 5000, pid: 500, process: "ControlCenter", kind: "dev" });
 		const airplay2 = server({ port: 7000, pid: 500, process: "ControlCenter", kind: "dev" });
 		const store = storeWith(web, airplay, airplay2);
-		store.hide(hiddenProcess("ControlCenter"));
-		expect(store.filtered).toEqual([web]);
-		store.hide(hiddenPort(web.port));
+		await store.hide(hiddenProcess("ControlCenter"));
+		expect(store.filtered.map((row) => row.port)).toEqual([web.port]);
+		await store.hide(hiddenPort(web.port));
 		expect(store.filtered).toEqual([]);
-		unhide(hiddenProcess("ControlCenter"));
-		expect(store.filtered).toEqual([airplay, airplay2]);
+		await store.changeRules({ kind: "unhide", entry: hiddenProcess("ControlCenter") });
+		expect(store.filtered.map((row) => row.port)).toEqual([airplay.port, airplay2.port]);
+	});
+
+	it("keeps the list as it was when the backend refuses a rule", async () => {
+		const confirmed = vi.spyOn(toast, "success");
+		const store = storeWith(web);
+		backend((cmd) => {
+			if (cmd === "update_rules") throw "Could not save the rules";
+		});
+		await store.hide(hiddenPort(web.port));
+		expect(store.filtered).toEqual([web]);
+		expect(confirmed).not.toHaveBeenCalled();
+	});
+
+	it("confirms a rename, a reset and a hide, but not a rename that changes nothing", async () => {
+		const confirmed = vi.spyOn(toast, "success");
+		const store = storeWith(web);
+		store.rename(web.port, "Storefront");
+		expect(confirmed).toHaveBeenLastCalledWith("Renamed to Storefront");
+		store.rename(web.port, "Storefront");
+		expect(confirmed).toHaveBeenCalledTimes(1);
+		store.rename(web.port, "");
+		expect(confirmed).toHaveBeenLastCalledWith("Name reset");
+		await store.hide(hiddenPort(web.port));
+		expect(confirmed).toHaveBeenLastCalledWith("Hidden :5173");
 	});
 });
 
@@ -518,18 +645,18 @@ describe("clean up", () => {
 	it.each(["protected", "active", "hidden"])("rechecks a %s server before confirming cleanup", async (change) => {
 		const store = storeWith(idleWeb);
 		store.cleanUp();
-		if (change === "protected") store.setProtected(idleWeb, true);
+		if (change === "protected") await store.setProtected(idleWeb, true);
 		if (change === "active") store.servers = [{ ...idleWeb, status: "running" }];
-		if (change === "hidden") store.hide(hiddenPort(idleWeb.port));
+		if (change === "hidden") await store.hide(hiddenPort(idleWeb.port));
 		await store.confirmCleanUp();
 		expect(calls.filter(([cmd]) => cmd === "stop_server")).toEqual([]);
 	});
 
-	it("protects all ports affected by the same process", () => {
+	it("protects all ports affected by the same process", async () => {
 		const sibling = server({ ...idleWeb, port: 5174 });
 		const store = storeWith(idleWeb, sibling);
-		store.setProtected(sibling, true);
-		expect(store.idle).toEqual([]);
+		await store.setProtected(sibling, true);
+		expect(store.candidates).toEqual([]);
 	});
 
 	it("stops a process with multiple ports once", async () => {
@@ -542,7 +669,7 @@ describe("clean up", () => {
 
 	it("leaves servers a supervisor runs out of clean up", () => {
 		const brewed = server({ ...idleApi, supervisor: { kind: "homebrew", name: "redis", controllable: true } });
-		expect(storeWith(idleWeb, brewed).idle).toEqual([idleWeb]);
+		expect(storeWith(idleWeb, brewed).candidates).toEqual([idleWeb]);
 	});
 
 	it("stops every idle server after one confirmation, leaving the rest running", async () => {
@@ -552,23 +679,45 @@ describe("clean up", () => {
 		expect(calls).toEqual([]);
 		await store.confirmCleanUp();
 		expect(calls).toEqual([
-			["stop_server", { target: idleWeb.target, onlyIfIdle: true, allowedIds: [idleWeb.id, idleApi.id] }],
-			["stop_server", { target: idleApi.target, onlyIfIdle: true, allowedIds: [idleWeb.id, idleApi.id] }],
+			["stop_server", { target: idleWeb.target, cleanUp: true, allowedIds: [idleWeb.id, idleApi.id] }],
+			["stop_server", { target: idleApi.target, cleanUp: true, allowedIds: [idleWeb.id, idleApi.id] }],
 		]);
 		expect(store.servers).toEqual([busy, idleDb]);
 	});
 
-	it("skips what the user protects and stops a database the user unprotects", () => {
+	it("skips what the user protects and stops a database the user unprotects", async () => {
 		const store = storeWith(idleWeb, idleApi, idleDb);
-		store.setProtected(idleApi, true);
-		store.setProtected(idleDb, false);
-		expect(store.idle.map((s) => s.port)).toEqual([idleWeb.port, idleDb.port]);
+		await store.setProtected(idleApi, true);
+		await store.setProtected(idleDb, false);
+		expect(store.candidates.map((s) => s.port)).toEqual([idleWeb.port, idleDb.port]);
 	});
 
-	it("leaves hidden servers alone", () => {
+	it("stops only the servers the user leaves chosen", async () => {
+		const store = storeWith(idleWeb, idleApi, busy);
+		store.cleanUp();
+		store.chooseForCleanUp(idleApi, false);
+		await store.confirmCleanUp();
+		expect(calls).toEqual([["stop_server", { target: idleWeb.target, cleanUp: true, allowedIds: [idleWeb.id] }]]);
+		expect(store.servers.map((s) => s.port)).toEqual([idleApi.port, busy.port]);
+	});
+
+	it("chooses or leaves out every port of one process together", () => {
+		const sibling = server({ ...idleWeb, port: 5174 });
+		const store = storeWith(idleWeb, sibling, idleApi);
+		store.cleanUp();
+		store.chooseForCleanUp(sibling, false);
+		expect([...store.cleanSelection]).toEqual([idleApi.id]);
+	});
+
+	it("offers a server whose folder was deleted", () => {
+		const orphan = server({ port: 4321, pid: 202, name: "removed", cwdDeleted: true });
+		expect(storeWith(busy, orphan).candidates).toEqual([orphan]);
+	});
+
+	it("leaves hidden servers alone", async () => {
 		const idleApp = server({ port: 44438, pid: 400, kind: "other", status: "idle" });
 		const store = storeWith(idleWeb, idleApp);
-		store.hide(hiddenPort(idleWeb.port));
+		await store.hide(hiddenPort(idleWeb.port));
 		store.cleanUp();
 		expect(store.cleaning).toBeNull();
 	});
@@ -584,16 +733,16 @@ const workerUsage = (pid: number, parent: number, memoryBytes: number, ports: nu
 });
 
 describe("resource allocation and row identity", () => {
-	it("counts shared descendants once across headline totals and chart slices", () => {
+	it("counts shared descendants once across headline totals and chart slices", async () => {
 		const child = server({ pid: 50, port: 3001, memoryBytes: 100, cpuPercent: 1 });
 		const parent = server({ pid: 51, port: 3002, memoryBytes: 200, cpuPercent: 2 });
 		parent.resources.push(...child.resources);
 		const store = storeWith(child, parent);
 		expect(store.usage.serversBytes).toBe(300);
 		expect(store.allocations.reduce((sum, row) => sum + row.usage.memoryBytes, 0)).toBe(300);
-		store.hide(hiddenPort(child.port));
+		await store.hide(hiddenPort(child.port));
 		expect(store.usage.serversBytes).toBe(300);
-		store.hide(hiddenPort(parent.port));
+		await store.hide(hiddenPort(parent.port));
 		expect(store.usage.serversBytes).toBe(0);
 	});
 
@@ -632,10 +781,16 @@ it("blocks controls on an overlapping process tree with a different root", async
 	await stopping;
 });
 
-it("moves an individually hidden server's resources into Other apps", () => {
+it("moves an individually hidden server's resources into Other apps", async () => {
 	const row = server({ ...web, memoryBytes: 300, cpuPercent: 2 });
 	const store = storeWith(row);
+	await store.hide(hiddenPort(row.port));
 	store.system = { totalBytes: 1600, usedBytes: 1000, cpuPercent: 10 };
-	store.hide(hiddenPort(row.port));
 	expect(store.usage).toEqual({ serversBytes: 0, serversCpuPercent: 0, otherAppsBytes: 1000, otherAppsCpuPercent: 10 });
+});
+
+it("keeps a Compose container's pin and protection on its own port", () => {
+	const folder = "~/shop";
+	expect(serverKey(server({ port: 3000, folder }))).toBe("project:~/shop");
+	expect(serverKey(server({ port: 5433, folder, kind: "container" }))).toBe("port:5433");
 });

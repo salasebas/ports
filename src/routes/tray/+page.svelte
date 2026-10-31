@@ -21,10 +21,26 @@
 	import SettingsButton from "$lib/components/ports/settings-button.svelte";
 	import ConfirmDialog from "$lib/components/ports/confirm-dialog.svelte";
 	import UsageSummary from "$lib/components/ports/usage-summary.svelte";
+	import { ListKeyboard } from "$lib/ports/list-keyboard.svelte";
 	import { PortsStore } from "$lib/ports/ports-store.svelte";
+	import type { Server } from "$lib/ports/types";
 
 	const store = new PortsStore();
 	onMount(store.connect);
+
+	let search = $state<HTMLInputElement | null>(null);
+	const keyboard = new ListKeyboard({
+		store,
+		rows: () => store.filtered,
+		search: () => search,
+		details: (server: Server) => store.select(server.id),
+	});
+
+	function back() {
+		const id = store.selectedId;
+		store.select(null);
+		keyboard.restore(id);
+	}
 
 	const slide = (direction: 1 | -1) => ({
 		x: prefersReducedMotion.current ? 0 : 24 * direction,
@@ -33,8 +49,9 @@
 	});
 
 	function onkeydown(event: KeyboardEvent) {
-		if (event.key !== "Escape" || event.defaultPrevented) return;
-		if (store.selected) store.select(null);
+		if (event.key !== "Escape") return keyboard.onkeydown(event);
+		if (event.defaultPrevented) return;
+		if (store.selected) back();
 		else getCurrentWindow().hide();
 	}
 </script>
@@ -48,7 +65,7 @@
 	{#if store.selected}
 		<div class="flex min-h-0 flex-col" in:fly={slide(1)} out:fly={slide(1)}>
 			<ScrollArea class="min-h-0 flex-1">
-				<ServerDetails server={store.selected} {store} onBack={() => store.select(null)} class="p-4" />
+				<ServerDetails server={store.selected} {store} onBack={back} class="p-4" />
 			</ScrollArea>
 		</div>
 	{:else}
@@ -57,7 +74,7 @@
 				<h1 class="text-center text-sm font-semibold">Ports</h1>
 				<UsageSummary {store} />
 				<div class="flex items-center gap-1">
-					<ServerSearch bind:value={store.query} class="flex-1" />
+					<ServerSearch bind:value={store.query} bind:ref={search} class="flex-1" />
 					<ServerFilter {store} />
 				</div>
 			</header>

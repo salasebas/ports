@@ -7,7 +7,7 @@
 	import { Spinner } from "$lib/components/ui/spinner";
 	import { LastShown } from "$lib/hooks/last-shown.svelte";
 	import type { PendingAction, PortsStore } from "$lib/ports/ports-store.svelte";
-	import { isHidden, mustConfirm } from "$lib/ports/ports-store.svelte";
+	import { mustConfirm } from "$lib/ports/ports-store.svelte";
 	import { preferences } from "$lib/ports/preferences.svelte";
 	import { processKey } from "$lib/ports/resources";
 	import type { ControlPreview, Server, Supervisor } from "$lib/ports/types";
@@ -217,7 +217,7 @@
 							<p class="text-muted-foreground">
 								Also stops
 								{#each alsoAffected as other, i (other.id)}
-									{i ? ", " : ""}<span class="text-foreground">{other.name} :{other.port}</span>{isHidden(other)
+									{i ? ", " : ""}<span class="text-foreground">{other.name} :{other.port}</span>{other.hidden
 										? " (hidden)"
 										: ""}{other.protected ? " (protected)" : ""}
 								{/each}

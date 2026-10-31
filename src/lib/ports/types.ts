@@ -90,6 +90,7 @@ export interface Server {
 	name: string;
 	folder?: string;
 	cwd?: string;
+	cwdDeleted: boolean;
 	projectName?: string;
 	branch?: string;
 	worktree?: string;
@@ -110,6 +111,7 @@ export interface Server {
 	exposed: boolean;
 	lanHost?: string;
 	protected: boolean;
+	hidden: boolean;
 	restartable: boolean;
 	supervisor?: Supervisor;
 	parent?: ParentProcess;

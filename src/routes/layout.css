@@ -99,6 +99,13 @@
 	--port-6: #de9255;
 }
 
+@supports (color: AccentColor) {
+	:root,
+	.dark {
+		--ring: AccentColor;
+	}
+}
+
 @media (prefers-reduced-transparency: reduce) {
 	:root,
 	.dark {
@@ -174,12 +181,10 @@
 	}
 	html {
 		@apply font-sans antialiased;
-		scrollbar-gutter: stable;
 	}
 	html:has([data-surface="tray"]),
 	html:has([data-surface="tray"]) body {
 		background: transparent;
-		scrollbar-gutter: auto;
 	}
 }
 
@@ -190,6 +195,7 @@
  */
 [data-sonner-toaster] [data-sonner-toast] {
 	pointer-events: auto;
+	cursor: pointer;
 }
 [data-sonner-toaster] [data-sonner-toast][data-visible="false"] {
 	pointer-events: none;

@@ -36,6 +36,7 @@
 		type="button"
 		class="absolute inset-0 rounded-xl outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
 		aria-label="Details for {server.name} on port {server.port}"
+		data-row-id={server.id}
 		onclick={() => store.select(server.id)}
 	></button>
 

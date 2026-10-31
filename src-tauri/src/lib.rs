@@ -1,3 +1,5 @@
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{
     AppHandle, Emitter, Manager, WindowEvent,
     menu::{Menu, MenuItem, PredefinedMenuItem},
@@ -17,7 +19,16 @@ const MAIN_WINDOW: &str = "main";
 const TRAY_WINDOW: &str = "tray";
 const OPEN_SETTINGS_EVENT: &str = "ports://open-settings";
 
-fn show_main(app: &AppHandle) {
+#[derive(Default)]
+struct TrayWindow {
+    creating: Mutex<()>,
+    opening: AtomicBool,
+}
+
+fn show_main<R: tauri::Runtime>(app: &AppHandle<R>) {
+    app.state::<TrayWindow>()
+        .opening
+        .store(false, Ordering::Relaxed);
     if let Some(window) = app.get_webview_window(TRAY_WINDOW) {
         let _ = window.hide();
     }
@@ -28,23 +39,72 @@ fn show_main(app: &AppHandle) {
     }
 }
 
+fn tray_window<R: tauri::Runtime>(app: &AppHandle<R>) -> tauri::Result<tauri::WebviewWindow<R>> {
+    if let Some(window) = app.get_webview_window(TRAY_WINDOW) {
+        return Ok(window);
+    }
+    let config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|config| config.label == TRAY_WINDOW)
+        .ok_or(tauri::Error::WindowNotFound)?;
+    tauri::WebviewWindowBuilder::from_config(app, config)?.build()
+}
+
 fn toggle_tray_window(app: &AppHandle) {
-    let Some(window) = app.get_webview_window(TRAY_WINDOW) else {
-        return;
-    };
-    if window.is_visible().unwrap_or(false) {
+    let state = app.state::<TrayWindow>();
+    if let Some(window) = app.get_webview_window(TRAY_WINDOW)
+        && window.is_visible().unwrap_or(false)
+    {
+        state.opening.store(false, Ordering::Relaxed);
         let _ = window.hide();
         return;
     }
-    // Linux trays emit no click events, so there is no tray position to anchor to.
-    if window
-        .move_window_constrained(Position::TrayBottomCenter)
-        .is_err()
-    {
-        let _ = window.move_window(Position::TopRight);
+    if state.opening.fetch_xor(true, Ordering::Relaxed) {
+        return;
     }
-    let _ = window.show();
-    let _ = window.set_focus();
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<TrayWindow>();
+        let _toggle = state
+            .creating
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.opening.load(Ordering::Relaxed) {
+            return;
+        }
+        let window = match tray_window(&app) {
+            Ok(window) => window,
+            Err(error) => {
+                state.opening.store(false, Ordering::Relaxed);
+                eprintln!("could not open the popover: {error}");
+                return;
+            }
+        };
+        if let Err(error) = app.run_on_main_thread(move || {
+            if !window
+                .state::<TrayWindow>()
+                .opening
+                .swap(false, Ordering::Relaxed)
+            {
+                return;
+            }
+            // Linux trays emit no click events, so there is no tray position to anchor to.
+            if window
+                .move_window_constrained(Position::TrayBottomCenter)
+                .is_err()
+            {
+                let _ = window.move_window(Position::TopRight);
+            }
+            let _ = window.show();
+            let _ = window.set_focus();
+        }) {
+            state.opening.store(false, Ordering::Relaxed);
+            eprintln!("could not show the popover: {error}");
+        }
+    });
 }
 
 #[tauri::command]
@@ -80,16 +140,27 @@ pub fn run() {
             ports::serve_icon(context.app_handle(), request.uri().path())
         })
         .setup(|app| {
+            app.manage(TrayWindow::default());
             #[cfg(desktop)]
             shortcut::init(app, toggle_tray_window)?;
             app.manage(settings::Changes::default());
             app.manage(ports::saved::Projects::open(app.handle()));
             app.manage(ports::pulls::PullCache::default());
 
+            let log_dir = app
+                .path()
+                .app_log_dir()
+                .or_else(|_| app.path().app_data_dir())?;
+            if let Err(error) = std::fs::create_dir_all(&log_dir) {
+                eprintln!("could not create the log folder: {error}");
+            }
             app.manage(ports::Monitor::new(
                 app.path().home_dir()?,
                 settings::alerts(app.handle()),
                 settings::stop_grace_seconds(app.handle()),
+                settings::idle_after_ms(app.handle()),
+                ports::rules::load(app.handle()),
+                log_dir.join("auto-cleanup.log"),
             ));
             ports::start(app.handle())?;
             ports::open_alerts_on_click(app.handle(), show_main);
@@ -128,7 +199,11 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| match (window.label(), event) {
-            (TRAY_WINDOW, WindowEvent::Focused(false)) => {
+            (TRAY_WINDOW, WindowEvent::Focused(false)) if window.is_visible().unwrap_or(false) => {
+                window
+                    .state::<TrayWindow>()
+                    .opening
+                    .store(false, Ordering::Relaxed);
                 let _ = window.hide();
             }
             (_, WindowEvent::Focused(true)) => window.state::<ports::Monitor>().window_shown(),
@@ -162,9 +237,14 @@ pub fn run() {
             ports::saved::project_log,
             ports::pulls::pull_request,
             ports::reveal_session,
+            ports::rules::get_rules,
+            ports::rules::update_rules,
+            ports::autoclean::auto_cleanup_log,
             settings::get_settings,
+            settings::get_settings_defaults,
             settings::set_alerts,
             settings::set_stop_grace,
+            settings::set_idle_after,
             settings::set_shortcut,
         ])
         .build(tauri::generate_context!())
@@ -183,6 +263,53 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn showing_main_cancels_a_pending_popover_without_a_window() {
+        let app = tauri::test::mock_builder()
+            .manage(TrayWindow::default())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        app.state::<TrayWindow>()
+            .opening
+            .store(true, Ordering::Relaxed);
+        show_main(app.handle());
+        assert!(!app.state::<TrayWindow>().opening.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn the_tray_webview_is_loaded_only_when_requested() {
+        let mut context = tauri::generate_context!(test = true);
+        // On macOS Tauri applies window effects to the native view, which the mock runtime lacks.
+        for window in &mut context.config_mut().app.windows {
+            window.window_effects = None;
+        }
+        let app = tauri::test::mock_builder()
+            .setup(|app| {
+                assert!(app.get_webview_window(MAIN_WINDOW).is_some());
+                assert!(app.get_webview_window(TRAY_WINDOW).is_none());
+                let window = tray_window(app.handle())?;
+                assert_eq!(window.url()?.path(), "/tray");
+                let reused = tray_window(app.handle())?;
+                assert_eq!(window.label(), reused.label());
+                assert_eq!(app.webview_windows().len(), 2);
+                Ok(())
+            })
+            .build(context)
+            .unwrap();
+        app.run_return(|app, event| {
+            if matches!(event, tauri::RunEvent::Ready) {
+                app.get_webview_window(TRAY_WINDOW)
+                    .unwrap()
+                    .destroy()
+                    .unwrap();
+                app.get_webview_window(MAIN_WINDOW)
+                    .unwrap()
+                    .destroy()
+                    .unwrap();
+            }
+        });
+    }
 
     #[test]
     fn the_main_window_listens_to_the_open_settings_event() {

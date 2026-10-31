@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { groupByFromStorage, listRows, toggleCollapsed, type GroupRow, type ListRow } from "./grouping";
+import { groupByFromStorage, groupKeys, listRows, toggleCollapsed, type GroupRow, type ListRow } from "./grouping";
 import type { Server } from "./types";
 
 function server(overrides: Partial<Server> & Pick<Server, "port" | "name">): Server {
@@ -12,6 +12,8 @@ function server(overrides: Partial<Server> & Pick<Server, "port" | "name">): Ser
 		addresses: ["127.0.0.1"],
 		exposed: false,
 		protected: false,
+		hidden: false,
+		cwdDeleted: false,
 		restartable: true,
 		attribution: { confidence: "unknown", evidence: [] },
 		web: { state: "unknown" },
@@ -109,7 +111,7 @@ describe("repository grouping", () => {
 		const rows = listRows([web, postgres, redis], "repository", []);
 		expect(named(rows, "worktree").map((row) => row.name)).toEqual(["repo"]);
 		expect(rows.slice(-3)).toMatchObject([
-			{ kind: "repository", name: "Outside a repository", count: 2 },
+			{ kind: "repository", name: "Other", count: 2 },
 			{ kind: "server", key: postgres.id },
 			{ kind: "server", key: redis.id },
 		]);
@@ -133,7 +135,7 @@ describe("repository grouping", () => {
 		const b1 = server({ port: 3000, name: "b", folder: "~/b" });
 		const a2 = server({ port: 4000, name: "a", folder: "~/a" });
 		const rows = listRows([loose, a1, b1, a2], "project", []);
-		expect(named(rows, "project").map((row) => row.name)).toEqual(["a", "b", "Outside a project"]);
+		expect(named(rows, "project").map((row) => row.name)).toEqual(["a", "b", "Other"]);
 		expect(rows.flatMap((row) => (row.kind === "server" ? [row.server.port] : []))).toEqual([2000, 4000, 3000, 1000]);
 	});
 
@@ -150,4 +152,28 @@ describe("groupByFromStorage", () => {
 		expect(groupByFromStorage(null, "false")).toBe("flat");
 		expect(groupByFromStorage(JSON.stringify("repository"), "true")).toBe("repository");
 	});
+});
+
+it("collects every group key, worktrees included, so collapse all reaches nested groups", () => {
+	const checkout = server({
+		port: 3000,
+		name: "web",
+		folder: "~/repo",
+		repositoryId: "~/repo/.git",
+		worktreePath: "~/repo",
+	});
+	const linked = server({
+		port: 3001,
+		name: "web",
+		folder: "~/hotfix",
+		repositoryId: "~/repo/.git",
+		worktreePath: "~/hotfix",
+		worktree: "hotfix",
+	});
+	expect(groupKeys([checkout, linked], "repository")).toEqual([
+		"repo:~/repo/.git",
+		"worktree:~/repo/.git:~/repo",
+		"worktree:~/repo/.git:~/hotfix",
+	]);
+	expect(groupKeys([checkout, linked], "flat")).toEqual([]);
 });

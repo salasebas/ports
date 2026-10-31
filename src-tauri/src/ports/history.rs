@@ -8,7 +8,7 @@ const LEAK_MIN_BUCKETS: usize = 54;
 const LEAK_MIN_GROWTH_BYTES: f64 = 50.0 * 1024.0 * 1024.0;
 const LEAK_MIN_GROWTH_RATIO: f64 = 0.1;
 
-pub const IDLE_AFTER_MS: u64 = 5 * 60_000;
+pub const DEFAULT_IDLE_AFTER_MS: u64 = 5 * 60_000;
 pub const ACTIVE_CPU_PERCENT: f64 = 1.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
@@ -99,10 +99,10 @@ fn slice_means(memory: &[u64], slices: usize) -> Vec<f64> {
         .collect()
 }
 
-pub fn status(leaking: bool, now_ms: u64, last_active_at: u64) -> Status {
+pub fn status(leaking: bool, now_ms: u64, last_active_at: u64, idle_after_ms: u64) -> Status {
     if leaking {
         Status::Attention
-    } else if now_ms.saturating_sub(last_active_at) >= IDLE_AFTER_MS {
+    } else if now_ms.saturating_sub(last_active_at) >= idle_after_ms {
         Status::Idle
     } else {
         Status::Running
@@ -167,9 +167,23 @@ mod tests {
     #[test]
     fn idles_after_five_quiet_minutes() {
         let now = 60 * 60_000;
-        assert_eq!(status(false, now, now - 30 * 60_000), Status::Idle);
-        assert_eq!(status(false, now, now - 60_000), Status::Running);
-        assert_eq!(status(true, now, now - 30 * 60_000), Status::Attention);
+        let idle_after = DEFAULT_IDLE_AFTER_MS;
+        assert_eq!(
+            status(false, now, now - 30 * 60_000, idle_after),
+            Status::Idle
+        );
+        assert_eq!(
+            status(false, now, now - 60_000, idle_after),
+            Status::Running
+        );
+        assert_eq!(
+            status(true, now, now - 30 * 60_000, idle_after),
+            Status::Attention
+        );
+        assert_eq!(
+            status(false, now, now - 30 * 60_000, 60 * 60_000),
+            Status::Running
+        );
     }
 
     #[test]

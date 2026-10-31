@@ -10,6 +10,8 @@ const STORE: &str = "settings.json";
 pub const SHORTCUT: &str = "shortcut";
 const ALERTS: &str = "alerts";
 const STOP_GRACE: &str = "stopGraceSeconds";
+const IDLE_AFTER: &str = "idleAfterMinutes";
+const IDLE_AFTER_MINUTES: [u64; 6] = [5, 10, 15, 30, 60, 120];
 const SETTINGS_EVENT: &str = "ports://settings";
 
 #[derive(Debug, Clone, Serialize)]
@@ -19,6 +21,29 @@ pub struct Settings {
     shortcut: Option<String>,
     alerts: AlertSettings,
     stop_grace_seconds: u64,
+    idle_after_minutes: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsDefaults {
+    shortcut: Option<String>,
+    alerts: AlertSettings,
+    stop_grace_seconds: u64,
+    idle_after_minutes: u64,
+}
+
+#[tauri::command]
+pub fn get_settings_defaults() -> SettingsDefaults {
+    SettingsDefaults {
+        #[cfg(desktop)]
+        shortcut: Some(crate::shortcut::DEFAULT.to_string()),
+        #[cfg(not(desktop))]
+        shortcut: None,
+        alerts: AlertSettings::default(),
+        stop_grace_seconds: crate::ports::DEFAULT_GRACE_SECS,
+        idle_after_minutes: crate::ports::DEFAULT_IDLE_AFTER_MS / 60_000,
+    }
 }
 
 pub fn read<T: DeserializeOwned, R: Runtime>(app: &AppHandle<R>, key: &str) -> Option<T> {
@@ -76,6 +101,14 @@ pub fn stop_grace_seconds(app: &AppHandle) -> u64 {
     read(app, STOP_GRACE).unwrap_or(crate::ports::DEFAULT_GRACE_SECS)
 }
 
+pub fn idle_after_ms(app: &AppHandle) -> u64 {
+    read::<u64, _>(app, IDLE_AFTER)
+        .filter(|minutes| IDLE_AFTER_MINUTES.contains(minutes))
+        .map_or(crate::ports::DEFAULT_IDLE_AFTER_MS, |minutes| {
+            minutes * 60_000
+        })
+}
+
 fn current(app: &AppHandle, revision: u64) -> Settings {
     #[cfg(desktop)]
     let shortcut = crate::shortcut::current(app);
@@ -86,6 +119,7 @@ fn current(app: &AppHandle, revision: u64) -> Settings {
         shortcut,
         alerts: app.state::<Monitor>().alert_settings(),
         stop_grace_seconds: app.state::<Monitor>().stop_grace_secs(),
+        idle_after_minutes: app.state::<Monitor>().idle_after_ms() / 60_000,
     }
 }
 
@@ -133,6 +167,23 @@ pub fn set_stop_grace(app: AppHandle, seconds: u64) -> Result<Settings, String> 
     );
     write(&app, STOP_GRACE, seconds)?;
     monitor.set_stop_grace_secs(seconds);
+    *revision += 1;
+    Ok(broadcast(&app, *revision))
+}
+
+#[tauri::command]
+pub fn set_idle_after(app: AppHandle, minutes: u64) -> Result<Settings, String> {
+    if !IDLE_AFTER_MINUTES.contains(&minutes) {
+        return Err(format!(
+            "{minutes} minutes is not an idle time Ports offers"
+        ));
+    }
+    let state = app.state::<Changes>();
+    let mut revision = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    write(&app, IDLE_AFTER, minutes)?;
+    let monitor = app.state::<Monitor>();
+    monitor.set_idle_after_ms(minutes * 60_000);
+    monitor.sample_now();
     *revision += 1;
     Ok(broadcast(&app, *revision))
 }

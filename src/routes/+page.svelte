@@ -12,6 +12,8 @@
 	import ArrowUpIcon from "@lucide/svelte/icons/arrow-up";
 	import ArrowUpRightIcon from "@lucide/svelte/icons/arrow-up-right";
 	import ChevronDownIcon from "@lucide/svelte/icons/chevron-down";
+	import ChevronsDownUpIcon from "@lucide/svelte/icons/chevrons-down-up";
+	import ChevronsUpDownIcon from "@lucide/svelte/icons/chevrons-up-down";
 	import ChevronRightIcon from "@lucide/svelte/icons/chevron-right";
 	import ClockIcon from "@lucide/svelte/icons/clock";
 	import CpuIcon from "@lucide/svelte/icons/cpu";
@@ -26,6 +28,7 @@
 	import WifiIcon from "@lucide/svelte/icons/wifi";
 	import XIcon from "@lucide/svelte/icons/x";
 	import { Badge } from "$lib/components/ui/badge";
+	import AppShell from "$lib/components/app-shell.svelte";
 	import { Button } from "$lib/components/ui/button";
 	import * as Card from "$lib/components/ui/card";
 	import * as Drawer from "$lib/components/ui/drawer";
@@ -58,7 +61,9 @@
 		serverActivity,
 		serverProcessId,
 	} from "$lib/ports/format";
-	import { listRows, toggleCollapsed, type GroupRow } from "$lib/ports/grouping";
+	import { groupKeys, listRows, toggleCollapsed, type GroupRow } from "$lib/ports/grouping";
+	import { ListKeyboard } from "$lib/ports/list-keyboard.svelte";
+	import { fadeRowOut } from "$lib/ports/table-motion";
 	import { PortsStore } from "$lib/ports/ports-store.svelte";
 	import { preferences, sortKeys, type SortKey } from "$lib/ports/preferences.svelte";
 	import type { Server, ServerStatus } from "$lib/ports/types";
@@ -67,11 +72,8 @@
 
 	const store = new PortsStore();
 	onMount(store.connect);
-
-	let scrollY = $state(0);
-	let tableHeight = $state(0);
-
 	const motion = $derived(prefersReducedMotion.current ? 0 : 1);
+	let tableHeight = $state(0);
 
 	const statusDot: Record<ServerStatus, string> = {
 		running: "bg-success",
@@ -88,6 +90,7 @@
 	function showDetails(server: Server) {
 		lastSelected = server;
 		lastKind = "server";
+		keyboard.choose(server.id);
 		store.select(server.id);
 	}
 
@@ -118,8 +121,29 @@
 
 	const rows = $derived(listRows(store.filtered, preferences.groupBy.current, preferences.collapsedGroups.current));
 
+	let search = $state<HTMLInputElement | null>(null);
+	const keyboard = new ListKeyboard({
+		store,
+		rows: () => rows.flatMap((row) => (row.kind === "server" ? [row.server] : [])),
+		search: () => search,
+		details: showDetails,
+	});
+
+	function restoreFocus(event: Event) {
+		event.preventDefault();
+		keyboard.restore(lastKind === "server" ? (lastSelected?.id ?? null) : null);
+	}
+
 	function toggleGroup(key: string) {
 		preferences.collapsedGroups.current = toggleCollapsed(preferences.collapsedGroups.current, key);
+	}
+
+	const groups = $derived(groupKeys(store.filtered, preferences.groupBy.current));
+	const allCollapsed = $derived(groups.every((key) => preferences.collapsedGroups.current.includes(key)));
+
+	function toggleAllGroups() {
+		const others = preferences.collapsedGroups.current.filter((key) => !groups.includes(key));
+		preferences.collapsedGroups.current = allCollapsed ? others : [...others, ...groups];
 	}
 </script>
 
@@ -218,30 +242,42 @@
 {#snippet groupCell(row: GroupRow)}
 	{@const collapsed = preferences.collapsedGroups.current.includes(row.key)}
 	{@const Chevron = collapsed ? ChevronRightIcon : ChevronDownIcon}
-	<td class="col-span-full flex min-w-0 items-center px-5 py-1 text-xs text-muted-foreground">
+	{@const place = [row.detail, row.path].filter(Boolean).join(" · ")}
+	{@const tall = preferences.groupHeaders.current === "tall"}
+	<Table.Cell colspan={7} class={cn("px-5 text-xs text-muted-foreground", tall ? "py-3" : "py-1")}>
 		<button
 			type="button"
-			class="flex min-w-0 flex-1 items-center gap-2 rounded-md py-1 text-start {row.depth === 1 ? 'ps-6' : ''}"
+			class={cn(
+				"flex w-full min-w-0 items-center rounded-md text-start",
+				tall ? "gap-3" : "gap-2 py-1",
+				row.depth === 1 && "ps-6",
+			)}
 			aria-expanded={!collapsed}
-			onclick={(event: MouseEvent) => {
+			onclick={(event) => {
 				event.stopPropagation();
 				toggleGroup(row.key);
 			}}
 		>
-			<Chevron class="size-3.5 shrink-0 opacity-70" />
-			<FolderIcon class="size-3.5 shrink-0 opacity-70" />
-			<span class="shrink-0 font-medium text-foreground">{row.name}</span>
-			{#if row.detail}
-				<span class="shrink-0">{row.detail}</span>
-			{/if}
-			{#if row.path}
-				<span class="truncate">{row.path}</span>
+			<Chevron class={cn("shrink-0 opacity-70", tall ? "size-4" : "size-3.5")} />
+			<FolderIcon class={cn("shrink-0 opacity-70", tall ? "size-4" : "size-3.5")} />
+			{#if tall}
+				<span class="flex min-h-9.5 min-w-0 flex-col justify-center gap-0.5">
+					<span class="truncate text-sm font-medium text-foreground">{row.name}</span>
+					{#if place}
+						<span class="truncate">{place}</span>
+					{/if}
+				</span>
+			{:else}
+				<span class="shrink-0 font-medium text-foreground">{row.name}</span>
+				{#if place}
+					<span class="truncate">{place}</span>
+				{/if}
 			{/if}
 			<span class="ms-auto shrink-0 font-mono tabular-nums">
 				{row.count} · {formatBytesText(row.memoryBytes)} · {Math.round(row.cpuPercent)}%
 			</span>
 		</button>
-	</td>
+	</Table.Cell>
 {/snippet}
 
 {#snippet serverCells(server: Server)}
@@ -330,30 +366,34 @@
 	</Table.Cell>
 {/snippet}
 
-<svelte:window bind:scrollY />
+<svelte:window onkeydown={keyboard.onkeydown} />
 
-<div class="flex min-h-screen flex-col">
-	<header
-		class={cn(
-			"sticky top-0 z-10 flex flex-wrap items-center gap-3 border-b bg-background/80 px-6 py-3 backdrop-blur-xl backdrop-saturate-150 transition-colors duration-200",
-			scrollY > 0 ? "border-border" : "border-transparent",
-		)}
-	>
-		<div class="flex items-center gap-2">
-			<h1 class="text-lg font-semibold tracking-tight">Ports</h1>
-			<Badge variant="secondary">{store.shown.length}</Badge>
+<AppShell>
+	{#snippet header()}
+		<div class="mx-auto flex w-full max-w-5xl flex-wrap items-center gap-3 px-6 py-3">
+			<div class="flex items-center gap-2">
+				<h1 class="text-lg font-semibold tracking-tight">Ports</h1>
+				<Badge variant="secondary">{store.shown.length}</Badge>
+			</div>
+			<div class="ml-auto flex items-center gap-2">
+				<ServerSearch bind:value={store.query} bind:ref={search} class="w-64" />
+				<ServerFilter {store} />
+				{@render sortMenu()}
+				{#if groups.length}
+					{@render action(
+						allCollapsed ? "Expand all groups" : "Collapse all groups",
+						allCollapsed ? ChevronsUpDownIcon : ChevronsDownUpIcon,
+						toggleAllGroups,
+					)}
+				{/if}
+				<CleanUpButton {store} />
+				{@render action("Refresh", RefreshCwIcon, store.refresh)}
+				<SettingsButton />
+			</div>
 		</div>
-		<div class="ml-auto flex items-center gap-2">
-			<ServerSearch bind:value={store.query} class="w-64" />
-			<ServerFilter {store} />
-			{@render sortMenu()}
-			<CleanUpButton {store} />
-			{@render action("Refresh", RefreshCwIcon, store.refresh)}
-			<SettingsButton />
-		</div>
-	</header>
+	{/snippet}
 
-	<main class="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-6 p-6">
+	<div class="mx-auto flex min-h-full w-full max-w-5xl flex-col gap-6 p-6">
 		<Card.Root>
 			<Card.Content>
 				<UsageSummary {store} />
@@ -362,36 +402,44 @@
 
 		{#if store.servers.length}
 			<div
-				class="overflow-hidden rounded-2xl border bg-card transition-[height] duration-200 ease-out motion-reduce:transition-none"
+				data-table-frame
+				class="relative overflow-clip rounded-2xl border bg-card motion-safe:transition-[height] motion-safe:duration-220 motion-safe:ease-out"
 				style:height={tableHeight ? `${tableHeight + 2}px` : undefined}
 			>
-				<div bind:clientHeight={tableHeight} class="[&>[data-slot=table-container]]:overflow-visible">
-					<Table.Root class="grid [--cols:6rem_minmax(0,1fr)_8rem_7rem_5.5rem_10rem_5.5rem]">
-						<Table.Header class="grid bg-muted/60">
-							<Table.Row class="grid grid-cols-(--cols) items-center hover:bg-transparent">
-								{@render head("Port", HashIcon, "pl-5", "port")}
+				<div bind:offsetHeight={tableHeight}>
+					<Table.Root class="min-w-[56rem] table-fixed">
+						<Table.Header class="bg-muted/60">
+							<Table.Row class="hover:bg-transparent">
+								{@render head("Port", HashIcon, "w-24 ps-5", "port")}
 								{@render head("Server", ServerColumnIcon, "", "name")}
-								{@render head("Framework", LayersIcon)}
-								{@render head("Uptime", ClockIcon, "text-right", "uptime")}
-								{@render head("CPU", CpuIcon, "text-right", "cpu")}
-								{@render head("Memory", MemoryStickIcon, "text-right", "memory")}
-								<Table.Head class="pr-5"><span class="sr-only">Actions</span></Table.Head>
+								{@render head("Framework", LayersIcon, "w-32")}
+								{@render head("Uptime", ClockIcon, "w-28 text-right", "uptime")}
+								{@render head("CPU", CpuIcon, "w-22 text-right", "cpu")}
+								{@render head("Memory", MemoryStickIcon, "w-40 text-right", "memory")}
+								<Table.Head class="h-10 w-22 pe-5"><span class="sr-only">Actions</span></Table.Head>
 							</Table.Row>
 						</Table.Header>
-						<Table.Body class="grid">
+						<Table.Body>
 							{#each rows as row (row.key)}
 								{@const server = row.kind === "server" ? row.server : undefined}
-								<!-- A plain <tr> because animate: and transitions need an element, not a component. -->
+								<!-- Svelte requires animate: on a native element directly inside the keyed each block. -->
 								<tr
 									data-slot="table-row"
-									class={server
-										? "group/row grid cursor-default grid-cols-(--cols) items-center border-b transition-colors hover:bg-muted/60 data-[state=selected]:bg-muted"
-										: "grid grid-cols-(--cols) border-b bg-muted/30"}
+									class={cn(
+										"border-b hover:bg-muted/50 data-[state=selected]:bg-muted",
+										server
+											? "group/row cursor-default focus-visible:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:ring-inset"
+											: "bg-muted/30",
+									)}
 									data-state={server && store.selectedId === server.id ? "selected" : undefined}
+									data-row-id={server?.id}
+									tabindex={server ? (keyboard.activeId === server.id ? 0 : -1) : undefined}
+									aria-label={server ? `${server.name} on port ${server.port}` : undefined}
 									onclick={server ? () => showDetails(server) : undefined}
+									onfocus={server ? () => keyboard.choose(server.id) : undefined}
 									animate:flip={{ duration: 220 * motion, easing: cubicOut }}
 									in:fade={{ duration: 180 * motion, delay: 60 * motion }}
-									out:fade={{ duration: 120 * motion }}
+									out:fadeRowOut={{ duration: 120 * motion }}
 								>
 									{#if server}
 										{@render serverCells(server)}
@@ -403,7 +451,7 @@
 						</Table.Body>
 					</Table.Root>
 					{#if !store.filtered.length}
-						<div in:fade={{ duration: 180 * motion, delay: 120 * motion }}>
+						<div in:fade={{ duration: 180 * motion }}>
 							<NoResults {store} class="py-10" />
 						</div>
 					{/if}
@@ -413,8 +461,8 @@
 			<NoResults {store} class="flex-1" />
 		{/if}
 		<SavedSection {store} onOpen={showProject} />
-	</main>
-</div>
+	</div>
+</AppShell>
 
 <Drawer.Root
 	direction="right"
@@ -428,7 +476,11 @@
 		}
 	}
 >
-	<Drawer.Content class="w-[26rem] sm:max-w-[26rem]" onInteractOutside={keepOpenForToasts}>
+	<Drawer.Content
+		class="w-[26rem] sm:max-w-[26rem]"
+		onInteractOutside={keepOpenForToasts}
+		onCloseAutoFocus={restoreFocus}
+	>
 		<Drawer.Title class="sr-only">Server details</Drawer.Title>
 		<Drawer.Close>
 			{#snippet child({ props })}

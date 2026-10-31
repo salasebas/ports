@@ -5,7 +5,7 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, Modifiers, Shortcut, Short
 
 use crate::settings;
 
-const DEFAULT: &str = if cfg!(target_os = "macos") {
+pub const DEFAULT: &str = if cfg!(target_os = "macos") {
     "Alt+Super+KeyP"
 } else {
     "Control+Alt+KeyP"

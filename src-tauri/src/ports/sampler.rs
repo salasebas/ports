@@ -59,6 +59,7 @@ pub struct Server {
     pub folder: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    pub cwd_deleted: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -93,6 +94,7 @@ pub struct Server {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lan_host: Option<String>,
     pub protected: bool,
+    pub hidden: bool,
     pub restartable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supervisor: Option<Supervisor>,
@@ -151,6 +153,7 @@ pub struct Sampler {
     tracked: HashMap<String, Tracked>,
     projects: ProjectFiles,
     revision: u64,
+    pub idle_after_ms: u64,
 }
 
 struct ProjectFiles {
@@ -194,6 +197,7 @@ impl Sampler {
                 lockfiles: project::Lockfiles::default(),
             },
             revision: 0,
+            idle_after_ms: history::DEFAULT_IDLE_AFTER_MS,
         }
     }
 
@@ -334,7 +338,10 @@ impl Sampler {
                     session,
                 },
                 tracked,
-                now,
+                Clock {
+                    now,
+                    idle_after_ms: self.idle_after_ms,
+                },
             ) {
                 servers.push(server);
             }
@@ -371,7 +378,7 @@ impl Sampler {
                 .map(|b| b.port())
                 .collect::<BTreeSet<_>>()
             {
-                servers.push(contained(port, container));
+                servers.push(contained(port, container, &self.home));
             }
         }
         self.tracked.retain(|key, _| seen.contains(key));
@@ -398,6 +405,11 @@ impl Sampler {
             },
         }
     }
+}
+
+struct Clock {
+    now: u64,
+    idle_after_ms: u64,
 }
 
 struct Service {
@@ -431,7 +443,7 @@ fn describe(
     sockets: &Sockets,
     service: Service,
     tracked: &mut Tracked,
-    now: u64,
+    Clock { now, idle_after_ms }: Clock,
 ) -> Option<Server> {
     let Service {
         supervisor,
@@ -457,13 +469,14 @@ fn describe(
     tracked.history.record(now, memory_bytes, cpu_percent);
     let memory_history = tracked.history.memory();
     let leaking = history::is_leaking(&memory_history, tracked.history.span());
-    let status = history::status(leaking, now, tracked.last_active_at);
+    let status = history::status(leaking, now, tracked.last_active_at, idle_after_ms);
 
     let cwd = listener
         .cwd()
         .or_else(|| root.cwd())
-        .filter(|_| !listener.exe().is_some_and(project::is_app_bundle))
-        .map(project::canonical);
+        .filter(|_| !listener.exe().is_some_and(project::is_app_bundle));
+    let cwd_deleted = cwd.is_some_and(project::is_deleted);
+    let cwd = cwd.map(|cwd| project::canonical(&project::without_deleted_mark(cwd)));
     let project = cwd
         .as_deref()
         .and_then(|cwd| project::project_folder(cwd, home));
@@ -525,6 +538,7 @@ fn describe(
         session,
         folder: folder.map(|f| project::display_path(f, home)),
         cwd: cwd.as_deref().map(|cwd| project::display_path(cwd, home)),
+        cwd_deleted,
         project_name: folder.and_then(project::manifest_name),
         framework,
         framework_version: framework.zip(folder).and_then(|(framework, folder)| {
@@ -534,6 +548,7 @@ fn describe(
         web: Web::Unknown,
         icon: folder.and_then(|folder| projects.key(folder)),
         protected: matches!(kind, Kind::Database),
+        hidden: false,
         restartable: supervisor
             .as_ref()
             .map_or_else(|| can_relaunch(root, system), |s| s.controllable),
@@ -585,6 +600,7 @@ fn unowned(port: u16, owner: String, first_seen: u64) -> Server {
         container: None,
         folder: None,
         cwd: None,
+        cwd_deleted: false,
         project_name: None,
         branch: None,
         worktree: None,
@@ -599,6 +615,7 @@ fn unowned(port: u16, owner: String, first_seen: u64) -> Server {
         web: Web::Unknown,
         icon: None,
         protected: matches!(kind, Kind::Database),
+        hidden: false,
         restartable: false,
         supervisor: None,
         parent: None,
@@ -618,7 +635,7 @@ fn unowned(port: u16, owner: String, first_seen: u64) -> Server {
     }
 }
 
-fn contained(port: u16, container: &Container) -> Server {
+fn contained(port: u16, container: &Container, home: &Path) -> Server {
     let image = containers::image_name(&container.image);
     let detection = project::image_detection(image);
     let framework = detection.framework;
@@ -634,6 +651,11 @@ fn contained(port: u16, container: &Container) -> Server {
         engine: container.socket.clone(),
         addresses: addresses.clone(),
     };
+    let folder = container.project_dir.as_deref().map(project::canonical);
+    let place = folder
+        .as_deref()
+        .and_then(|folder| place::checkout(folder, home))
+        .map(|checkout| checkout.place(home));
     Server {
         id: format!("{}:{port}", target.key()),
         target: Some(Target::Container(target)),
@@ -649,15 +671,20 @@ fn contained(port: u16, container: &Container) -> Server {
         name: container.name.clone(),
         process: image.to_string(),
         command: container.image.clone(),
-        folder: None,
-        cwd: None,
-        project_name: None,
-        branch: None,
-        worktree: None,
-        worktree_path: None,
-        repository: None,
-        repository_name: None,
-        repository_id: None,
+        folder: folder
+            .as_deref()
+            .map(|folder| project::display_path(folder, home)),
+        cwd: folder
+            .as_deref()
+            .map(|folder| project::display_path(folder, home)),
+        cwd_deleted: folder.as_deref().is_some_and(project::is_deleted),
+        project_name: folder.as_deref().and_then(project::manifest_name),
+        branch: place.as_ref().and_then(|place| place.branch.clone()),
+        worktree: place.as_ref().and_then(|place| place.worktree.clone()),
+        worktree_path: place.as_ref().map(|place| place.worktree_path.clone()),
+        repository: place.as_ref().map(|place| place.repository.clone()),
+        repository_name: place.as_ref().map(|place| place.repository_name.clone()),
+        repository_id: place.as_ref().map(|place| place.repository_id.clone()),
         session: None,
         framework,
         framework_version: None,
@@ -665,6 +692,7 @@ fn contained(port: u16, container: &Container) -> Server {
         web: Web::Unknown,
         icon: None,
         protected: framework.is_some_and(project::is_database),
+        hidden: false,
         restartable: true,
         supervisor: None,
         parent: None,
@@ -820,6 +848,9 @@ print(port,flush=True);time.sleep(60)
     #[test]
     fn includes_nat_published_containers_without_host_listeners() {
         let home = tempfile::tempdir().unwrap();
+        let folder = home.path().join("shop");
+        std::fs::create_dir_all(folder.join(".git")).unwrap();
+        std::fs::write(folder.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
         let mut sampler = Sampler::new(home.path().to_path_buf(), Arc::default());
         let container = Container {
             id: "nat-container".into(),
@@ -827,17 +858,28 @@ print(port,flush=True);time.sleep(60)
             image: "postgres".into(),
             started_at: 1,
             socket: "/docker.sock".into(),
+            project_dir: Some(home.path().join("shop")),
             bindings: BTreeSet::from([
                 "127.0.0.1:5433".parse().unwrap(),
                 "[::1]:5433".parse().unwrap(),
             ]),
         };
-        let snapshot = sampler.sample_with(Sockets::default(), vec![container], 1000);
+        let snapshot = sampler.sample_with(Sockets::default(), vec![container.clone()], 1000);
         assert_eq!(snapshot.servers.len(), 1);
         let row = &snapshot.servers[0];
         assert_eq!(row.kind, Kind::Container);
         assert_eq!(row.port, 5433);
         assert_eq!(row.addresses.len(), 2);
         assert!(matches!(row.target, Some(Target::Container(_))));
+        assert_eq!(row.folder.as_deref(), Some("~/shop"));
+        assert_eq!(row.repository.as_deref(), Some("~/shop"));
+        assert_eq!(row.repository_name.as_deref(), Some("shop"));
+        assert_eq!(row.branch.as_deref(), Some("main"));
+        assert!(!row.cwd_deleted);
+        std::fs::remove_dir_all(folder).unwrap();
+        let removed = sampler.sample_with(Sockets::default(), vec![container], 2000);
+        assert_eq!(removed.servers[0].folder.as_deref(), Some("~/shop"));
+        assert!(removed.servers[0].cwd_deleted);
+        assert!(removed.servers[0].repository.is_none());
     }
 }

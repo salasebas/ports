@@ -10,6 +10,7 @@
 	import { Toaster } from "$lib/components/ui/sonner";
 	import * as Tooltip from "$lib/components/ui/tooltip";
 	import { isMac } from "$lib/platform";
+	import { rules } from "$lib/rules.svelte";
 	import { openSettings, settings } from "$lib/settings.svelte";
 
 	let { children } = $props();
@@ -19,6 +20,7 @@
 
 	onMount(() => {
 		settings.load();
+		rules.load();
 		if (!isTauri() || getCurrentWindow().label !== "main") return;
 		const listening = [
 			listen(OPEN_SETTINGS_EVENT, () => goto(resolve("/settings"))),
@@ -38,7 +40,7 @@
 <svelte:window {onkeydown} />
 
 <ModeWatcher />
-<Toaster position="bottom-center" closeButton />
+<Toaster position="bottom-left" closeButton />
 <Tooltip.Provider delayDuration={400}>
 	{@render children()}
 </Tooltip.Provider>
