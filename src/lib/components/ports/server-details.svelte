@@ -27,12 +27,16 @@
 	import {
 		canStop,
 		describeEvidence,
+		describeMemoryAlert,
 		exposeFlag,
 		formatBytes,
 		formatBytesText,
+		formatSnoozeEnd,
 		formatDuration,
 		frameworkLabel,
+		healthLabel,
 		isMeasured,
+		isTimedOut,
 		lanUrl,
 		serverProcessId,
 		serverUrl,
@@ -45,6 +49,7 @@
 	import { invoke, isTauri } from "@tauri-apps/api/core";
 	import type { PullLookup } from "$lib/ports/projects";
 	import type { Server } from "$lib/ports/types";
+	import { snoozeChoices } from "$lib/rules.svelte";
 	import { settings } from "$lib/settings.svelte";
 	import { cn } from "$lib/utils";
 	import CpuBars from "./cpu-bars.svelte";
@@ -52,6 +57,7 @@
 	import QrCode from "./qr-code.svelte";
 	import ServerIcon from "./server-icon.svelte";
 	import Sparkline from "./sparkline.svelte";
+	import WatchEvents from "./watch-events.svelte";
 
 	let {
 		server,
@@ -63,7 +69,8 @@
 	const id = $props.id();
 
 	const memory = $derived(formatBytes(server.memoryBytes));
-	const leaking = $derived(server.status === "attention" && server.responding);
+	const timedOut = $derived(isTimedOut(server));
+	const leaking = $derived(server.status === "attention" && !timedOut);
 	const page = $derived(verifiedPage(server));
 	const lan = $derived(lanUrl(server));
 	const idle = $derived(server.status === "idle");
@@ -105,6 +112,10 @@
 			["Parent", server.parent && `${server.parent.name} · PID ${server.parent.process.pid}`],
 			["Managed by", supervisor && [supervisorNames[supervisor.kind], supervisor.name].filter(Boolean).join(" · ")],
 			["Framework", frameworkLabel(server) || "Unknown"],
+			[
+				"Health",
+				server.pid !== undefined && !settings.current.health.enabled ? "Checks are off" : healthLabel(server.health),
+			],
 			["Page", page?.title],
 			["Package", server.projectName !== server.name && server.projectName],
 			["Branch", server.branch],
@@ -184,7 +195,7 @@
 		</p>
 	</header>
 
-	{#if !server.responding}
+	{#if timedOut}
 		<Alert.Root class="text-warning">
 			<CircleAlertIcon />
 			<Alert.Title>Not responding</Alert.Title>
@@ -505,8 +516,36 @@
 				threshold={alerts.thresholdBytes ?? undefined}
 				class={cn("h-20 w-full", leaking ? "text-warning" : "text-foreground")}
 			/>
+			{#if server.memoryAlert}
+				<p class="text-xs">{describeMemoryAlert(server.memoryAlert)}</p>
+			{/if}
 			{#if alertNote}
-				<p class="text-xs text-muted-foreground">{alertNote}</p>
+				<div class="flex items-center justify-between gap-2">
+					<p class="text-xs text-muted-foreground">
+						{server.snoozedUntil ? `Alerts snoozed until ${formatSnoozeEnd(server.snoozedUntil)}` : alertNote}
+					</p>
+					{#if server.snoozedUntil}
+						<Button variant="ghost" size="sm" onclick={() => store.unsnooze(server)}>Resume</Button>
+					{:else}
+						<DropdownMenu.Root>
+							<DropdownMenu.Trigger>
+								{#snippet child({ props })}
+									<Button {...props} variant="ghost" size="sm">
+										Snooze
+										<ChevronDownIcon data-icon="inline-end" />
+									</Button>
+								{/snippet}
+							</DropdownMenu.Trigger>
+							<DropdownMenu.Content align="end" class="w-40">
+								{#each snoozeChoices as choice (choice.minutes)}
+									<DropdownMenu.Item onSelect={() => store.snooze(server, choice.minutes, choice.label)}>
+										For {choice.label}
+									</DropdownMenu.Item>
+								{/each}
+							</DropdownMenu.Content>
+						</DropdownMenu.Root>
+					{/if}
+				</div>
 			{/if}
 		</section>
 
@@ -563,6 +602,13 @@
 				<Field.Description>Applies to {scope}.</Field.Description>
 			</Field.Content>
 			<Switch id="{id}-protect" bind:checked={() => server.protected, (value) => store.setProtected(server, value)} />
+		</Field.Field>
+		<Field.Field>
+			<Field.Content>
+				<Field.Title>Notify me when it</Field.Title>
+				<Field.Description>Applies to {scope}.</Field.Description>
+			</Field.Content>
+			<WatchEvents watchKey={serverKey(server)} label="Notify me about {server.name}" />
 		</Field.Field>
 		<div class="grid grid-cols-2 gap-2">
 			<Button variant="secondary" size="sm" onclick={() => (store.renaming = server)}>Rename…</Button>

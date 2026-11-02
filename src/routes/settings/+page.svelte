@@ -20,12 +20,27 @@
 	import * as ToggleGroup from "$lib/components/ui/toggle-group";
 	import * as Tooltip from "$lib/components/ui/tooltip";
 	import AutoCleanupSettings from "$lib/components/ports/auto-cleanup-settings.svelte";
+	import DiagnosticsDialog from "$lib/components/ports/diagnostics-dialog.svelte";
 	import FilterRules from "$lib/components/ports/filter-rules.svelte";
 	import PlatformSelect from "$lib/components/ports/platform-select.svelte";
 	import ShortcutRecorder from "$lib/components/ports/shortcut-recorder.svelte";
+	import WatchSettings from "$lib/components/ports/watch-settings.svelte";
 	import { setRefreshInterval } from "$lib/ports/ports-store.svelte";
 	import { editors, groupHeaderSizes, preferences, refreshIntervals } from "$lib/ports/preferences.svelte";
-	import { alertThresholds, idleThresholds, settings, stopGraces, type AlertSettings } from "$lib/settings.svelte";
+	import {
+		alertThresholds,
+		growthMinimums,
+		growthWindows,
+		healthCadences,
+		healthTimeouts,
+		idleThresholds,
+		settings,
+		stopGraces,
+		trayMetrics,
+		type AlertSettings,
+		type HealthSettings,
+		type TrayMetric,
+	} from "$lib/settings.svelte";
 	import { resetSections, resetSettings, type SettingsSection, type ResetScope } from "$lib/reset-settings";
 
 	type Mode = "light" | "dark" | "system";
@@ -55,6 +70,7 @@
 	}
 
 	let shortcutError = $state<string | null>(null);
+	let diagnosticsOpen = $state(false);
 	let resetting = $state<ResetScope | null>(null);
 	let resetOpen = $state(false);
 	let resetScope = $state<ResetScope>("all");
@@ -63,14 +79,16 @@
 	);
 	const resetDescriptions: Record<ResetScope, string> = {
 		appearance: "Restores the system theme and keeps the header visible.",
-		general: "Restores the default shortcut and turns off Open at login.",
+		general: "Restores the default shortcut, turns off Open at login, and clears the menu bar metric.",
 		servers:
 			"Restores the default editor, refresh interval, confirmation prompts, and time before force killing a server.",
 		cleanUp: "Turns off automatic clean up and restores the default idle threshold. No servers will be stopped.",
-		memoryAlerts: "Restores the default leak notifications and high memory threshold.",
+		health: "Turns health checks back on with the default timing.",
+		memoryAlerts: "Restores the default growth rule and high memory threshold, and ends every snooze.",
+		watches: "Stops watching every server. No servers will be stopped.",
 		lists:
 			"Restores list layout, sorting, grouping and visibility, clears filters, and shows hidden servers. Pins and protection stay.",
-		all: "Restores app preferences and filters, shows hidden servers, and turns off automatic clean up. Saved projects, server names, pins and protection stay.",
+		all: "Restores app preferences and filters, shows hidden servers, ends snoozes, removes watches, and turns off automatic clean up. Saved projects, server names, pins and protection stay.",
 	};
 
 	function confirmReset(scope: ResetScope) {
@@ -95,10 +113,27 @@
 	}
 
 	const alerts = $derived(settings.current.alerts);
+	const health = $derived(settings.current.health);
 
 	async function setAlerts(change: Partial<AlertSettings>) {
 		try {
 			await settings.setAlerts(change);
+		} catch (error) {
+			toast.error(String(error));
+		}
+	}
+
+	async function setHealth(change: Partial<HealthSettings>) {
+		try {
+			await settings.setHealth({ ...health, ...change });
+		} catch (error) {
+			toast.error(String(error));
+		}
+	}
+
+	async function setTrayMetric(metric: TrayMetric) {
+		try {
+			await settings.setTrayMetric(metric);
 		} catch (error) {
 			toast.error(String(error));
 		}
@@ -213,6 +248,20 @@
 				<Switch id="{id}-open-at-login" disabled={!desktop} bind:checked={() => openAtLogin, setOpenAtLogin} />
 			</Field.Field>
 			<Field.Separator />
+			<Field.Field orientation="horizontal">
+				<Field.Content>
+					<Field.Label for="{id}-tray-metric">Menu bar</Field.Label>
+					<Field.Description>Shows a live number next to the icon. ⚠ means a server needs attention.</Field.Description>
+				</Field.Content>
+				<PlatformSelect
+					id="{id}-tray-metric"
+					class="w-48"
+					disabled={!desktop}
+					options={trayMetrics}
+					bind:value={() => settings.current.trayMetric, (value) => setTrayMetric(value as TrayMetric)}
+				/>
+			</Field.Field>
+			<Field.Separator />
 			<Field.Field orientation="horizontal" data-invalid={shortcutError ? true : undefined}>
 				<Field.Content>
 					<Field.Label for="{id}-shortcut">Show Ports</Field.Label>
@@ -289,16 +338,86 @@
 		{/snippet}
 		{@render section("Clean up", cleanUp, "cleanUp")}
 
+		{#snippet healthChecks()}
+			<Field.Field orientation="horizontal">
+				<Field.Content>
+					<Field.Label for="{id}-health">Check servers</Field.Label>
+					<Field.Description>Asks each server if it still answers. Off sends no requests.</Field.Description>
+				</Field.Content>
+				<Switch
+					id="{id}-health"
+					disabled={!desktop}
+					bind:checked={() => health.enabled, (enabled) => setHealth({ enabled })}
+				/>
+			</Field.Field>
+			<Field.Separator />
+			<Field.Field orientation="horizontal">
+				<Field.Label for="{id}-health-every">How often</Field.Label>
+				<PlatformSelect
+					id="{id}-health-every"
+					class="w-40"
+					disabled={!desktop || !health.enabled}
+					options={healthCadences}
+					bind:value={() => String(health.everySeconds), (value) => setHealth({ everySeconds: Number(value) })}
+				/>
+			</Field.Field>
+			<Field.Separator />
+			<Field.Field orientation="horizontal">
+				<Field.Content>
+					<Field.Label for="{id}-health-timeout">Wait for an answer</Field.Label>
+					<Field.Description>A server gets its first minute to warm up before a timeout counts.</Field.Description>
+				</Field.Content>
+				<PlatformSelect
+					id="{id}-health-timeout"
+					class="w-40"
+					disabled={!desktop || !health.enabled}
+					options={healthTimeouts}
+					bind:value={() => String(health.timeoutSeconds), (value) => setHealth({ timeoutSeconds: Number(value) })}
+				/>
+			</Field.Field>
+		{/snippet}
+		{@render section("Health checks", healthChecks, "health")}
+
 		{#snippet memory()}
 			<Field.Field orientation="horizontal">
 				<Field.Content>
-					<Field.Label for="{id}-leaks">Leaks</Field.Label>
-					<Field.Description>When a server's memory keeps growing for ten minutes.</Field.Description>
+					<Field.Label for="{id}-leaks">Steady growth</Field.Label>
+					<Field.Description
+						>When a server's memory keeps rising. It can mean a leak, but doesn't prove one.</Field.Description
+					>
 				</Field.Content>
 				<Switch
 					id="{id}-leaks"
 					disabled={!desktop}
 					bind:checked={() => alerts.enabled, (enabled) => setAlerts({ enabled })}
+				/>
+			</Field.Field>
+			<Field.Separator />
+			<Field.Field orientation="horizontal">
+				<Field.Label for="{id}-growth-window">Growing for</Field.Label>
+				<PlatformSelect
+					id="{id}-growth-window"
+					class="w-36"
+					disabled={!desktop || !alerts.enabled}
+					options={growthWindows}
+					bind:value={
+						() => String(alerts.growth.windowMinutes),
+						(value) => setAlerts({ growth: { ...alerts.growth, windowMinutes: Number(value) } })
+					}
+				/>
+			</Field.Field>
+			<Field.Separator />
+			<Field.Field orientation="horizontal">
+				<Field.Label for="{id}-growth-minimum">By at least</Field.Label>
+				<PlatformSelect
+					id="{id}-growth-minimum"
+					class="w-36"
+					disabled={!desktop || !alerts.enabled}
+					options={growthMinimums}
+					bind:value={
+						() => String(alerts.growth.minGrowthBytes),
+						(value) => setAlerts({ growth: { ...alerts.growth, minGrowthBytes: Number(value) } })
+					}
 				/>
 			</Field.Field>
 			<Field.Separator />
@@ -321,6 +440,11 @@
 		{/snippet}
 		{@render section("Memory alerts", memory, "memoryAlerts")}
 
+		{#snippet watches()}
+			<WatchSettings {id} disabled={!desktop} />
+		{/snippet}
+		{@render section("Watched servers", watches, "watches")}
+
 		{#snippet lists()}
 			<Field.Field orientation="horizontal">
 				<Field.Label for="{id}-group-headers">Group headers</Field.Label>
@@ -335,13 +459,18 @@
 			<FilterRules {id} disabled={!desktop} />
 		{/snippet}
 		{@render section("Lists", lists, "lists")}
-		<div class="flex justify-end">
+		<div class="flex flex-wrap justify-between gap-2">
+			<Button variant="outline" disabled={!desktop} onclick={() => (diagnosticsOpen = true)}>
+				Export diagnostics…
+			</Button>
 			<Button variant="outline" disabled={!desktop || resetting !== null} onclick={() => confirmReset("all")}
 				>Reset all settings…</Button
 			>
 		</div>
 	</div>
 </AppShell>
+
+<DiagnosticsDialog bind:open={diagnosticsOpen} />
 
 <AlertDialog.Root bind:open={resetOpen}>
 	<AlertDialog.Content

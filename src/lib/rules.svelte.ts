@@ -1,6 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { Snapshot } from "$lib/ports/types";
+import type { ServerKind, Snapshot } from "$lib/ports/types";
 
 export const RULES_EVENT = "ports://rules";
 
@@ -28,6 +28,13 @@ export interface AutoCleanup {
 	paused: boolean;
 }
 
+export interface Snooze {
+	until: number;
+	process: string;
+}
+
+export type WatchEvent = "started" | "stopped" | "health";
+
 export interface Rules {
 	version: number;
 	portRange: PortRange | null;
@@ -36,6 +43,9 @@ export interface Rules {
 	hidden: string[];
 	protection: Record<string, boolean>;
 	autoCleanup: AutoCleanup;
+	shownKinds: ServerKind[];
+	snoozes: Record<string, Snooze>;
+	watches: Record<string, WatchEvent[]>;
 }
 
 export interface RulesView {
@@ -51,7 +61,13 @@ export type RulesChange =
 	| { kind: "portRange"; range: PortRange | null }
 	| { kind: "filters"; include: Rule[]; exclude: Rule[] }
 	| { kind: "autoCleanup"; policy: AutoCleanupPolicy | null; paused: boolean }
-	| { kind: "import"; hidden: string[]; protection: Record<string, boolean> };
+	| { kind: "import"; hidden: string[]; protection: Record<string, boolean>; shownKinds: ServerKind[] | null }
+	| { kind: "shownKinds"; kinds: ServerKind[] }
+	| { kind: "snooze"; key: string; process: string; minutes: number }
+	| { kind: "unsnooze"; key: string }
+	| { kind: "clearSnoozes" }
+	| { kind: "watch"; key: string; events: WatchEvent[] }
+	| { kind: "clearWatches" };
 
 export interface AutoCleanupEntry {
 	at: number;
@@ -69,7 +85,22 @@ export const autoIdleChoices = [30, 60, 120, 240, 480, 1440].map((minutes) => ({
 	label: minutes < 60 ? `${minutes} minutes` : minutes === 60 ? "1 hour" : `${minutes / 60} hours`,
 }));
 
-const legacyKeys = { hidden: "ports.hidden", protection: "ports.protection" };
+export const snoozeChoices = [
+	{ minutes: 60, label: "1 hour" },
+	{ minutes: 8 * 60, label: "8 hours" },
+	{ minutes: 24 * 60, label: "24 hours" },
+];
+
+export const watchEvents: { value: WatchEvent; label: string }[] = [
+	{ value: "started", label: "Starts" },
+	{ value: "stopped", label: "Stops" },
+	{ value: "health", label: "Health" },
+];
+
+export const watchLabel = (key: string) =>
+	key.startsWith("port:") ? `:${key.slice("port:".length)}` : (key.split("/").at(-1) ?? key);
+
+const legacyKeys = { hidden: "ports.hidden", protection: "ports.protection", shownKinds: "ports.shownKinds" };
 
 function readLegacy<T>(key: string): T | undefined {
 	try {
@@ -91,6 +122,9 @@ export class RulesStore {
 			hidden: [],
 			protection: {},
 			autoCleanup: { policy: null, paused: false },
+			shownKinds: ["dev", "database", "container"],
+			snoozes: {},
+			watches: {},
 		},
 	});
 	#loaded = false;
@@ -119,10 +153,17 @@ export class RulesStore {
 	async #importLegacy() {
 		const hidden = readLegacy<string[]>(legacyKeys.hidden);
 		const protection = readLegacy<Record<string, boolean>>(legacyKeys.protection);
-		if (hidden === undefined && protection === undefined) return;
-		await this.change({ kind: "import", hidden: hidden ?? [], protection: protection ?? {} });
+		const shownKinds = readLegacy<ServerKind[]>(legacyKeys.shownKinds);
+		if (hidden === undefined && protection === undefined && shownKinds === undefined) return;
+		await this.change({
+			kind: "import",
+			hidden: hidden ?? [],
+			protection: protection ?? {},
+			shownKinds: shownKinds ?? null,
+		});
 		localStorage.removeItem(legacyKeys.hidden);
 		localStorage.removeItem(legacyKeys.protection);
+		localStorage.removeItem(legacyKeys.shownKinds);
 	}
 
 	change = async (change: RulesChange): Promise<Snapshot> => {

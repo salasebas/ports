@@ -11,7 +11,9 @@ export const resetSections = {
 	general: "General",
 	servers: "Servers",
 	cleanUp: "Clean up",
+	health: "Health checks",
 	memoryAlerts: "Memory alerts",
+	watches: "Watched servers",
 	lists: "Lists",
 };
 
@@ -22,7 +24,9 @@ export async function resetSettings(scope: ResetScope): Promise<void> {
 	const defaults = await invoke<Omit<Settings, "revision">>("get_settings_defaults");
 	const local = structuredClone(preferenceDefaults);
 	const sections: SettingsSection[] =
-		scope === "all" ? ["cleanUp", "appearance", "servers", "memoryAlerts", "lists", "general"] : [scope];
+		scope === "all"
+			? ["cleanUp", "appearance", "servers", "health", "memoryAlerts", "watches", "lists", "general"]
+			: [scope];
 	if (scope === "all") preferences.metric.current = local.metric;
 	for (const section of sections) {
 		switch (section) {
@@ -32,6 +36,7 @@ export async function resetSettings(scope: ResetScope): Promise<void> {
 				break;
 			case "general":
 				await disable();
+				await settings.setTrayMetric(defaults.trayMetric);
 				await settings.setShortcut(defaults.shortcut);
 				break;
 			case "servers":
@@ -44,12 +49,18 @@ export async function resetSettings(scope: ResetScope): Promise<void> {
 				await rules.change({ kind: "autoCleanup", policy: null, paused: false });
 				await settings.setIdleAfter(defaults.idleAfterMinutes);
 				break;
+			case "health":
+				await settings.setHealth(defaults.health);
+				break;
 			case "memoryAlerts":
 				await settings.setAlerts(defaults.alerts);
+				await rules.change({ kind: "clearSnoozes" });
+				break;
+			case "watches":
+				await rules.change({ kind: "clearWatches" });
 				break;
 			case "lists":
 				await rules.change({ kind: "resetLists" });
-				preferences.shownKinds.current = local.shownKinds;
 				preferences.sort.current = local.sort;
 				preferences.groupBy.current = local.groupBy;
 				preferences.collapsedGroups.current = local.collapsedGroups;

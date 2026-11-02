@@ -8,7 +8,7 @@ function server(overrides: Partial<Server> & Pick<Server, "port" | "name">): Ser
 		command: "vite",
 		kind: "dev",
 		status: "running",
-		responding: true,
+		health: { state: "unknown" },
 		addresses: ["127.0.0.1"],
 		exposed: false,
 		protected: false,

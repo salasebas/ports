@@ -4,11 +4,13 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_store::StoreExt;
 
-use crate::ports::{AlertSettings, Monitor};
+use crate::ports::{AlertSettings, GrowthRule, HealthSettings, Monitor, TrayMetric};
 
 const STORE: &str = "settings.json";
 pub const SHORTCUT: &str = "shortcut";
 const ALERTS: &str = "alerts";
+const HEALTH: &str = "health";
+const TRAY_METRIC: &str = "trayMetric";
 const STOP_GRACE: &str = "stopGraceSeconds";
 const IDLE_AFTER: &str = "idleAfterMinutes";
 const IDLE_AFTER_MINUTES: [u64; 6] = [5, 10, 15, 30, 60, 120];
@@ -20,6 +22,8 @@ pub struct Settings {
     revision: u64,
     shortcut: Option<String>,
     alerts: AlertSettings,
+    health: HealthSettings,
+    tray_metric: TrayMetric,
     stop_grace_seconds: u64,
     idle_after_minutes: u64,
 }
@@ -29,6 +33,8 @@ pub struct Settings {
 pub struct SettingsDefaults {
     shortcut: Option<String>,
     alerts: AlertSettings,
+    health: HealthSettings,
+    tray_metric: TrayMetric,
     stop_grace_seconds: u64,
     idle_after_minutes: u64,
 }
@@ -41,6 +47,8 @@ pub fn get_settings_defaults() -> SettingsDefaults {
         #[cfg(not(desktop))]
         shortcut: None,
         alerts: AlertSettings::default(),
+        health: HealthSettings::default(),
+        tray_metric: TrayMetric::default(),
         stop_grace_seconds: crate::ports::DEFAULT_GRACE_SECS,
         idle_after_minutes: crate::ports::DEFAULT_IDLE_AFTER_MS / 60_000,
     }
@@ -88,13 +96,26 @@ pub struct AlertPatch {
     enabled: Option<bool>,
     #[serde(default, deserialize_with = "present")]
     threshold_bytes: Option<Option<u64>>,
+    growth: Option<GrowthRule>,
 }
 fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<u64>>, D::Error> {
     Option::<u64>::deserialize(d).map(Some)
 }
 
 pub fn alerts(app: &AppHandle) -> AlertSettings {
-    read(app, ALERTS).unwrap_or_default()
+    read::<AlertSettings, _>(app, ALERTS)
+        .filter(|alerts| alerts.growth.is_valid())
+        .unwrap_or_default()
+}
+
+pub fn health(app: &AppHandle) -> HealthSettings {
+    read::<HealthSettings, _>(app, HEALTH)
+        .filter(HealthSettings::is_valid)
+        .unwrap_or_default()
+}
+
+pub fn tray_metric(app: &AppHandle) -> TrayMetric {
+    read(app, TRAY_METRIC).unwrap_or_default()
 }
 
 pub fn stop_grace_seconds(app: &AppHandle) -> u64 {
@@ -118,6 +139,8 @@ fn current(app: &AppHandle, revision: u64) -> Settings {
         revision,
         shortcut,
         alerts: app.state::<Monitor>().alert_settings(),
+        health: app.state::<Monitor>().health_settings(),
+        tray_metric: app.state::<Monitor>().tray_metric(),
         stop_grace_seconds: app.state::<Monitor>().stop_grace_secs(),
         idle_after_minutes: app.state::<Monitor>().idle_after_ms() / 60_000,
     }
@@ -150,8 +173,37 @@ pub fn set_alerts(app: AppHandle, alerts: AlertPatch) -> Result<Settings, String
     if let Some(threshold) = alerts.threshold_bytes {
         next.threshold_bytes = threshold;
     }
+    if let Some(growth) = alerts.growth {
+        if !growth.is_valid() {
+            return Err("That growth rule is outside what Ports offers".into());
+        }
+        next.growth = growth;
+    }
     write(&app, ALERTS, next)?;
     monitor.set_alert_settings(next);
+    *revision += 1;
+    Ok(broadcast(&app, *revision))
+}
+
+#[tauri::command]
+pub fn set_health(app: AppHandle, health: HealthSettings) -> Result<Settings, String> {
+    if !health.is_valid() {
+        return Err("Those health check times are outside what Ports offers".into());
+    }
+    let state = app.state::<Changes>();
+    let mut revision = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    write(&app, HEALTH, health)?;
+    app.state::<Monitor>().set_health_settings(health);
+    *revision += 1;
+    Ok(broadcast(&app, *revision))
+}
+
+#[tauri::command]
+pub fn set_tray_metric(app: AppHandle, metric: TrayMetric) -> Result<Settings, String> {
+    let state = app.state::<Changes>();
+    let mut revision = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    write(&app, TRAY_METRIC, metric)?;
+    app.state::<Monitor>().set_tray_metric(metric);
     *revision += 1;
     Ok(broadcast(&app, *revision))
 }
@@ -242,5 +294,13 @@ mod tests {
         assert_eq!(omitted.threshold_bytes, None);
         let cleared: AlertPatch = serde_json::from_str(r#"{"thresholdBytes":null}"#).unwrap();
         assert_eq!(cleared.threshold_bytes, Some(None));
+    }
+
+    #[test]
+    fn alerts_saved_before_the_growth_rule_keep_working() {
+        let saved: AlertSettings =
+            serde_json::from_str(r#"{"enabled":false,"thresholdBytes":1024}"#).unwrap();
+        assert!(!saved.enabled);
+        assert_eq!(saved.growth, GrowthRule::default());
     }
 }

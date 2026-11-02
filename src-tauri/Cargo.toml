@@ -30,6 +30,7 @@ tauri-plugin-store = "2"
 if-addrs = "0.15"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "native-tls"] }
 toml = "1"
+tauri-plugin-dialog = "2.8.4"
 
 
 [profile.release]

@@ -12,7 +12,13 @@ vi.mock("mode-watcher", () => ({ setMode: vi.fn() }));
 
 const defaults = {
 	shortcut: "Control+Alt+KeyP",
-	alerts: { enabled: true, thresholdBytes: 2 * 1024 ** 3 },
+	alerts: {
+		enabled: true,
+		thresholdBytes: 2 * 1024 ** 3,
+		growth: { windowMinutes: 10, minGrowthBytes: 50 * 1024 ** 2 },
+	},
+	health: { enabled: true, everySeconds: 10, timeoutSeconds: 3 },
+	trayMetric: "off",
 	stopGraceSeconds: 3,
 	idleAfterMinutes: 5,
 };
@@ -33,7 +39,6 @@ it("resets Servers without changing list choices or server customizations", asyn
 	preferences.refreshInterval.current = 0;
 	preferences.confirmActions.current = false;
 	preferences.groupBy.current = "repository";
-	preferences.shownKinds.current = ["other"];
 	preferences.pinned.current = ["port:3000"];
 	preferences.names.current = { 3000: "Store" };
 
@@ -43,7 +48,6 @@ it("resets Servers without changing list choices or server customizations", asyn
 	expect(preferences.refreshInterval.current).toBe(2000);
 	expect(preferences.confirmActions.current).toBe(true);
 	expect(preferences.groupBy.current).toBe("repository");
-	expect(preferences.shownKinds.current).toEqual(["other"]);
 	expect(preferences.pinned.current).toEqual(["port:3000"]);
 	expect(preferences.names.current).toEqual({ 3000: "Store" });
 	expect(calls).toContainEqual(["set_stop_grace", { seconds: 3 }]);
@@ -61,6 +65,33 @@ it("does not lower the idle threshold if automatic clean up could not be disable
 	});
 	await expect(resetSettings("cleanUp")).rejects.toThrow("disk full");
 	expect(commands).not.toContain("set_idle_after");
+});
+
+it("restores the default health checks without touching memory alerts", async () => {
+	const calls: [string, unknown][] = [];
+	mockIPC((command, args) => {
+		calls.push([command, args]);
+		return command === "get_settings_defaults" ? defaults : { ...defaults, revision: 103 };
+	});
+	await resetSettings("health");
+	expect(calls).toContainEqual(["set_health", { health: defaults.health }]);
+	expect(calls.some(([command]) => command === "set_alerts")).toBe(false);
+});
+
+it("ends snoozes with Memory alerts, removes watches with Watched servers, and clears the menu bar with General", async () => {
+	const calls: [string, unknown][] = [];
+	mockIPC((command, args) => {
+		calls.push([command, args]);
+		if (command === "get_settings_defaults") return defaults;
+		if (command === "update_rules") return { rules: { revision: 104, rules: {} }, snapshot: {} };
+		return { ...defaults, revision: 104 };
+	});
+	await resetSettings("memoryAlerts");
+	await resetSettings("watches");
+	await resetSettings("general");
+	expect(calls).toContainEqual(["update_rules", { change: { kind: "clearSnoozes" } }]);
+	expect(calls).toContainEqual(["update_rules", { change: { kind: "clearWatches" } }]);
+	expect(calls).toContainEqual(["set_tray_metric", { metric: "off" }]);
 });
 
 it("resets everything else when the default shortcut is taken by another app", async () => {

@@ -4,7 +4,7 @@
 	import * as Empty from "$lib/components/ui/empty";
 	import { Button } from "$lib/components/ui/button";
 	import type { PortsStore } from "$lib/ports/ports-store.svelte";
-	import { preferences, serverKinds } from "$lib/ports/preferences.svelte";
+	import { serverKinds } from "$lib/ports/preferences.svelte";
 
 	let { store, class: className }: { store: PortsStore; class?: string } = $props();
 
@@ -48,7 +48,7 @@
 			<Button
 				variant="secondary"
 				size="sm"
-				onclick={() => (preferences.shownKinds.current = serverKinds.map((kind) => kind.value))}
+				onclick={() => store.changeRules({ kind: "shownKinds", kinds: serverKinds.map((kind) => kind.value) })}
 			>
 				Show all
 			</Button>

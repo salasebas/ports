@@ -1,5 +1,5 @@
 import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
-import type { Evidence, Server } from "./types";
+import type { Evidence, Health, HealthState, MemoryAlert, Server } from "./types";
 
 const MB = 1024 ** 2;
 const GB = 1024 ** 3;
@@ -30,12 +30,36 @@ export function formatDuration(ms: number): string {
 	return `${Math.floor(hours / 24)}d`;
 }
 
+export const formatClock = (at: number) =>
+	new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+
+export const formatSnoozeEnd = (at: number) =>
+	new Date(at).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" });
+
+export const isTimedOut = (server: Pick<Server, "health">) => server.health.state === "timedOut";
+
+const healthLabels: Record<HealthState, string> = {
+	unknown: "Not checked",
+	warming: "Warming up",
+	responsive: "Responding",
+	timedOut: "Timed out",
+};
+
+export function healthLabel(health: Health): string {
+	const label = healthLabels[health.state];
+	return health.checkedAt === undefined ? label : `${label} · ${formatClock(health.checkedAt)}`;
+}
+
+export function describeMemoryAlert(alert: MemoryAlert): string {
+	return alert.reason === "growth"
+		? `Grew by ${formatBytesText(alert.bytes)} in ${alert.minutes} minutes. Steady growth can mean a leak, but doesn't prove one.`
+		: `Uses ${formatBytesText(alert.usedBytes)}, above your ${formatBytesText(alert.thresholdBytes)} alert.`;
+}
+
 export function serverActivity(server: Server, now = Date.now()): string {
-	if (!server.responding) return "not responding";
-	if (server.status === "attention") {
-		const growth = server.memoryHistory.at(-1)! - server.memoryHistory[0];
-		return `+${formatBytesText(growth)} in 10 min`;
-	}
+	if (isTimedOut(server)) return "not responding";
+	if (server.health.state === "warming") return "warming up";
+	if (server.growth) return `+${formatBytesText(server.growth.bytes)} in ${server.growth.minutes} min`;
 	if (server.status === "idle") return `idle ${formatDuration(now - server.lastActiveAt)}`;
 	return `up ${formatDuration(now - server.startedAt)}`;
 }

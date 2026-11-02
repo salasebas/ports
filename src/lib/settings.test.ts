@@ -8,7 +8,9 @@ vi.mock("$app/paths", () => ({ resolve: (path: string) => path }));
 const value = (revision: number): Settings => ({
 	revision,
 	shortcut: `shortcut-${revision}`,
-	alerts: { enabled: true, thresholdBytes: null },
+	alerts: { enabled: true, thresholdBytes: null, growth: { windowMinutes: 10, minGrowthBytes: 50 * 1024 ** 2 } },
+	health: { enabled: true, everySeconds: 10, timeoutSeconds: 3 },
+	trayMetric: "off",
 	stopGraceSeconds: 3,
 	idleAfterMinutes: 5,
 });
