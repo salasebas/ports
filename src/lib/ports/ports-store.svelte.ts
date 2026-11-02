@@ -367,11 +367,11 @@ export class PortsStore {
 
 	snooze = (server: Server, minutes: number, label: string) =>
 		this.changeRules(
-			{ kind: "snooze", key: serverKey(server), process: server.process, minutes },
+			{ kind: "snooze", key: hiddenPort(server.port), process: server.process, minutes },
 			`Alerts snoozed for ${label}`,
 		);
 
-	unsnooze = (server: Server) => this.changeRules({ kind: "unsnooze", key: serverKey(server) }, "Alerts back on");
+	unsnooze = (server: Server) => this.changeRules({ kind: "unsnooze", key: hiddenPort(server.port) }, "Alerts back on");
 
 	hide = async (entry: string) => {
 		await this.changeRules({ kind: "hide", entry }, `Hidden ${hiddenLabel(entry)}`);

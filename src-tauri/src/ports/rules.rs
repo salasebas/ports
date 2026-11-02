@@ -209,6 +209,10 @@ fn check_watch(key: &str) -> Result<(), String> {
     }
 }
 
+fn snooze_key(server: &Server) -> String {
+    format!("port:{}", server.port)
+}
+
 pub fn watched_by(key: &str, server: &Server) -> bool {
     key == self::key(server) || key == format!("port:{}", server.port)
 }
@@ -262,13 +266,12 @@ impl Rules {
     pub fn apply(&self, servers: &mut [Server], now: u64) {
         for server in servers {
             server.hidden = self.hides(server);
-            let key = key(server);
-            if let Some(&protected) = self.protection.get(&key) {
+            if let Some(&protected) = self.protection.get(&key(server)) {
                 server.protected = protected;
             }
             server.snoozed_until = self
                 .snoozes
-                .get(&key)
+                .get(&snooze_key(server))
                 .filter(|snooze| snooze.until > now && snooze.process == server.process)
                 .map(|snooze| snooze.until);
         }
@@ -705,7 +708,7 @@ mod tests {
     fn snooze(rules: &mut Rules, server: &Server) {
         rules
             .change(Change::Snooze {
-                key: key(server),
+                key: snooze_key(server),
                 process: server.process.clone(),
                 minutes: 60,
             })
@@ -722,6 +725,19 @@ mod tests {
         assert!(until > now + 59 * 60_000);
         assert_eq!(snoozed(&rules, &server(5173, 0), now), None);
         assert_eq!(snoozed(&rules, &web, until), None);
+    }
+
+    #[test]
+    fn a_snooze_leaves_the_other_ports_of_a_project_alerting() {
+        let mut rules = Rules::default();
+        let mut web = server(5173, 0);
+        web.folder = Some("~/app".into());
+        let mut api = web.clone();
+        api.port = 3000;
+        snooze(&mut rules, &web);
+        let now = now_ms();
+        assert!(snoozed(&rules, &web, now).is_some());
+        assert_eq!(snoozed(&rules, &api, now), None);
     }
 
     #[test]
@@ -751,8 +767,15 @@ mod tests {
             },
         );
         snooze(&mut rules, &web);
-        assert_eq!(rules.snoozes.keys().collect::<Vec<_>>(), [&key(&web)]);
-        rules.change(Change::Unsnooze { key: key(&web) }).unwrap();
+        assert_eq!(
+            rules.snoozes.keys().collect::<Vec<_>>(),
+            [&snooze_key(&web)]
+        );
+        rules
+            .change(Change::Unsnooze {
+                key: snooze_key(&web),
+            })
+            .unwrap();
         assert!(rules.snoozes.is_empty());
     }
 
