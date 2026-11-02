@@ -4,7 +4,15 @@
 	import SquareIcon from "@lucide/svelte/icons/square";
 	import WifiIcon from "@lucide/svelte/icons/wifi";
 	import { Button } from "$lib/components/ui/button";
-	import { canStop, confirmedFramework, formatBytes, isMeasured, placeLabel, serverActivity } from "$lib/ports/format";
+	import {
+		canStop,
+		confirmedFramework,
+		formatBytes,
+		isMeasured,
+		isTimedOut,
+		placeLabel,
+		serverActivity,
+	} from "$lib/ports/format";
 	import type { PortsStore } from "$lib/ports/ports-store.svelte";
 	import { preferences } from "$lib/ports/preferences.svelte";
 	import type { Server } from "$lib/ports/types";
@@ -21,7 +29,8 @@
 		return cpu ? { value: String(Math.round(server.cpuPercent)), unit: "%" } : formatBytes(server.memoryBytes);
 	});
 	const attention = $derived(server.status === "attention");
-	const leaking = $derived(attention && server.responding);
+	const timedOut = $derived(isTimedOut(server));
+	const leaking = $derived(attention && !timedOut);
 	const detail = $derived(placeLabel(server) ?? confirmedFramework(server) ?? server.process);
 </script>
 
@@ -54,7 +63,7 @@
 			{/if}
 		</span>
 		<span class="truncate text-xs text-muted-foreground">
-			{#if attention || !server.responding}
+			{#if attention || timedOut}
 				<span class="text-warning">{serverActivity(server)}</span>
 			{:else}
 				{detail} · {serverActivity(server)}

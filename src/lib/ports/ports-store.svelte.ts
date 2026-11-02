@@ -92,6 +92,7 @@ export const cleanUpReason = (server: Server) => (server.cwdDeleted ? "folder de
 export class PortsStore {
 	servers = $state.raw<Server[]>([]);
 	system = $state.raw<SystemUsage>({ totalBytes: 0, usedBytes: 0, cpuPercent: 0 });
+	loaded = $state(false);
 	#revision = -1;
 	#listeners: string | null = null;
 	query = $state("");
@@ -109,7 +110,7 @@ export class PortsStore {
 	#customized = $derived(this.servers.map(customize));
 
 	shown = $derived(
-		this.#customized.filter((server) => preferences.shownKinds.current.includes(server.kind) && !server.hidden),
+		this.#customized.filter((server) => rules.current.rules.shownKinds.includes(server.kind) && !server.hidden),
 	);
 
 	searchedPort = $derived(portQuery(this.query));
@@ -160,7 +161,7 @@ export class PortsStore {
 							!sibling.protected &&
 							!sibling.supervisor &&
 							!sibling.hidden &&
-							preferences.shownKinds.current.includes(sibling.kind),
+							rules.current.rules.shownKinds.includes(sibling.kind),
 					),
 		),
 	);
@@ -211,6 +212,7 @@ export class PortsStore {
 	apply = (snapshot: Snapshot) => {
 		if (snapshot.revision <= this.#revision) return;
 		this.#revision = snapshot.revision;
+		this.loaded = true;
 		this.servers = snapshot.servers;
 		this.system = snapshot.system;
 		const listeners = snapshot.servers
@@ -362,6 +364,14 @@ export class PortsStore {
 
 	setProtected = (server: Server, value: boolean) =>
 		this.changeRules({ kind: "protect", key: serverKey(server), value });
+
+	snooze = (server: Server, minutes: number, label: string) =>
+		this.changeRules(
+			{ kind: "snooze", key: serverKey(server), process: server.process, minutes },
+			`Alerts snoozed for ${label}`,
+		);
+
+	unsnooze = (server: Server) => this.changeRules({ kind: "unsnooze", key: serverKey(server) }, "Alerts back on");
 
 	hide = async (entry: string) => {
 		await this.changeRules({ kind: "hide", entry }, `Hidden ${hiddenLabel(entry)}`);

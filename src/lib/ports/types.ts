@@ -77,6 +77,22 @@ export type Web =
 	| { state: "page"; scheme: "http" | "https"; title?: string }
 	| { state: "none" };
 
+export type HealthState = "unknown" | "warming" | "responsive" | "timedOut";
+
+export interface Health {
+	state: HealthState;
+	checkedAt?: number;
+}
+
+export interface Growth {
+	bytes: number;
+	minutes: number;
+}
+
+export type MemoryAlert =
+	| ({ reason: "growth" } & Growth)
+	| { reason: "threshold"; usedBytes: number; thresholdBytes: number };
+
 export interface Server {
 	id: string;
 	target?: ServerTarget;
@@ -106,7 +122,10 @@ export interface Server {
 	icon?: string;
 	kind: ServerKind;
 	status: ServerStatus;
-	responding: boolean;
+	growth?: Growth;
+	memoryAlert?: MemoryAlert;
+	snoozedUntil?: number;
+	health: Health;
 	addresses: string[];
 	exposed: boolean;
 	lanHost?: string;

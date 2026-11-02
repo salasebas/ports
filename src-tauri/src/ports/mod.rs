@@ -2,10 +2,12 @@ mod alerts;
 pub mod autoclean;
 mod containers;
 mod control;
+pub mod diagnostics;
 mod health;
 mod history;
 mod icons;
 mod identity;
+mod indicator;
 mod network;
 mod pages;
 mod place;
@@ -18,12 +20,16 @@ pub mod saved;
 mod session;
 mod sockets;
 mod supervisors;
+mod watch;
 
 pub use alerts::AlertSettings;
 use containers::ContainerTarget;
 use control::{Preview, Shutdown, Target};
+pub use health::HealthSettings;
+pub use history::GrowthRule;
 pub use icons::SCHEME as ICON_SCHEME;
 use identity::ProcessIdentity;
+pub use indicator::TrayMetric;
 
 use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -40,9 +46,12 @@ use tauri_plugin_notification::NotificationExt;
 
 use alerts::Alerts;
 use icons::Icons;
+use indicator::Indicator;
 use pages::Pages;
 use sampler::{Sampler, Snapshot, now_ms};
+use watch::Watches;
 
+pub const TRAY_ID: &str = "ports";
 const SNAPSHOT_EVENT: &str = "ports://snapshot";
 pub const DETAILS_EVENT: &str = "ports://details";
 const DEFAULT_INTERVAL_MS: u64 = 2_000;
@@ -64,15 +73,27 @@ pub struct Monitor {
     woken: Mutex<bool>,
     wake: Condvar,
     stopping: Mutex<HashSet<String>>,
-    health: Mutex<Health>,
+    probes: Mutex<Probes>,
     pages: Mutex<Pages>,
     icons: Arc<Icons>,
     alerts: Mutex<Alerts>,
     alert_settings: Mutex<AlertSettings>,
+    watches: Mutex<Watches>,
+    tray_metric: Mutex<TrayMetric>,
+    tray_shown: Mutex<Option<Indicator>>,
     stop_grace_secs: AtomicU64,
     idle_after_ms: AtomicU64,
     rules: Mutex<RulesState>,
     auto: Mutex<autoclean::Runs>,
+}
+
+pub struct Saved {
+    pub alerts: AlertSettings,
+    pub health: HealthSettings,
+    pub tray_metric: TrayMetric,
+    pub stop_grace_secs: u64,
+    pub idle_after_ms: u64,
+    pub rules: rules::Rules,
 }
 
 struct RulesState {
@@ -80,11 +101,12 @@ struct RulesState {
     rules: rules::Rules,
 }
 
-#[derive(Default)]
-struct Health {
-    unresponsive: HashSet<health::Key>,
+struct Probes {
+    settings: HealthSettings,
+    checks: health::Checks,
     probing: bool,
     last_round_at: u64,
+    generation: u64,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -94,14 +116,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Monitor {
-    pub fn new(
-        home: PathBuf,
-        alert_settings: AlertSettings,
-        stop_grace_secs: u64,
-        idle_after_ms: u64,
-        rules: rules::Rules,
-        auto_log: PathBuf,
-    ) -> Self {
+    pub fn new(home: PathBuf, saved: Saved, auto_log: PathBuf) -> Self {
         let icons = Arc::new(Icons::default());
         Self {
             sampler: Mutex::new(Sampler::new(home.clone(), icons.clone())),
@@ -112,27 +127,53 @@ impl Monitor {
             woken: Mutex::new(false),
             wake: Condvar::new(),
             stopping: Mutex::new(HashSet::new()),
-            health: Mutex::new(Health::default()),
+            probes: Mutex::new(Probes {
+                settings: saved.health,
+                checks: health::Checks::new(),
+                probing: false,
+                last_round_at: 0,
+                generation: 0,
+            }),
             pages: Mutex::new(Pages::default()),
             icons,
             alerts: Mutex::new(Alerts::default()),
-            alert_settings: Mutex::new(alert_settings),
-            stop_grace_secs: AtomicU64::new(clamp_grace(stop_grace_secs)),
-            idle_after_ms: AtomicU64::new(idle_after_ms),
-            rules: Mutex::new(RulesState { revision: 0, rules }),
+            alert_settings: Mutex::new(saved.alerts),
+            watches: Mutex::new(Watches::default()),
+            tray_metric: Mutex::new(saved.tray_metric),
+            tray_shown: Mutex::new(None),
+            stop_grace_secs: AtomicU64::new(clamp_grace(saved.stop_grace_secs)),
+            idle_after_ms: AtomicU64::new(saved.idle_after_ms),
+            rules: Mutex::new(RulesState {
+                revision: 0,
+                rules: saved.rules,
+            }),
             auto: Mutex::new(autoclean::Runs::new(auto_log)),
         }
     }
 
     fn sample(&self) -> Result<Snapshot, String> {
+        let settings = self.alert_settings();
         let mut snapshot = {
             let mut sampler = lock(&self.sampler);
             sampler.idle_after_ms = self.idle_after_ms.load(Ordering::Relaxed);
+            sampler.growth = settings.growth;
             sampler.sample()?
         };
+        let now = now_ms();
         lock(&self.pages).apply(&mut snapshot.servers);
-        health::apply(&lock(&self.health).unresponsive, &mut snapshot.servers);
-        lock(&self.rules).rules.apply(&mut snapshot.servers);
+        {
+            let probes = lock(&self.probes);
+            health::apply(
+                &probes.checks,
+                probes.settings.enabled,
+                &mut snapshot.servers,
+                now,
+            );
+        }
+        lock(&self.rules).rules.apply(&mut snapshot.servers, now);
+        for server in &mut snapshot.servers {
+            server.memory_alert = alerts::reason(settings, server);
+        }
         Ok(snapshot)
     }
 
@@ -157,6 +198,8 @@ impl Monitor {
             eprintln!("could not send a snapshot: {error}");
         }
         self.alert(app, &snapshot);
+        self.notify_watchers(app, &snapshot);
+        self.update_tray(app, &snapshot);
         self.clean_up_if_due(app, &snapshot);
         self.probe_if_due(app, &snapshot);
         self.check_pages_if_due(app, &snapshot);
@@ -169,6 +212,31 @@ impl Monitor {
 
     pub fn set_alert_settings(&self, settings: AlertSettings) {
         *lock(&self.alert_settings) = settings;
+    }
+
+    pub fn health_settings(&self) -> HealthSettings {
+        lock(&self.probes).settings
+    }
+
+    pub fn set_health_settings(&self, settings: HealthSettings) {
+        {
+            let mut probes = lock(&self.probes);
+            probes.settings = settings;
+            probes.checks.clear();
+            probes.probing = false;
+            probes.last_round_at = 0;
+            probes.generation += 1;
+        }
+        self.sample_now();
+    }
+
+    pub fn tray_metric(&self) -> TrayMetric {
+        *lock(&self.tray_metric)
+    }
+
+    pub fn set_tray_metric(&self, metric: TrayMetric) {
+        *lock(&self.tray_metric) = metric;
+        self.sample_now();
     }
 
     pub fn stop_grace_secs(&self) -> u64 {
@@ -205,43 +273,80 @@ impl Monitor {
         let settings = self.alert_settings();
         let due = lock(&self.alerts).due(settings, &snapshot.servers, now_ms());
         for alert in due {
-            let mut hash = DefaultHasher::new();
-            alert.server_id.hash(&mut hash);
-            let shown = app
-                .notification()
-                .builder()
-                .id(hash.finish() as i32)
-                .extra("serverId", &alert.server_id)
-                .title(alert.title)
-                .body(alert.body)
-                .show();
-            if let Err(error) = shown {
-                eprintln!("could not show a memory alert: {error}");
-            }
+            notify(
+                app,
+                &alert.server_id,
+                &alert.server_id,
+                alert.title,
+                alert.body,
+            );
+        }
+    }
+
+    fn notify_watchers(&self, app: &AppHandle, snapshot: &Snapshot) {
+        let watches = lock(&self.rules).rules.watches.clone();
+        let due = lock(&self.watches).due(&watches, &snapshot.servers, now_ms());
+        for notice in due {
+            let id = format!("{}:{}", notice.key, notice.body);
+            notify(app, &id, &notice.server_id, notice.title, notice.body);
+        }
+    }
+
+    fn update_tray(&self, app: &AppHandle, snapshot: &Snapshot) {
+        let next = {
+            let state = lock(&self.rules);
+            indicator::indicator(self.tray_metric(), &state.rules, &snapshot.servers)
+        };
+        let mut shown = lock(&self.tray_shown);
+        if shown.as_ref() == Some(&next) {
+            return;
+        }
+        let Some(tray) = app.tray_by_id(TRAY_ID) else {
+            return;
+        };
+        let updated = tray
+            .set_title(next.title.as_deref())
+            .and_then(|()| tray.set_tooltip(Some(&next.tooltip)));
+        match updated {
+            Ok(()) => *shown = Some(next),
+            Err(error) => eprintln!("could not update the menu bar: {error}"),
         }
     }
 
     fn probe_if_due(&self, app: &AppHandle, snapshot: &Snapshot) {
         let now = now_ms();
-        {
-            let mut health = lock(&self.health);
-            if health.probing || now.saturating_sub(health.last_round_at) < health::PROBE_EVERY_MS {
+        let (timeout, generation) = {
+            let mut probes = lock(&self.probes);
+            let settings = probes.settings;
+            if !settings.enabled
+                || probes.probing
+                || now.saturating_sub(probes.last_round_at) < settings.every_seconds * 1000
+            {
                 return;
             }
-            health.probing = true;
-            health.last_round_at = now;
-        }
+            probes.probing = true;
+            probes.last_round_at = now;
+            (
+                Duration::from_secs(settings.timeout_seconds),
+                probes.generation,
+            )
+        };
         let targets: Vec<_> = snapshot.servers.iter().filter_map(health::target).collect();
         let app = app.clone();
         let spawned = thread::Builder::new()
             .name("ports-health".into())
             .spawn(move || {
-                let unresponsive = health::unresponsive(&targets);
+                let checks = health::check_all(&targets, timeout);
                 let monitor = app.state::<Monitor>();
                 let changed = {
-                    let mut health = lock(&monitor.health);
-                    health.probing = false;
-                    std::mem::replace(&mut health.unresponsive, unresponsive) != health.unresponsive
+                    let mut probes = lock(&monitor.probes);
+                    if probes.generation != generation {
+                        return;
+                    }
+                    probes.probing = false;
+                    let changed = !health::same_outcomes(&probes.checks, &checks);
+                    probes.checks = checks;
+                    changed
                 };
                 if changed {
                     monitor.sample_now();
@@ -249,7 +354,7 @@ impl Monitor {
             });
         if let Err(error) = spawned {
             eprintln!("could not probe the servers: {error}");
-            lock(&self.health).probing = false;
+            lock(&self.probes).probing = false;
         }
     }
 
@@ -286,6 +391,7 @@ impl Monitor {
     }
 
     fn wait(&self, visible: bool) {
+        let settling = lock(&self.watches).settling();
         let guard = lock(&self.woken);
         let mut woken = match self.interval_ms.load(Ordering::Relaxed) {
             NEVER => self
@@ -297,6 +403,11 @@ impl Monitor {
                     ms
                 } else {
                     ms.max(HIDDEN_INTERVAL_MS)
+                };
+                let ms = if settling {
+                    ms.min(watch::SETTLE_MS)
+                } else {
+                    ms
                 };
                 self.wake
                     .wait_timeout_while(guard, Duration::from_millis(ms), |woken| !*woken)
@@ -369,6 +480,22 @@ impl Monitor {
             );
         }
         Ok(())
+    }
+}
+
+fn notify(app: &AppHandle, id: &str, server_id: &str, title: String, body: impl Into<String>) {
+    let mut hash = DefaultHasher::new();
+    id.hash(&mut hash);
+    let shown = app
+        .notification()
+        .builder()
+        .id(hash.finish() as i32)
+        .extra("serverId", server_id)
+        .title(title)
+        .body(body)
+        .show();
+    if let Err(error) = shown {
+        eprintln!("could not show a notification: {error}");
     }
 }
 

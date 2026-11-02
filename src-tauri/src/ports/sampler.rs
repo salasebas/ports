@@ -4,12 +4,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sysinfo::{Pid, Process, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind, Users};
 
+use super::alerts::Reason;
 use super::containers::{self, Container, ContainerTarget};
 use super::control::{self, ProcessTarget, Target};
-use super::history::{self, ACTIVE_CPU_PERCENT, History, Status};
+use super::health::Health;
+use super::history::{self, ACTIVE_CPU_PERCENT, Growth, GrowthRule, History, Status};
 use super::icons::{self, Icons};
 use super::identity::ProcessIdentity;
 use super::network;
@@ -21,7 +23,7 @@ use super::session::{self, Session};
 use super::sockets::Sockets;
 use super::supervisors::{self, LaunchdJobs, Supervisor};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
     Dev,
@@ -86,9 +88,13 @@ pub struct Server {
     pub icon: Option<String>,
     pub kind: Kind,
     pub status: Status,
-    #[serde(skip)]
-    pub leaking: bool,
-    pub responding: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub growth: Option<Growth>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_alert: Option<Reason>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snoozed_until: Option<u64>,
+    pub health: Health,
     pub addresses: Vec<IpAddr>,
     pub exposed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -101,6 +107,8 @@ pub struct Server {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<ParentProcess>,
     pub started_at: u64,
+    #[serde(skip)]
+    pub listener_started_at: u64,
     pub last_active_at: u64,
     pub memory_bytes: u64,
     pub cpu_percent: f64,
@@ -154,6 +162,7 @@ pub struct Sampler {
     projects: ProjectFiles,
     revision: u64,
     pub idle_after_ms: u64,
+    pub growth: GrowthRule,
 }
 
 struct ProjectFiles {
@@ -198,6 +207,7 @@ impl Sampler {
             },
             revision: 0,
             idle_after_ms: history::DEFAULT_IDLE_AFTER_MS,
+            growth: GrowthRule::default(),
         }
     }
 
@@ -341,6 +351,7 @@ impl Sampler {
                 Clock {
                     now,
                     idle_after_ms: self.idle_after_ms,
+                    growth: self.growth,
                 },
             ) {
                 servers.push(server);
@@ -410,6 +421,7 @@ impl Sampler {
 struct Clock {
     now: u64,
     idle_after_ms: u64,
+    growth: GrowthRule,
 }
 
 struct Service {
@@ -443,7 +455,11 @@ fn describe(
     sockets: &Sockets,
     service: Service,
     tracked: &mut Tracked,
-    Clock { now, idle_after_ms }: Clock,
+    Clock {
+        now,
+        idle_after_ms,
+        growth,
+    }: Clock,
 ) -> Option<Server> {
     let Service {
         supervisor,
@@ -467,9 +483,8 @@ fn describe(
         tracked.last_active_at = now;
     }
     tracked.history.record(now, memory_bytes, cpu_percent);
-    let memory_history = tracked.history.memory();
-    let leaking = history::is_leaking(&memory_history, tracked.history.span());
-    let status = history::status(leaking, now, tracked.last_active_at, idle_after_ms);
+    let growth = tracked.history.growth(growth);
+    let status = history::status(growth.is_some(), now, tracked.last_active_at, idle_after_ms);
 
     let cwd = listener
         .cwd()
@@ -556,26 +571,34 @@ fn describe(
         parent,
         kind,
         status,
-        leaking,
-        responding: true,
+        growth,
+        memory_alert: None,
+        snoozed_until: None,
+        health: Health::UNKNOWN,
         addresses,
         exposed: false,
         lan_host: None,
         process,
         command,
-        // sysinfo reports 0 for another user's process, such as launchd.
-        started_at: match root.start_time() {
-            0 => ProcessIdentity::read(root.pid().as_u32())
-                .and_then(|id| id.started_secs())
-                .unwrap_or_default(),
-            secs => secs,
-        } * 1000,
+        started_at: started_ms(root),
+        listener_started_at: started_ms(listener),
         last_active_at: tracked.last_active_at,
         memory_bytes,
         cpu_percent,
-        memory_history,
+        memory_history: tracked.history.memory(),
         cpu_history: tracked.history.cpu(),
     })
+}
+
+fn started_ms(process: &Process) -> u64 {
+    // sysinfo reports 0 for another user's process, such as launchd.
+    let secs = match process.start_time() {
+        0 => ProcessIdentity::read(process.pid().as_u32())
+            .and_then(|id| id.started_secs())
+            .unwrap_or_default(),
+        secs => secs,
+    };
+    secs * 1000
 }
 
 fn unowned(port: u16, owner: String, first_seen: u64) -> Server {
@@ -621,12 +644,15 @@ fn unowned(port: u16, owner: String, first_seen: u64) -> Server {
         parent: None,
         kind,
         status: Status::Running,
-        leaking: false,
-        responding: true,
+        growth: None,
+        memory_alert: None,
+        snoozed_until: None,
+        health: Health::UNKNOWN,
         addresses: Vec::new(),
         exposed: false,
         lan_host: None,
         started_at: first_seen,
+        listener_started_at: first_seen,
         last_active_at: first_seen,
         memory_bytes: 0,
         cpu_percent: 0.0,
@@ -698,12 +724,15 @@ fn contained(port: u16, container: &Container, home: &Path) -> Server {
         parent: None,
         kind: Kind::Container,
         status: Status::Running,
-        leaking: false,
-        responding: true,
+        growth: None,
+        memory_alert: None,
+        snoozed_until: None,
+        health: Health::UNKNOWN,
         addresses,
         exposed: false,
         lan_host: None,
         started_at: container.started_at,
+        listener_started_at: container.started_at,
         last_active_at: container.started_at,
         memory_bytes: 0,
         cpu_percent: 0.0,

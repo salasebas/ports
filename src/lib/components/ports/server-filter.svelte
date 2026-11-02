@@ -3,8 +3,9 @@
 	import { Button } from "$lib/components/ui/button";
 	import * as DropdownMenu from "$lib/components/ui/dropdown-menu";
 	import type { PortsStore } from "$lib/ports/ports-store.svelte";
-	import { preferences, serverKinds } from "$lib/ports/preferences.svelte";
+	import { serverKinds } from "$lib/ports/preferences.svelte";
 	import type { ServerKind } from "$lib/ports/types";
+	import { rules } from "$lib/rules.svelte";
 
 	let { store }: { store: PortsStore } = $props();
 
@@ -24,7 +25,8 @@
 			<DropdownMenu.GroupHeading>Show</DropdownMenu.GroupHeading>
 			<DropdownMenu.CheckboxGroup
 				bind:value={
-					() => preferences.shownKinds.current, (kinds) => (preferences.shownKinds.current = kinds as ServerKind[])
+					() => rules.current.rules.shownKinds,
+					(kinds) => store.changeRules({ kind: "shownKinds", kinds: kinds as ServerKind[] })
 				}
 			>
 				{#each serverKinds as kind (kind.value)}

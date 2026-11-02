@@ -1,9 +1,26 @@
 import { describe, expect, it } from "vitest";
-import { formatBytesText, formatDuration, lanUrl, serverUrl } from "./format";
-import type { Web } from "./types";
+import { mockServers } from "./mock";
+import {
+	describeMemoryAlert,
+	formatBytesText,
+	formatClock,
+	formatDuration,
+	healthLabel,
+	lanUrl,
+	serverActivity,
+	serverUrl,
+} from "./format";
+import type { Server, Web } from "./types";
 
 const minute = 60_000;
 const hour = 60 * minute;
+
+const server = (overrides: Partial<Server>): Server => ({
+	...mockServers(0)[0],
+	status: "running",
+	startedAt: -2 * hour,
+	...overrides,
+});
 
 describe("formatDuration", () => {
 	it.each([
@@ -24,6 +41,41 @@ describe("formatBytesText", () => {
 		[12 * 1024 ** 3, "12.0 GB"],
 	])("shows %i bytes as %s", (bytes, expected) => {
 		expect(formatBytesText(bytes)).toBe(expected);
+	});
+});
+
+describe("serverActivity", () => {
+	it("shows a server warming up rather than its uptime", () => {
+		expect(serverActivity(server({ health: { state: "warming" } }), 0)).toBe("warming up");
+		expect(serverActivity(server({ health: { state: "responsive" } }), 0)).toBe("up 2h");
+	});
+
+	it("puts a timeout ahead of growth", () => {
+		const growth = { bytes: 100 * 1024 ** 2, minutes: 5 };
+		expect(serverActivity(server({ status: "attention", growth }), 0)).toBe("+100 MB in 5 min");
+		expect(serverActivity(server({ status: "attention", growth, health: { state: "timedOut" } }), 0)).toBe(
+			"not responding",
+		);
+	});
+});
+
+describe("healthLabel", () => {
+	it("names every state and adds the time of the last check", () => {
+		expect(healthLabel({ state: "unknown" })).toBe("Not checked");
+		expect(healthLabel({ state: "warming" })).toBe("Warming up");
+		expect(healthLabel({ state: "timedOut", checkedAt: 0 })).toBe(`Timed out · ${formatClock(0)}`);
+		expect(healthLabel({ state: "responsive", checkedAt: 0 })).toBe(`Responding · ${formatClock(0)}`);
+	});
+});
+
+describe("describeMemoryAlert", () => {
+	it("tells growth from high usage and doesn't call growth a leak", () => {
+		expect(describeMemoryAlert({ reason: "growth", bytes: 600 * 1024 ** 2, minutes: 10 })).toBe(
+			"Grew by 600 MB in 10 minutes. Steady growth can mean a leak, but doesn't prove one.",
+		);
+		expect(describeMemoryAlert({ reason: "threshold", usedBytes: 3 * 1024 ** 3, thresholdBytes: 2 * 1024 ** 3 })).toBe(
+			"Uses 3.00 GB, above your 2.00 GB alert.",
+		);
 	});
 });
 

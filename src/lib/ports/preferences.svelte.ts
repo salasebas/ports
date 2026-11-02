@@ -40,7 +40,6 @@ export const preferenceDefaults: {
 	metric: Metric;
 	keepHeaderVisible: boolean;
 	confirmActions: boolean;
-	shownKinds: ServerKind[];
 	editor: Editor;
 	refreshInterval: number;
 	sort: Sort;
@@ -51,7 +50,6 @@ export const preferenceDefaults: {
 	metric: "memory",
 	keepHeaderVisible: true,
 	confirmActions: true,
-	shownKinds: ["dev", "database", "container"],
 	editor: "cursor",
 	refreshInterval: 2000,
 	sort: { key: "port", descending: false },
@@ -66,7 +64,6 @@ export const preferences = {
 	metric: new PersistedState<Metric>("ports.metric", initial.metric),
 	keepHeaderVisible: new PersistedState("ports.keepHeaderVisible", initial.keepHeaderVisible),
 	confirmActions: new PersistedState("ports.confirmActions", initial.confirmActions),
-	shownKinds: new PersistedState<ServerKind[]>("ports.shownKinds", initial.shownKinds),
 	editor: new PersistedState<Editor>("ports.editor", initial.editor),
 	refreshInterval: new PersistedState<number>("ports.refreshInterval", initial.refreshInterval),
 	sort: new PersistedState<Sort>("ports.sort", initial.sort),

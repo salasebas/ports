@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_store::StoreExt;
 
-use super::sampler::{Kind, Server, Snapshot};
+use super::sampler::{Kind, Server, Snapshot, now_ms};
 use super::{Monitor, blocking, lock};
 
 const STORE: &str = "rules.json";
@@ -13,6 +13,7 @@ const VERSION: u32 = 1;
 const RULES_EVENT: &str = "ports://rules";
 const PATTERN_LIMIT: usize = 200;
 const AUTO_IDLE_MINUTES: std::ops::RangeInclusive<u64> = 15..=24 * 60;
+const SNOOZE_MINUTES: [u64; 3] = [60, 8 * 60, 24 * 60];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -24,6 +25,13 @@ pub struct Rules {
     pub hidden: Vec<String>,
     pub protection: BTreeMap<String, bool>,
     pub auto_cleanup: AutoCleanup,
+    pub shown_kinds: Vec<Kind>,
+    pub snoozes: BTreeMap<String, Snooze>,
+    pub watches: BTreeMap<String, Vec<WatchEvent>>,
+}
+
+fn default_kinds() -> Vec<Kind> {
+    vec![Kind::Dev, Kind::Database, Kind::Container]
 }
 
 impl Default for Rules {
@@ -36,8 +44,25 @@ impl Default for Rules {
             hidden: Vec::new(),
             protection: BTreeMap::new(),
             auto_cleanup: AutoCleanup::default(),
+            shown_kinds: default_kinds(),
+            snoozes: BTreeMap::new(),
+            watches: BTreeMap::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Snooze {
+    pub until: u64,
+    pub process: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WatchEvent {
+    Started,
+    Stopped,
+    Health,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -129,7 +154,26 @@ pub enum Change {
     Import {
         hidden: Vec<String>,
         protection: BTreeMap<String, bool>,
+        #[serde(default)]
+        shown_kinds: Option<Vec<Kind>>,
     },
+    ShownKinds {
+        kinds: Vec<Kind>,
+    },
+    Snooze {
+        key: String,
+        process: String,
+        minutes: u64,
+    },
+    Unsnooze {
+        key: String,
+    },
+    ClearSnoozes,
+    Watch {
+        key: String,
+        events: Vec<WatchEvent>,
+    },
+    ClearWatches,
 }
 
 pub fn key(server: &Server) -> String {
@@ -150,6 +194,23 @@ fn check_entry(entry: &str) -> Result<(), String> {
     } else {
         Err(format!("{entry} is not a port or a process to hide"))
     }
+}
+
+fn check_watch(key: &str) -> Result<(), String> {
+    let valid = match key.split_once(':') {
+        Some(("port", port)) => port.parse::<u16>().is_ok_and(|port| port > 0),
+        Some(("project", folder)) => !folder.trim().is_empty(),
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(format!("{key} is not a port or a project to watch"))
+    }
+}
+
+pub fn watched_by(key: &str, server: &Server) -> bool {
+    key == self::key(server) || key == format!("port:{}", server.port)
 }
 
 fn check_range(range: PortRange) -> Result<(), String> {
@@ -194,12 +255,22 @@ impl Rules {
             || (!self.include.is_empty() && !self.include.iter().any(|rule| rule.matches(server)))
     }
 
-    pub fn apply(&self, servers: &mut [Server]) {
+    pub fn shows(&self, server: &Server) -> bool {
+        !server.hidden && self.shown_kinds.contains(&server.kind)
+    }
+
+    pub fn apply(&self, servers: &mut [Server], now: u64) {
         for server in servers {
             server.hidden = self.hides(server);
-            if let Some(&protected) = self.protection.get(&key(server)) {
+            let key = key(server);
+            if let Some(&protected) = self.protection.get(&key) {
                 server.protected = protected;
             }
+            server.snoozed_until = self
+                .snoozes
+                .get(&key)
+                .filter(|snooze| snooze.until > now && snooze.process == server.process)
+                .map(|snooze| snooze.until);
         }
     }
 
@@ -210,6 +281,7 @@ impl Rules {
                 self.include.clear();
                 self.exclude.clear();
                 self.hidden.clear();
+                self.shown_kinds = default_kinds();
             }
             Change::Hide { entry } => {
                 check_entry(&entry)?;
@@ -245,7 +317,14 @@ impl Rules {
                 }
                 self.auto_cleanup = AutoCleanup { policy, paused };
             }
-            Change::Import { hidden, protection } => {
+            Change::Import {
+                hidden,
+                protection,
+                shown_kinds,
+            } => {
+                if let Some(kinds) = shown_kinds {
+                    self.shown_kinds = kinds;
+                }
                 for entry in hidden {
                     if check_entry(&entry).is_ok() && !self.hidden.contains(&entry) {
                         self.hidden.push(entry);
@@ -255,6 +334,38 @@ impl Rules {
                     self.protection.entry(key).or_insert(value);
                 }
             }
+            Change::ShownKinds { kinds } => self.shown_kinds = kinds,
+            Change::Snooze {
+                key,
+                process,
+                minutes,
+            } => {
+                if !SNOOZE_MINUTES.contains(&minutes) {
+                    return Err(format!("{minutes} minutes is not a snooze Ports offers"));
+                }
+                let now = now_ms();
+                self.snoozes.retain(|_, snooze| snooze.until > now);
+                self.snoozes.insert(
+                    key,
+                    Snooze {
+                        until: now + minutes * 60_000,
+                        process,
+                    },
+                );
+            }
+            Change::Unsnooze { key } => {
+                self.snoozes.remove(&key);
+            }
+            Change::ClearSnoozes => self.snoozes.clear(),
+            Change::Watch { key, events } => {
+                check_watch(&key)?;
+                if events.is_empty() {
+                    self.watches.remove(&key);
+                } else {
+                    self.watches.insert(key, events);
+                }
+            }
+            Change::ClearWatches => self.watches.clear(),
         }
         Ok(())
     }
@@ -368,7 +479,9 @@ mod tests {
             ..Rules::default()
         };
         let original = rules.clone();
+        rules.shown_kinds = vec![Kind::Other];
         rules.change(Change::ResetLists).unwrap();
+        assert_eq!(rules.shown_kinds, Rules::default().shown_kinds);
         assert!(rules.port_range.is_none());
         assert!(rules.include.is_empty());
         assert!(rules.exclude.is_empty());
@@ -526,7 +639,7 @@ mod tests {
             })
             .unwrap();
         let mut servers = [db, web, web2, container];
-        rules.apply(&mut servers);
+        rules.apply(&mut servers, 0);
         assert_eq!(
             servers.map(|server| server.protected),
             [false, true, true, false],
@@ -550,8 +663,10 @@ mod tests {
                     ("port:3000".into(), false),
                     ("port:8080".into(), true),
                 ]),
+                shown_kinds: Some(vec![Kind::Dev]),
             })
             .unwrap();
+        assert_eq!(rules.shown_kinds, [Kind::Dev]);
         assert_eq!(rules.hidden, ["port:5000"]);
         assert!(rules.protection["port:3000"]);
         assert!(rules.protection["port:8080"]);
@@ -579,5 +694,126 @@ mod tests {
             })
             .unwrap();
         assert_eq!(rules.auto_cleanup.active(), None);
+    }
+
+    fn snoozed(rules: &Rules, server: &Server, now: u64) -> Option<u64> {
+        let mut servers = [server.clone()];
+        rules.apply(&mut servers, now);
+        servers[0].snoozed_until
+    }
+
+    fn snooze(rules: &mut Rules, server: &Server) {
+        rules
+            .change(Change::Snooze {
+                key: key(server),
+                process: server.process.clone(),
+                minutes: 60,
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn a_snooze_covers_one_service_and_ends_on_its_own() {
+        let mut rules = Rules::default();
+        let web = server(3000, 0);
+        snooze(&mut rules, &web);
+        let now = now_ms();
+        let until = snoozed(&rules, &web, now).unwrap();
+        assert!(until > now + 59 * 60_000);
+        assert_eq!(snoozed(&rules, &server(5173, 0), now), None);
+        assert_eq!(snoozed(&rules, &web, until), None);
+    }
+
+    #[test]
+    fn a_snooze_outlives_a_restart_but_not_a_different_program_on_the_port() {
+        let mut rules = Rules::default();
+        let web = server(3000, 0);
+        snooze(&mut rules, &web);
+        let now = now_ms();
+        let mut restarted = web.clone();
+        restarted.id = "process:new:3000".into();
+        restarted.pid = Some(4242);
+        assert!(snoozed(&rules, &restarted, now).is_some());
+        let mut other = restarted.clone();
+        other.process = "python3".into();
+        assert_eq!(snoozed(&rules, &other, now), None);
+    }
+
+    #[test]
+    fn snoozing_drops_expired_snoozes_and_unsnoozing_ends_it_early() {
+        let mut rules = Rules::default();
+        let web = server(3000, 0);
+        rules.snoozes.insert(
+            "port:9000".into(),
+            Snooze {
+                until: 1,
+                process: "node".into(),
+            },
+        );
+        snooze(&mut rules, &web);
+        assert_eq!(rules.snoozes.keys().collect::<Vec<_>>(), [&key(&web)]);
+        rules.change(Change::Unsnooze { key: key(&web) }).unwrap();
+        assert!(rules.snoozes.is_empty());
+    }
+
+    #[test]
+    fn only_the_offered_snooze_lengths_are_accepted() {
+        let mut rules = Rules::default();
+        assert!(
+            rules
+                .change(Change::Snooze {
+                    key: "port:3000".into(),
+                    process: "node".into(),
+                    minutes: 5,
+                })
+                .is_err()
+        );
+        assert!(rules.snoozes.is_empty());
+    }
+
+    #[test]
+    fn a_watch_needs_a_port_or_project_and_ends_without_events() {
+        let mut rules = Rules::default();
+        rules
+            .change(Change::Watch {
+                key: "port:3000".into(),
+                events: vec![WatchEvent::Stopped],
+            })
+            .unwrap();
+        assert_eq!(rules.watches["port:3000"], [WatchEvent::Stopped]);
+        for invalid in ["port:0", "port:70000", "process:node", "project: "] {
+            assert!(
+                rules
+                    .change(Change::Watch {
+                        key: invalid.into(),
+                        events: vec![WatchEvent::Started],
+                    })
+                    .is_err()
+            );
+        }
+        rules
+            .change(Change::Watch {
+                key: "port:3000".into(),
+                events: Vec::new(),
+            })
+            .unwrap();
+        assert!(rules.watches.is_empty());
+    }
+
+    #[test]
+    fn a_port_watch_covers_any_owner_and_a_project_watch_every_port_of_it() {
+        let mut web = server(5173, 0);
+        web.folder = Some("~/web".into());
+        assert!(watched_by("port:5173", &web));
+        assert!(watched_by("project:~/web", &web));
+        assert!(!watched_by("port:3000", &web));
+        assert!(!watched_by("project:~/other", &web));
+    }
+
+    #[test]
+    fn rules_saved_before_kinds_moved_here_show_the_default_kinds() {
+        let rules: Rules = serde_json::from_str(r#"{"hidden":["port:3000"]}"#).unwrap();
+        assert_eq!(rules.shown_kinds, Rules::default().shown_kinds);
+        assert_eq!(rules.hidden, ["port:3000"]);
     }
 }

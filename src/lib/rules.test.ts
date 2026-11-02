@@ -18,13 +18,17 @@ const view: RulesView = {
 		hidden: [],
 		protection: {},
 		autoCleanup: { policy: null, paused: false },
+		shownKinds: ["dev", "database", "container"],
+		snoozes: {},
+		watches: {},
 	},
 };
 
-it("moves hidden servers and protection from the window's storage to the backend once", async () => {
+it("moves hidden servers, protection and shown kinds from the window's storage to the backend once", async () => {
 	vi.stubGlobal("isTauri", true);
 	localStorage.setItem("ports.hidden", JSON.stringify(["port:5000"]));
 	localStorage.setItem("ports.protection", JSON.stringify({ "port:3000": true }));
+	localStorage.setItem("ports.shownKinds", JSON.stringify(["dev", "other"]));
 	const changes: RulesChange[] = [];
 	mockIPC(
 		(command, args) => {
@@ -38,8 +42,11 @@ it("moves hidden servers and protection from the window's storage to the backend
 	);
 	new RulesStore().load();
 	await vi.waitFor(() => expect(localStorage.getItem("ports.hidden")).toBeNull());
-	expect(changes).toEqual([{ kind: "import", hidden: ["port:5000"], protection: { "port:3000": true } }]);
+	expect(changes).toEqual([
+		{ kind: "import", hidden: ["port:5000"], protection: { "port:3000": true }, shownKinds: ["dev", "other"] },
+	]);
 	expect(localStorage.getItem("ports.protection")).toBeNull();
+	expect(localStorage.getItem("ports.shownKinds")).toBeNull();
 
 	new RulesStore().load();
 	await vi.waitFor(() => expect(changes).toHaveLength(1));

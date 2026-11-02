@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount, type Component } from "svelte";
 	import { goto } from "$app/navigation";
+	import { toast } from "svelte-sonner";
 	import { resolve } from "$app/paths";
 	import { page } from "$app/state";
 	import { flip } from "svelte/animate";
@@ -57,6 +58,7 @@
 		confirmedFramework,
 		formatBytesText,
 		formatDuration,
+		isTimedOut,
 		isMeasured,
 		serverActivity,
 		serverProcessId,
@@ -106,9 +108,10 @@
 
 	$effect(() => {
 		const id = page.url.searchParams.get("details");
+		if (!id || !store.loaded) return;
 		const server = store.servers.find((s) => s.id === id);
-		if (!server) return;
-		showDetails(server);
+		if (server) showDetails(server);
+		else toast.info("That server is no longer running");
 		void goto(resolve("/"), { replaceState: true, noScroll: true, keepFocus: true });
 	});
 
@@ -282,7 +285,8 @@
 
 {#snippet serverCells(server: Server)}
 	{@const attention = server.status === "attention"}
-	{@const leaking = attention && server.responding}
+	{@const timedOut = isTimedOut(server)}
+	{@const leaking = attention && !timedOut}
 	{@const place = placeLabel(server)}
 	<Table.Cell class="py-3.5 pl-5">
 		<PortLabel port={server.port} class="text-[15px]" />
@@ -312,9 +316,7 @@
 						</Tooltip.Root>
 					{/if}
 				</span>
-				<span
-					class={cn("truncate text-xs", attention || !server.responding ? "text-warning" : "text-muted-foreground")}
-				>
+				<span class={cn("truncate text-xs", attention || timedOut ? "text-warning" : "text-muted-foreground")}>
 					{place ? `${place} · ` : ""}{serverActivity(server)}
 				</span>
 			</div>

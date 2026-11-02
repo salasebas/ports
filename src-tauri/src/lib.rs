@@ -136,6 +136,7 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .register_uri_scheme_protocol(ports::ICON_SCHEME, |context, request| {
             ports::serve_icon(context.app_handle(), request.uri().path())
         })
@@ -156,13 +157,16 @@ pub fn run() {
             }
             app.manage(ports::Monitor::new(
                 app.path().home_dir()?,
-                settings::alerts(app.handle()),
-                settings::stop_grace_seconds(app.handle()),
-                settings::idle_after_ms(app.handle()),
-                ports::rules::load(app.handle()),
+                ports::Saved {
+                    alerts: settings::alerts(app.handle()),
+                    health: settings::health(app.handle()),
+                    tray_metric: settings::tray_metric(app.handle()),
+                    stop_grace_secs: settings::stop_grace_seconds(app.handle()),
+                    idle_after_ms: settings::idle_after_ms(app.handle()),
+                    rules: ports::rules::load(app.handle()),
+                },
                 log_dir.join("auto-cleanup.log"),
             ));
-            ports::start(app.handle())?;
             ports::open_alerts_on_click(app.handle(), show_main);
 
             let quick_view =
@@ -172,7 +176,7 @@ pub fn run() {
             let separator = PredefinedMenuItem::separator(app)?;
             let menu = Menu::with_items(app, &[&quick_view, &open, &separator, &quit])?;
 
-            TrayIconBuilder::with_id("ports")
+            TrayIconBuilder::with_id(ports::TRAY_ID)
                 .icon(tauri::include_image!("icons/tray.png"))
                 .icon_as_template(true)
                 .tooltip("Ports")
@@ -196,6 +200,7 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
+            ports::start(app.handle())?;
             Ok(())
         })
         .on_window_event(|window, event| match (window.label(), event) {
@@ -240,9 +245,13 @@ pub fn run() {
             ports::rules::get_rules,
             ports::rules::update_rules,
             ports::autoclean::auto_cleanup_log,
+            ports::diagnostics::preview_diagnostics,
+            ports::diagnostics::save_diagnostics,
             settings::get_settings,
             settings::get_settings_defaults,
             settings::set_alerts,
+            settings::set_health,
+            settings::set_tray_metric,
             settings::set_stop_grace,
             settings::set_idle_after,
             settings::set_shortcut,

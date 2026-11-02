@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::history::{Growth, GrowthRule};
 use super::sampler::{Kind, Server};
 
 const REPEAT_AFTER_MS: u64 = 60 * 60_000;
@@ -14,6 +15,8 @@ pub struct AlertSettings {
     pub enabled: bool,
     #[serde(default)]
     pub threshold_bytes: Option<u64>,
+    #[serde(default)]
+    pub growth: GrowthRule,
 }
 
 impl Default for AlertSettings {
@@ -21,7 +24,59 @@ impl Default for AlertSettings {
         Self {
             enabled: true,
             threshold_bytes: Some(2 * 1024 * 1024 * 1024),
+            growth: GrowthRule::default(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(
+    tag = "reason",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum Reason {
+    Growth(Growth),
+    Threshold {
+        used_bytes: u64,
+        threshold_bytes: u64,
+    },
+}
+
+impl Reason {
+    fn body(&self) -> String {
+        match self {
+            Self::Growth(growth) => format!(
+                "Grew by {} in {} minutes and keeps growing.",
+                bytes(growth.bytes),
+                growth.minutes
+            ),
+            Self::Threshold {
+                used_bytes,
+                threshold_bytes,
+            } => format!(
+                "Uses {}, above your {} alert.",
+                bytes(*used_bytes),
+                bytes(*threshold_bytes)
+            ),
+        }
+    }
+}
+
+pub fn reason(settings: AlertSettings, server: &Server) -> Option<Reason> {
+    if !matches!(server.kind, Kind::Dev | Kind::Database) {
+        return None;
+    }
+    server.pid?;
+    match server.growth {
+        Some(growth) if settings.enabled => Some(Reason::Growth(growth)),
+        _ => settings
+            .threshold_bytes
+            .filter(|threshold| server.memory_bytes >= *threshold)
+            .map(|threshold_bytes| Reason::Threshold {
+                used_bytes: server.memory_bytes,
+                threshold_bytes,
+            }),
     }
 }
 
@@ -44,24 +99,10 @@ impl Alerts {
             .retain(|_, at| now.saturating_sub(*at) < REPEAT_AFTER_MS);
         servers
             .iter()
-            .filter(|server| matches!(server.kind, Kind::Dev | Kind::Database))
+            .filter(|server| server.snoozed_until.is_none())
             .filter_map(|server| {
-                server.pid?;
+                let reason = reason(settings, server)?;
                 let key = server.id.clone();
-                let body = if settings.enabled && server.leaking {
-                    let first = server.memory_history.first().copied().unwrap_or_default();
-                    let growth = server.memory_bytes.saturating_sub(first);
-                    format!("Grew by {} in 10 minutes and keeps growing.", bytes(growth))
-                } else {
-                    let threshold = settings
-                        .threshold_bytes
-                        .filter(|threshold| server.memory_bytes >= *threshold)?;
-                    format!(
-                        "Uses {}, above your {} alert.",
-                        bytes(server.memory_bytes),
-                        bytes(threshold)
-                    )
-                };
                 if self.sent.contains_key(&key) {
                     return None;
                 }
@@ -70,14 +111,14 @@ impl Alerts {
                     server_id: server.id.clone(),
                     port: server.port,
                     title: format!("{} on :{}", server.name, server.port),
-                    body,
+                    body: reason.body(),
                 })
             })
             .collect()
     }
 }
 
-fn bytes(bytes: u64) -> String {
+pub fn bytes(bytes: u64) -> String {
     let bytes = bytes as f64;
     if bytes >= GB {
         format!("{:.1} GB", bytes / GB)
@@ -88,6 +129,7 @@ fn bytes(bytes: u64) -> String {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use super::super::health::Health;
     use super::super::history::Status;
     use super::*;
 
@@ -125,8 +167,10 @@ pub(crate) mod tests {
             icon: None,
             kind: Kind::Dev,
             status: Status::Running,
-            leaking: false,
-            responding: true,
+            growth: None,
+            memory_alert: None,
+            snoozed_until: None,
+            health: Health::UNKNOWN,
             addresses: Vec::new(),
             exposed: false,
             lan_host: None,
@@ -136,6 +180,7 @@ pub(crate) mod tests {
             supervisor: None,
             parent: None,
             started_at: 0,
+            listener_started_at: 0,
             last_active_at: 0,
             memory_bytes,
             cpu_percent: 0.0,
@@ -148,7 +193,10 @@ pub(crate) mod tests {
 
     fn leaking(port: u16) -> Server {
         let mut server = server(port, 900 * MIB);
-        server.leaking = true;
+        server.growth = Some(Growth {
+            bytes: 600 * MIB,
+            minutes: 10,
+        });
         server.memory_history = vec![300 * MIB, 900 * MIB];
         server
     }
@@ -221,9 +269,51 @@ pub(crate) mod tests {
         let off = AlertSettings {
             enabled: false,
             threshold_bytes: None,
+            ..AlertSettings::default()
         };
         let mut big_leak = leaking(5173);
         big_leak.memory_bytes = 8 * GIB;
         assert!(alerts.due(off, &[big_leak], 0).is_empty());
+    }
+
+    #[test]
+    fn snoozing_one_server_leaves_the_others_alerting() {
+        let mut alerts = Alerts::default();
+        let mut snoozed = leaking(3000);
+        snoozed.snoozed_until = Some(60 * MINUTE);
+        let due = alerts.due(AlertSettings::default(), &[snoozed, leaking(5173)], 0);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].port, 5173);
+    }
+
+    #[test]
+    fn explains_growth_and_threshold_apart() {
+        let settings = AlertSettings::default();
+        assert_eq!(
+            reason(settings, &leaking(3000)),
+            Some(Reason::Growth(Growth {
+                bytes: 600 * MIB,
+                minutes: 10,
+            }))
+        );
+        assert_eq!(
+            reason(settings, &server(5173, 3 * GIB)),
+            Some(Reason::Threshold {
+                used_bytes: 3 * GIB,
+                threshold_bytes: 2 * GIB,
+            })
+        );
+        assert_eq!(reason(settings, &server(5173, GIB)), None);
+    }
+
+    #[test]
+    fn a_replacement_process_alerts_on_its_own() {
+        let mut alerts = Alerts::default();
+        let settings = AlertSettings::default();
+        let first = leaking(3000);
+        let mut replacement = leaking(3000);
+        replacement.id = "process:new:3000".into();
+        assert_eq!(alerts.due(settings, &[first], 0).len(), 1);
+        assert_eq!(alerts.due(settings, &[replacement], MINUTE).len(), 1);
     }
 }

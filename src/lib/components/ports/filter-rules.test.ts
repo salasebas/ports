@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { rules, type RulesChange } from "$lib/rules.svelte";
 import AutoCleanupSettings from "./auto-cleanup-settings.svelte";
 import FilterRules from "./filter-rules.svelte";
+import WatchSettings from "./watch-settings.svelte";
 
 vi.mock("$lib/platform", async (original) => ({ ...(await original<object>()), isMac: true }));
 
@@ -23,6 +24,10 @@ beforeEach(() => {
 		if (change.kind === "filters") Object.assign(next, { include: change.include, exclude: change.exclude });
 		if (change.kind === "unhide") next.hidden = next.hidden.filter((entry) => entry !== change.entry);
 		if (change.kind === "autoCleanup") next.autoCleanup = { policy: change.policy, paused: change.paused };
+		if (change.kind === "watch") {
+			const { [change.key]: _, ...others } = next.watches;
+			next.watches = change.events.length ? { ...others, [change.key]: change.events } : others;
+		}
 		return {
 			rules: { revision: current.revision + 1, rules: next },
 			snapshot: { revision: 1, servers: [], system: {} },
@@ -38,7 +43,7 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-function show(component: typeof FilterRules | typeof AutoCleanupSettings) {
+function show(component: typeof FilterRules | typeof AutoCleanupSettings | typeof WatchSettings) {
 	view = mount(component, { target: document.body, props: { id: "test" } });
 	flushSync();
 }
@@ -117,4 +122,31 @@ it("confirms turning automatic clean up on and off", async () => {
 	scope.value = "off";
 	scope.dispatchEvent(new Event("change", { bubbles: true }));
 	await vi.waitFor(() => expect(confirmed).toHaveBeenCalledWith("Automatic clean up off"));
+});
+
+it("watches a port for every event, and removing it stops watching", async () => {
+	show(WatchSettings);
+	type(field("#test-watch-port"), "3000");
+	document.querySelector("form")!.requestSubmit();
+	await vi.waitFor(() => expect(rules.current.rules.watches["port:3000"]).toEqual(["started", "stopped", "health"]));
+	flushSync();
+	document.querySelector<HTMLButtonElement>('[aria-label="Stop watching :3000"]')!.click();
+	await vi.waitFor(() => expect(rules.current.rules.watches).toEqual({}));
+});
+
+it("refuses a number that isn't a port without saving", async () => {
+	const change = vi.spyOn(rules, "change");
+	show(WatchSettings);
+	type(field("#test-watch-port"), "70000");
+	document.querySelector("form")!.requestSubmit();
+	await vi.waitFor(() => expect(document.body.textContent).toContain("Use a whole port number from 1 to 65535"));
+	expect(change).not.toHaveBeenCalled();
+});
+
+it("shows why a watch could not be saved", async () => {
+	refused = true;
+	show(WatchSettings);
+	type(field("#test-watch-port"), "3000");
+	document.querySelector("form")!.requestSubmit();
+	await vi.waitFor(() => expect(document.body.textContent).toContain("Could not save the rules"));
 });

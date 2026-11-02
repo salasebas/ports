@@ -6,10 +6,14 @@ import { listRows } from "./grouping";
 import { mockSnapshot } from "./mock";
 import { hiddenPort, hiddenProcess, PortsStore, serverKey, SNAPSHOT_EVENT } from "./ports-store.svelte";
 import { preferences } from "./preferences.svelte";
-import type { RulesChange } from "$lib/rules.svelte";
+import { rules, type RulesChange } from "$lib/rules.svelte";
 import type { SavedProject } from "./projects";
 import { processTree } from "./resources";
 import type { ControlPreview, Server, Snapshot, ServerTarget } from "./types";
+
+function showKinds(shownKinds: Server["kind"][]) {
+	rules.apply({ revision: rules.current.revision + 1, rules: { ...rules.current.rules, shownKinds } });
+}
 
 function server(overrides: Partial<Server>): Server {
 	const value: Omit<Server, "id" | "target" | "resources"> = {
@@ -20,7 +24,7 @@ function server(overrides: Partial<Server>): Server {
 		name: "web",
 		kind: "dev",
 		status: "running",
-		responding: true,
+		health: { state: "unknown" },
 		addresses: ["127.0.0.1"],
 		exposed: false,
 		protected: false,
@@ -143,7 +147,7 @@ function backend(reply?: (cmd: string) => unknown) {
 beforeEach(() => {
 	revision = 0;
 	preferences.confirmActions.current = true;
-	preferences.shownKinds.current = ["dev", "database", "container"];
+	showKinds(["dev", "database", "container"]);
 	preferences.sort.current = { key: "port", descending: false };
 	preferences.groupBy.current = "flat";
 	preferences.collapsedGroups.current = [];
@@ -337,7 +341,7 @@ describe("kinds of server", () => {
 	it("hides apps and system services until the user shows them", () => {
 		const store = storeWith(web, editor);
 		expect(store.filtered).toEqual([web]);
-		preferences.shownKinds.current = [...preferences.shownKinds.current, "other"];
+		showKinds([...rules.current.rules.shownKinds, "other"]);
 		expect(store.filtered).toEqual([web, editor]);
 	});
 

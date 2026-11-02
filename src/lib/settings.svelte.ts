@@ -5,16 +5,59 @@ import { resolve } from "$app/paths";
 
 export const SETTINGS_EVENT = "ports://settings";
 
+export interface GrowthRule {
+	windowMinutes: number;
+	minGrowthBytes: number;
+}
+
 export interface AlertSettings {
 	enabled: boolean;
 	thresholdBytes: number | null;
+	growth: GrowthRule;
 }
 
+export interface HealthSettings {
+	enabled: boolean;
+	everySeconds: number;
+	timeoutSeconds: number;
+}
+
+export type TrayMetric = "off" | "servers" | "memory" | "cpu" | "serversAndMemory";
+
+const MB = 1024 ** 2;
 const GB = 1024 ** 3;
 
 export const alertThresholds = [
 	{ value: "off", label: "Off" },
 	...[1, 2, 4, 8].map((gb) => ({ value: String(gb * GB), label: `Above ${gb} GB` })),
+];
+
+export const growthWindows = [5, 10].map((minutes) => ({ value: String(minutes), label: `${minutes} minutes` }));
+
+export const growthMinimums = [
+	{ value: String(50 * MB), label: "50 MB" },
+	{ value: String(100 * MB), label: "100 MB" },
+	{ value: String(200 * MB), label: "200 MB" },
+	{ value: String(500 * MB), label: "500 MB" },
+	{ value: String(GB), label: "1 GB" },
+];
+
+export const healthCadences = [5, 10, 30, 60].map((seconds) => ({
+	value: String(seconds),
+	label: seconds === 60 ? "Every minute" : `Every ${seconds} seconds`,
+}));
+
+export const healthTimeouts = [1, 3, 5, 10].map((seconds) => ({
+	value: String(seconds),
+	label: seconds === 1 ? "1 second" : `${seconds} seconds`,
+}));
+
+export const trayMetrics: { value: TrayMetric; label: string }[] = [
+	{ value: "off", label: "Off" },
+	{ value: "servers", label: "Servers" },
+	{ value: "memory", label: "Memory" },
+	{ value: "cpu", label: "CPU" },
+	{ value: "serversAndMemory", label: "Servers and memory" },
 ];
 
 export const stopGraces = [1, 3, 5, 10, 30, 60].map((seconds) => ({
@@ -31,6 +74,8 @@ export interface Settings {
 	revision: number;
 	shortcut: string | null;
 	alerts: AlertSettings;
+	health: HealthSettings;
+	trayMetric: TrayMetric;
 	stopGraceSeconds: number;
 	idleAfterMinutes: number;
 }
@@ -39,7 +84,13 @@ export class BackendSettings {
 	current = $state.raw<Settings>({
 		revision: -1,
 		shortcut: null,
-		alerts: { enabled: true, thresholdBytes: 2 * GB },
+		alerts: {
+			enabled: true,
+			thresholdBytes: 2 * GB,
+			growth: { windowMinutes: 10, minGrowthBytes: 50 * MB },
+		},
+		health: { enabled: true, everySeconds: 10, timeoutSeconds: 3 },
+		trayMetric: "off",
 		stopGraceSeconds: 3,
 		idleAfterMinutes: 5,
 	});
@@ -71,6 +122,14 @@ export class BackendSettings {
 
 	setAlerts = async (alerts: Partial<AlertSettings>) => {
 		this.apply(await invoke<Settings>("set_alerts", { alerts }));
+	};
+
+	setHealth = async (health: HealthSettings) => {
+		this.apply(await invoke<Settings>("set_health", { health }));
+	};
+
+	setTrayMetric = async (metric: TrayMetric) => {
+		this.apply(await invoke<Settings>("set_tray_metric", { metric }));
 	};
 
 	setStopGrace = async (seconds: number) => {
